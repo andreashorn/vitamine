@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import csv
 import filecmp
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -39,6 +40,7 @@ from .paths import (
     validate_database,
 )
 from .scripts.maintain_publications import maintain
+from .scripts.import_uploaded_cv import import_cv_file
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -102,6 +104,16 @@ ENTRY_FIELDS = [
     "include_biosketch",
     "language",
 ]
+
+CV_IMPORT_SETTING_FIELDS = {
+    "provider": "none",
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_model": "llama3.1:8b",
+    "api_base_url": "https://api.openai.com/v1",
+    "api_model": "gpt-4.1-mini",
+    "bundled_llama_model_path": "",
+    "bundled_llama_ctx_size": "4096",
+}
 
 
 app = FastAPI(title="VitaMine")
@@ -1038,6 +1050,7 @@ def get_connections() -> dict[str, Any]:
             "zotero_source_mode": get_setting(con, "zotero_source_mode") or "my_publications",
             "zotero_collection_key": get_setting(con, "zotero_collection_key"),
             "zotero_collection_name": get_setting(con, "zotero_collection_name"),
+            "publication_source_policy": get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation",
         }
 
 
@@ -1063,27 +1076,27 @@ async def update_connections(request: Request) -> dict[str, Any]:
     collection_name = str(payload.get("zotero_collection_name") or "").strip()
     if source_mode == "collection" and not collection_key:
         raise HTTPException(status_code=400, detail="Choose a Zotero collection.")
+    source_policy = str(payload.get("publication_source_policy") or "zotero_primary_orcid_validation").strip()
+    if source_policy not in {
+        "zotero_only",
+        "orcid_only",
+        "zotero_primary_orcid_validation",
+        "orcid_primary_zotero_validation",
+    }:
+        raise HTTPException(status_code=400, detail="Choose a publication source policy.")
     with connect() as con:
         if orcid_id:
-            con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
-            con.execute(
-                """
-                INSERT INTO person_identifiers
-                  (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
-                VALUES (1, 'ORCID', 'ORCID iD', ?, ?, 'manual', datetime('now'), 'Used for ORCID public-work sync.')
-                ON CONFLICT(person_id, platform, identifier_type, identifier_value) DO UPDATE SET
-                  url=excluded.url,
-                  verified_at=excluded.verified_at,
-                  notes=excluded.notes
-                """,
-                (orcid_id, f"https://orcid.org/{orcid_id}"),
-            )
+            upsert_person_orcid_identifier(con, orcid_id)
+        else:
+            con.execute("UPDATE person SET orcid_id='' WHERE id=1")
+            con.execute("DELETE FROM person_identifiers WHERE person_id=1 AND lower(platform)='orcid'")
         set_setting(con, "zotero_library_type", library_type)
         set_setting(con, "zotero_library_id", library_id)
         set_setting(con, "zotero_group_name", group_name)
         set_setting(con, "zotero_source_mode", source_mode)
         set_setting(con, "zotero_collection_key", collection_key)
         set_setting(con, "zotero_collection_name", collection_name)
+        set_setting(con, "publication_source_policy", source_policy)
         if api_key:
             set_setting(con, "zotero_api_key", api_key)
         effective_key = api_key or get_setting(con, "zotero_api_key")
@@ -1226,21 +1239,79 @@ def get_person_identifiers() -> dict[str, Any]:
 def identifier_payload(payload: dict[str, Any]) -> dict[str, str | None]:
     platform = str(payload.get("platform") or "").strip()
     identifier_type = str(payload.get("identifier_type") or "").strip()
+    identifier_value = str(payload.get("identifier_value") or "").strip() or None
     url = str(payload.get("url") or "").strip()
     if not platform:
         raise HTTPException(status_code=400, detail="Platform is required")
     if not identifier_type:
         raise HTTPException(status_code=400, detail="Identifier type is required")
+    if not url and platform.casefold() == "orcid" and identifier_value:
+        url = f"https://orcid.org/{identifier_value}"
     if not url:
         raise HTTPException(status_code=400, detail="URL is required")
     return {
         "platform": platform,
         "identifier_type": identifier_type,
-        "identifier_value": str(payload.get("identifier_value") or "").strip() or None,
+        "identifier_value": identifier_value,
         "url": url,
         "source": str(payload.get("source") or "").strip() or "manual",
         "notes": str(payload.get("notes") or "").strip() or None,
     }
+
+
+def upsert_person_orcid_identifier(
+    con: sqlite3.Connection,
+    orcid_id: str,
+    *,
+    source: str = "manual",
+    notes: str = "Used for ORCID public-work sync.",
+) -> int:
+    if not orcid_id:
+        raise HTTPException(status_code=400, detail="ORCID iD is required")
+    row = con.execute(
+        """
+        SELECT id
+        FROM person_identifiers
+        WHERE person_id = 1 AND lower(platform) = 'orcid'
+        ORDER BY id
+        LIMIT 1
+        """
+    ).fetchone()
+    url = f"https://orcid.org/{orcid_id}"
+    if row:
+        con.execute(
+            """
+            DELETE FROM person_identifiers
+            WHERE person_id=1 AND lower(platform)='orcid' AND id != ?
+            """,
+            (row["id"],),
+        )
+        con.execute(
+            """
+            UPDATE person_identifiers
+            SET platform='ORCID',
+                identifier_type='ORCID iD',
+                identifier_value=?,
+                url=?,
+                source=?,
+                verified_at=datetime('now'),
+                notes=?
+            WHERE id=? AND person_id=1
+            """,
+            (orcid_id, url, source, notes, row["id"]),
+        )
+    else:
+        con.execute(
+            """
+            INSERT INTO person_identifiers
+              (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+            VALUES (1, 'ORCID', 'ORCID iD', ?, ?, ?, datetime('now'), ?)
+            """,
+            (orcid_id, url, source, notes),
+        )
+        row = con.execute("SELECT last_insert_rowid() AS id").fetchone()
+    con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
+    return int(row["id"])
 
 
 def sync_person_orcid_from_identifiers(con: sqlite3.Connection) -> None:
@@ -1253,14 +1324,22 @@ def sync_person_orcid_from_identifiers(con: sqlite3.Connection) -> None:
         LIMIT 1
         """
     ).fetchone()
-    if row:
-        con.execute("UPDATE person SET orcid_id=? WHERE id=1", (row["identifier_value"],))
+    con.execute("UPDATE person SET orcid_id=? WHERE id=1", ((row["identifier_value"] if row else "") or "",))
 
 
 @app.post("/api/person/identifiers")
 async def create_person_identifier(request: Request) -> dict[str, Any]:
     values = identifier_payload(await request.json())
     with connect() as con:
+        if values["platform"].casefold() == "orcid":
+            identifier_id = upsert_person_orcid_identifier(
+                con,
+                values["identifier_value"] or "",
+                source=values["source"] or "manual",
+                notes=values["notes"] or "Used for ORCID public-work sync.",
+            )
+            con.commit()
+            return {"ok": True, "id": identifier_id}
         cursor = con.execute(
             """
             INSERT INTO person_identifiers
@@ -1285,6 +1364,21 @@ async def create_person_identifier(request: Request) -> dict[str, Any]:
 async def update_person_identifier(identifier_id: int, request: Request) -> dict[str, Any]:
     values = identifier_payload(await request.json())
     with connect() as con:
+        if values["platform"].casefold() == "orcid":
+            exists = con.execute(
+                "SELECT id FROM person_identifiers WHERE id=? AND person_id=1",
+                (identifier_id,),
+            ).fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Identifier not found")
+            upsert_person_orcid_identifier(
+                con,
+                values["identifier_value"] or "",
+                source=values["source"] or "manual",
+                notes=values["notes"] or "Used for ORCID public-work sync.",
+            )
+            con.commit()
+            return {"ok": True}
         cursor = con.execute(
             """
             UPDATE person_identifiers
@@ -1525,7 +1619,8 @@ def list_publications(
             con.execute(
                 f"""
                 SELECT id, source, zotero_key, item_type, category, authors, title, venue, year, doi, pmid,
-                       include_short, include_ultrashort, selected_order, short_citation,
+                       url, abstract, extra, raw_citation, confidence,
+                       include_short, include_ultrashort, selected_order, short_selected_order, ultrashort_selected_order, short_citation,
                        impact_factor, impact_factor_year, metric_source, suppress_display, quality_note
                        , orcid_put_code, orcid_source, orcid_last_modified, orcid_path
                        , metadata_source, metadata_enriched_at, openalex_work_id, openalex_cited_by_count
@@ -1538,6 +1633,106 @@ def list_publications(
             ).fetchall()
         )
     return {"publications": rows}
+
+
+PUBLICATION_FIELDS = [
+    "item_type",
+    "category",
+    "authors",
+    "title",
+    "venue",
+    "year",
+    "doi",
+    "pmid",
+    "url",
+    "abstract",
+    "extra",
+    "raw_citation",
+    "confidence",
+    "include_short",
+    "include_ultrashort",
+    "short_citation",
+    "suppress_display",
+    "quality_note",
+]
+
+
+def normalize_publication(payload: dict[str, Any]) -> dict[str, Any]:
+    title = str(payload.get("title") or "").strip()
+    raw_citation = str(payload.get("raw_citation") or "").strip()
+    if not title and not raw_citation:
+        raise HTTPException(status_code=400, detail="Title or raw citation is required")
+    authors = str(payload.get("authors") or "").strip()
+    venue = str(payload.get("venue") or "").strip()
+    year = str(payload.get("year") or "").strip()
+    category = str(payload.get("category") or "").strip() or "other"
+    item_type = str(payload.get("item_type") or "").strip() or "journal-article"
+    if not raw_citation:
+        raw_citation = ". ".join(part for part in [authors, title, venue, year] if part)
+    return {
+        "item_type": item_type,
+        "category": category,
+        "authors": authors,
+        "title": title,
+        "venue": venue,
+        "year": year,
+        "doi": str(payload.get("doi") or "").strip(),
+        "pmid": str(payload.get("pmid") or "").strip(),
+        "url": str(payload.get("url") or "").strip(),
+        "abstract": str(payload.get("abstract") or "").strip(),
+        "extra": str(payload.get("extra") or "").strip(),
+        "raw_citation": raw_citation,
+        "confidence": str(payload.get("confidence") or "").strip() or "manual",
+        "include_short": 1 if payload.get("include_short") else 0,
+        "include_ultrashort": 1 if payload.get("include_ultrashort") else 0,
+        "short_citation": str(payload.get("short_citation") or "").strip(),
+        "suppress_display": 1 if payload.get("suppress_display") else 0,
+        "quality_note": str(payload.get("quality_note") or "").strip(),
+    }
+
+
+@app.post("/api/publications")
+async def create_publication(request: Request) -> dict[str, Any]:
+    payload = normalize_publication(await request.json())
+    with connect() as con:
+        document_id = ensure_manual_document(con)
+        cursor = con.execute(
+            f"""
+            INSERT INTO publications (document_id, source, {', '.join(PUBLICATION_FIELDS)})
+            VALUES (?, 'manual', {', '.join('?' for _ in PUBLICATION_FIELDS)})
+            """,
+            (document_id, *[payload[field] for field in PUBLICATION_FIELDS]),
+        )
+        con.commit()
+    return {"ok": True, "id": cursor.lastrowid}
+
+
+@app.put("/api/publications/{publication_id}")
+async def update_publication(publication_id: int, request: Request) -> dict[str, Any]:
+    payload = normalize_publication(await request.json())
+    with connect() as con:
+        cursor = con.execute(
+            f"""
+            UPDATE publications
+            SET {', '.join(f'{field}=?' for field in PUBLICATION_FIELDS)}
+            WHERE id=?
+            """,
+            (*[payload[field] for field in PUBLICATION_FIELDS], publication_id),
+        )
+        con.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Publication not found")
+    return {"ok": True}
+
+
+@app.delete("/api/publications/{publication_id}")
+def delete_publication(publication_id: int) -> dict[str, Any]:
+    with connect() as con:
+        cursor = con.execute("DELETE FROM publications WHERE id=?", (publication_id,))
+        con.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Publication not found")
+    return {"ok": True}
 
 
 EXPORT_PROFILES = {
@@ -1948,6 +2143,27 @@ def build_response(stdout: str, cache_key: str, extra: dict[str, Any] | None = N
     return payload
 
 
+PUBLICATION_SOURCE_POLICIES = {
+    "zotero_only": ("zotero",),
+    "orcid_only": ("orcid",),
+    "zotero_primary_orcid_validation": ("zotero", "orcid"),
+    "orcid_primary_zotero_validation": ("orcid", "zotero"),
+}
+
+
+def publication_source_policy(con: sqlite3.Connection) -> str:
+    policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
+    return policy if policy in PUBLICATION_SOURCE_POLICIES else "zotero_primary_orcid_validation"
+
+
+def run_publication_source(source: str) -> subprocess.CompletedProcess[str]:
+    if source == "zotero":
+        return run_script("sync_zotero.py")
+    if source == "orcid":
+        return run_script("sync_orcid.py")
+    raise ValueError(f"Unknown publication source: {source}")
+
+
 @app.get("/api/export-settings")
 def export_settings() -> dict[str, Any]:
     with connect() as con:
@@ -2089,12 +2305,146 @@ async def import_database(file: UploadFile = File(...)) -> dict[str, Any]:
     return database_payload(db)
 
 
+def cv_import_settings(con: sqlite3.Connection, include_secret: bool = False) -> dict[str, Any]:
+    settings: dict[str, Any] = {
+        key: get_setting(con, f"cv_import_{key}") or default
+        for key, default in CV_IMPORT_SETTING_FIELDS.items()
+    }
+    api_key = get_setting(con, "cv_import_api_key") or os.environ.get("OPENAI_API_KEY") or ""
+    settings["api_key_set"] = bool(api_key)
+    if include_secret:
+        settings["api_key"] = api_key
+    return settings
+
+
+def cv_import_upload_name(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", Path(filename).stem).strip("._-") or "uploaded-cv"
+    if suffix not in {".docx", ".pdf", ".txt", ".md"}:
+        raise HTTPException(status_code=400, detail="Please upload a DOCX, PDF, TXT, or Markdown CV.")
+    return f"{stem}{suffix}"
+
+
+@app.get("/api/cv-import/settings")
+def get_cv_import_settings() -> dict[str, Any]:
+    with connect() as con:
+        return cv_import_settings(con, include_secret=False)
+
+
+@app.put("/api/cv-import/settings")
+async def update_cv_import_settings(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    provider = str(payload.get("provider") or "none").strip()
+    if provider not in {"none", "bundled_llama", "ollama", "openai", "openai_compatible"}:
+        raise HTTPException(status_code=400, detail="Unsupported CV import provider")
+    with connect() as con:
+        set_setting(con, "cv_import_provider", provider)
+        for key, default in CV_IMPORT_SETTING_FIELDS.items():
+            if key == "provider":
+                continue
+            value = str(payload.get(key) or default).strip()
+            set_setting(con, f"cv_import_{key}", value)
+        api_key = str(payload.get("api_key") or "").strip()
+        if api_key:
+            set_setting(con, "cv_import_api_key", api_key)
+        con.commit()
+        return cv_import_settings(con, include_secret=False)
+
+
+@app.post("/api/cv-import/upload")
+async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
+    if not files:
+        raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
+    upload_dir = DATA / "cv-imports"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    saved_paths: list[Path] = []
+    results: list[dict[str, Any]] = []
+    try:
+        with connect() as con:
+            settings = cv_import_settings(con, include_secret=True)
+            for index, file in enumerate(files, start=1):
+                filename = cv_import_upload_name(file.filename or f"uploaded-cv-{index}")
+                upload_path = upload_dir / f"{timestamp}-{index}-{filename}"
+                with upload_path.open("wb") as handle:
+                    shutil.copyfileobj(file.file, handle)
+                saved_paths.append(upload_path)
+                results.append(import_cv_file(con, upload_path, file.filename or filename, settings))
+            con.commit()
+    except HTTPException:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
+        raise
+    except RuntimeError as exc:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Could not import CV: {exc}") from exc
+    finally:
+        for file in files:
+            await file.close()
+    warnings = [warning for result in results for warning in result.get("warnings", [])]
+    return JSONResponse(
+        {
+            "ok": True,
+            "documents_imported": len(results),
+            "entries_inserted": sum(int(result.get("entries_inserted") or 0) for result in results),
+            "contributions_inserted": sum(int(result.get("contributions_inserted") or 0) for result in results),
+            "person_fields": max([int(result.get("person_fields") or 0) for result in results] or [0]),
+            "used_llm": any(bool(result.get("used_llm")) for result in results),
+            "provider": results[0].get("provider") if results else "none",
+            "warnings": warnings,
+            "results": results,
+        }
+    )
+
+
 @app.post("/api/actions/sync-zotero")
 def sync_zotero_action() -> JSONResponse:
     result = run_script("sync_zotero.py")
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     return JSONResponse({"ok": True, "stdout": result.stdout})
+
+
+@app.post("/api/actions/sync-publication-sources")
+def sync_publication_sources_action() -> JSONResponse:
+    with connect() as con:
+        policy = publication_source_policy(con)
+    results: list[dict[str, Any]] = []
+    for source in PUBLICATION_SOURCE_POLICIES[policy]:
+        result = run_publication_source(source)
+        results.append(
+            {
+                "source": source,
+                "ok": result.returncode == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
+        if result.returncode != 0:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "policy": policy,
+                    "results": results,
+                    "stderr": result.stderr[-4000:] or f"{source} sync failed.",
+                },
+                status_code=500,
+            )
+    return JSONResponse(
+        {
+            "ok": True,
+            "policy": policy,
+            "results": results,
+            "stdout": "\n".join(
+                f"[{row['source']}]\n{row['stdout'].strip()}" for row in results if row["stdout"].strip()
+            ),
+        }
+    )
 
 
 @app.post("/api/actions/maintain-publications")

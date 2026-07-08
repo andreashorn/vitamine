@@ -122,6 +122,64 @@ def text(value: str | None, *, bold: bool = False, size: str | None = None) -> s
     return f"#text({', '.join(args)})"
 
 
+def citation_cell(value: str | None) -> str:
+    value = clean(value)
+    value = re.sub(r"\s+([,.;:])", r"\1", value)
+    value = re.sub(r",(?=\S)", ", ", value)
+    value = re.sub(r"\s{2,}", " ", value)
+    return value.rstrip(" .")
+
+
+def sentence_part(value: str) -> str:
+    value = citation_cell(value)
+    return value if not value or value.endswith((".", "?", "!")) else f"{value}."
+
+
+def impact_factor_label(row: sqlite3.Row) -> str:
+    value = row["impact_factor"] if "impact_factor" in row.keys() else None
+    if value in (None, ""):
+        return ""
+    try:
+        formatted = f"{float(value):g}"
+    except (TypeError, ValueError):
+        formatted = clean(str(value))
+    year = citation_cell(row["impact_factor_year"] if "impact_factor_year" in row.keys() else "")
+    return f"IF {formatted} ({year})" if year else f"IF {formatted}"
+
+
+def typst_rich_text(value: str | None, *, bold_names: bool = False, underline: bool = False, italic: bool = False, size: str = "9pt") -> str:
+    value = clean(value)
+    if not value:
+        return text("", size=size)
+    if bold_names:
+        pieces = []
+        cursor = 0
+        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+            if match.start() > cursor:
+                before = value[cursor : match.start()]
+                stripped = before.rstrip()
+                if stripped:
+                    pieces.append(text(stripped, size=size))
+                if before and before[-1].isspace():
+                    pieces.append("#h(0.28em)")
+            pieces.append(text(match.group(0), bold=True, size=size))
+            cursor = match.end()
+        if cursor < len(value):
+            after = value[cursor:]
+            if after and after[0].isspace():
+                pieces.append("#h(0.28em)")
+                after = after.lstrip()
+            if after:
+                pieces.append(text(after, size=size))
+        return "".join(pieces)
+    body = text(value, size=size)
+    if italic:
+        body = f"#emph[{body}]"
+    if underline:
+        body = f"#underline[{body}]"
+    return body
+
+
 def period(row: sqlite3.Row) -> str:
     start = clean(row["start_date"])
     end = clean(row["end_date"])
@@ -168,16 +226,40 @@ def entry_detail(row: sqlite3.Row) -> str:
 
 
 def citation(row: sqlite3.Row) -> str:
-    authors = clean(row["authors"])
+    authors = citation_cell(row["authors"])
     if authors:
         author_parts = [part.strip() for part in authors.split(",") if part.strip()]
         if len(author_parts) > 4:
             authors = ", ".join(author_parts[:3]) + ", et al."
-    parts = [authors, clean(row["title"]), clean(row["venue"]), clean(row["year"])]
+    parts = [authors, citation_cell(row["title"]), citation_cell(row["venue"]), citation_cell(row["year"]), impact_factor_label(row)]
     out = ". ".join(part for part in parts if part)
-    if clean(row["doi"]):
-        out = f"{out}. doi:{clean(row['doi'])}"
+    if citation_cell(row["doi"]):
+        out = f"{out}. doi:{citation_cell(row['doi'])}"
     return out
+
+
+def typst_publication_citation(row: sqlite3.Row) -> str:
+    parts = []
+    authors = citation_cell(row["authors"])
+    if authors:
+        parts.append(typst_rich_text(sentence_part(authors), bold_names=True))
+    title = citation_cell(row["title"])
+    if title:
+        parts.append(text(sentence_part(title), size="9pt"))
+    venue = citation_cell(row["venue"])
+    if venue:
+        venue = venue.title() if venue.isupper() else venue
+        parts.append(typst_rich_text(sentence_part(venue), italic=True, underline=True))
+    year = citation_cell(row["year"])
+    if year:
+        parts.append(text(sentence_part(year), size="9pt"))
+    impact = impact_factor_label(row)
+    if impact:
+        parts.append(text(sentence_part(impact), size="9pt"))
+    doi = citation_cell(row["doi"])
+    if doi:
+        parts.append(text(sentence_part(f"doi:{doi}"), size="9pt"))
+    return "#h(0.28em)".join(parts)
 
 
 def load_data() -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row]]:
@@ -293,7 +375,7 @@ def build_typst() -> str:
         lines.append(f"\n#line(length: 100%)\n{text('Ausgewählte Publikationen' if LANG == 'de' else 'Selected Publications', bold=True)}")
         for index, row in enumerate(pubs, 1):
             lines.append("#grid(columns: (0.3in, 6.8in), gutter: 0.08in,\n"
-                         f"  [{text(str(index)+'.')}],\n  [{text(citation(row), size='9pt')}]\n)")
+                         f"  [{text(str(index)+'.')}],\n  [{typst_publication_citation(row)}]\n)")
     return "\n".join(lines) + "\n"
 
 
@@ -351,6 +433,63 @@ def set_paragraph_font(paragraph, *, size: float = 8.7, bold: bool = False, colo
     paragraph.paragraph_format.line_spacing = 1.03
 
 
+def set_run_font(run, *, size: float = 8.0, bold: bool = False, italic: bool = False, underline: bool = False, color: str = "111827") -> None:
+    run.font.name = "Arial"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.size = Pt(size)
+    run.bold = bold
+    run.italic = italic
+    run.underline = underline
+    run.font.color.rgb = RGBColor.from_string(color)
+
+
+def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: bool = False, underline: bool = False) -> None:
+    if not value:
+        return
+    if not bold_names:
+        set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
+        return
+    cursor = 0
+    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+        if match.start() > cursor:
+            set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
+        set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
+        cursor = match.end()
+    if cursor < len(value):
+        set_run_font(paragraph.add_run(value[cursor:]), italic=italic, underline=underline)
+
+
+def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
+    paragraph.clear()
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1.03
+    parts: list[tuple[str, bool, bool, bool]] = []
+    authors = citation_cell(row["authors"])
+    if authors:
+        parts.append((sentence_part(authors), True, False, False))
+    title = citation_cell(row["title"])
+    if title:
+        parts.append((sentence_part(title), False, False, False))
+    venue = citation_cell(row["venue"])
+    if venue:
+        venue = venue.title() if venue.isupper() else venue
+        parts.append((sentence_part(venue), False, True, True))
+    year = citation_cell(row["year"])
+    if year:
+        parts.append((sentence_part(year), False, False, False))
+    impact = impact_factor_label(row)
+    if impact:
+        parts.append((sentence_part(impact), False, False, False))
+    doi = citation_cell(row["doi"])
+    if doi:
+        parts.append((sentence_part(f"doi:{doi}"), False, False, False))
+    for index, (value, bold_names, italic, underline) in enumerate(parts):
+        if index:
+            set_run_font(paragraph.add_run(" "))
+        add_docx_piece(paragraph, value, bold_names=bold_names, italic=italic, underline=underline)
+
+
 def add_compact_heading(doc: Document, label: str) -> None:
     paragraph = doc.add_paragraph()
     paragraph.paragraph_format.space_before = Pt(6)
@@ -373,6 +512,11 @@ def set_table_width(table, widths) -> None:
         tbl_pr.append(tbl_w)
     tbl_w.set(qn("w:w"), str(total))
     tbl_w.set(qn("w:type"), "dxa")
+    tbl_layout = tbl_pr.first_child_found_in("w:tblLayout")
+    if tbl_layout is None:
+        tbl_layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn("w:type"), "fixed")
     tbl_grid = table._tbl.tblGrid
     for child in list(tbl_grid):
         tbl_grid.remove(child)
@@ -393,10 +537,11 @@ def set_table_width(table, widths) -> None:
 
 
 def add_entries_table(doc: Document, rows: list[sqlite3.Row]) -> None:
+    widths = [Inches(1.18), Inches(6.12)]
     table = doc.add_table(rows=0, cols=2)
     table.style = "Table Grid"
     set_table_borders(table)
-    set_table_width(table, [Inches(1.18), Inches(6.12)])
+    set_table_width(table, widths)
     for index, row in enumerate(rows):
         cells = table.add_row().cells
         cells[0].text = year_label(row)
@@ -410,17 +555,19 @@ def add_entries_table(doc: Document, rows: list[sqlite3.Row]) -> None:
             set_paragraph_font(paragraph, size=8.3, bold=True, color="334155")
         for paragraph in cells[1].paragraphs:
             set_paragraph_font(paragraph, size=8.4)
+    set_table_width(table, widths)
 
 
 def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
+    widths = [Inches(0.32), Inches(6.98)]
     table = doc.add_table(rows=0, cols=2)
     table.style = "Table Grid"
     set_table_borders(table)
-    set_table_width(table, [Inches(0.32), Inches(6.98)])
+    set_table_width(table, widths)
     for index, row in enumerate(pubs, 1):
         cells = table.add_row().cells
         cells[0].text = f"{index}."
-        cells[1].text = citation(row)
+        cells[1].text = ""
         for cell in cells:
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
             set_cell_margins(cell, top=60, start=75, bottom=60, end=75)
@@ -428,7 +575,8 @@ def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             set_paragraph_font(paragraph, size=8.0, bold=True, color="334155")
         for paragraph in cells[1].paragraphs:
-            set_paragraph_font(paragraph, size=8.0)
+            add_publication_docx(paragraph, row)
+    set_table_width(table, widths)
 
 
 def build_docx(path: Path) -> Path:

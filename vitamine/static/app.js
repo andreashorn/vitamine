@@ -5,6 +5,7 @@ const state = {
   journalMetrics: [],
   identifiers: [],
   connections: {},
+  cvImport: {},
   zoteroCollections: [],
   zoteroLibraries: [],
   exportProfiles: {
@@ -19,6 +20,8 @@ const state = {
     publication_limit: 20,
   },
   selectedEntry: null,
+  selectedPublicationId: null,
+  suppressPublicationClick: false,
   publicationSort: { key: "year", direction: "desc" },
   draggedPublicationId: null,
   draggedDropProfile: null,
@@ -36,6 +39,12 @@ const state = {
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+function on(selector, eventName, handler, options) {
+  const element = $(selector);
+  if (element) element.addEventListener(eventName, handler, options);
+  return element;
+}
 
 function setStatus(text) {
   $("#status").textContent = text;
@@ -58,6 +67,7 @@ function setActionButtons(disabled) {
   [
     "#syncZoteroDashboard",
     "#syncOrcidDashboard",
+    "#syncSourcesDashboard",
     "#enrichDoiDashboard",
     "#maintainPubsDashboard",
     "#fetchJournalMetrics",
@@ -69,6 +79,9 @@ function setActionButtons(disabled) {
     "#useExampleDatabase",
     "#createBlankDatabase",
     "#loadDatabase",
+    "#saveCvImportSettings",
+    "#chooseCvImportFile",
+    "#importCvFile",
     "#buildUltraDashboard",
     "#buildShortDashboard",
     "#buildLongDashboard",
@@ -163,6 +176,81 @@ async function chooseDatabaseFile() {
   }
 }
 
+async function loadCvImportSettings() {
+  if (!$("#cvImportProvider")) return;
+  const data = await api("/api/cv-import/settings");
+  state.cvImport = data;
+  $("#cvImportProvider").value = data.provider || "none";
+  $("#cvImportOllamaUrl").value = data.ollama_url || "http://127.0.0.1:11434";
+  $("#cvImportOllamaModel").value = data.ollama_model || "llama3.1:8b";
+  $("#cvImportApiBaseUrl").value = data.api_base_url || "https://api.openai.com/v1";
+  $("#cvImportApiModel").value = data.api_model || "gpt-4.1-mini";
+  $("#cvImportApiKey").value = "";
+  $("#cvImportKeyStatus").textContent = data.api_key_set ? "API key saved" : "No API key";
+  updateCvImportProviderVisibility();
+}
+
+function updateCvImportProviderVisibility() {
+  const providerSelect = $("#cvImportProvider");
+  if (!providerSelect) return;
+  const provider = providerSelect.value;
+  const ollamaFields = $("#cvImportOllamaFields");
+  const apiFields = $("#cvImportApiFields");
+  const apiBaseUrlField = $("#cvImportApiBaseUrlField");
+  const apiModelField = $("#cvImportApiModelField");
+  if (ollamaFields) ollamaFields.hidden = provider !== "ollama";
+  if (apiFields) apiFields.hidden = !["openai", "openai_compatible"].includes(provider);
+  if (apiBaseUrlField) apiBaseUrlField.hidden = provider !== "openai_compatible";
+  if (apiModelField) apiModelField.hidden = provider !== "openai_compatible";
+}
+
+async function saveCvImportSettings() {
+  if (!$("#cvImportProvider")) return;
+  await api("/api/cv-import/settings", {
+    method: "PUT",
+    body: JSON.stringify({
+      provider: $("#cvImportProvider").value,
+      ollama_url: $("#cvImportOllamaUrl").value,
+      ollama_model: $("#cvImportOllamaModel").value,
+      api_base_url: $("#cvImportApiBaseUrl").value,
+      api_model: $("#cvImportApiModel").value,
+      api_key: $("#cvImportApiKey").value,
+    }),
+  });
+  setStatus("CV import settings saved");
+  await loadCvImportSettings();
+}
+
+async function importCvFiles(files) {
+  files = Array.from(files || []);
+  if (!files.length) return;
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  setStatus(`Importing ${files.length} CV document${files.length === 1 ? "" : "s"}...`);
+  setActionButtons(true);
+  try {
+    const data = await api("/api/cv-import/upload", {
+      method: "POST",
+      body: form,
+    });
+    const mode = data.used_llm ? "LLM" : "heuristic";
+    const warningText = (data.warnings || []).length ? `; ${data.warnings.length} warning(s)` : "";
+    if ($("#cvImportOutput")) $("#cvImportOutput").textContent = JSON.stringify(data, null, 2);
+    setStatus(`Imported ${data.entries_inserted || 0} entries and ${data.contributions_inserted || 0} contributions via ${mode}${warningText}`);
+    await loadSummary();
+    await loadMetrics();
+    await loadEntries();
+    await loadPerson();
+    await loadBiosketch();
+  } catch (error) {
+    if ($("#cvImportOutput")) $("#cvImportOutput").textContent = error.message;
+    setStatus(error.message);
+  } finally {
+    setActionButtons(false);
+    if ($("#cvImportFileInput")) $("#cvImportFileInput").value = "";
+  }
+}
+
 async function loadConnections() {
   const data = await api("/api/connections");
   state.connections = data;
@@ -171,6 +259,7 @@ async function loadConnections() {
   renderZoteroLibraries();
   $("#connectionZoteroLibrary").value = data.zotero_library_value || "";
   $("#connectionZoteroSource").value = data.zotero_source_mode || "my_publications";
+  $("#publicationSourcePolicy").value = data.publication_source_policy || "zotero_primary_orcid_validation";
   renderZoteroCollections();
   $("#connectionStatus").textContent = data.zotero_api_key_set ? "Zotero key saved" : "No Zotero key";
   updateZoteroSourceVisibility();
@@ -189,6 +278,7 @@ async function saveConnections(event) {
       zotero_source_mode: sourceMode,
       zotero_collection_key: selected?.key || "",
       zotero_collection_name: selected?.name || "",
+      publication_source_policy: $("#publicationSourcePolicy").value,
     }),
   });
   $("#connectionZoteroKey").value = "";
@@ -331,7 +421,7 @@ async function loadMetrics() {
     metricCard("Ultrashort", pubs.selected_ultrashort || 0),
     metricCard("ORCID matched", pubs.orcid_matched || 0),
     metricCard("Citation metrics", pubs.citation_metric_count || 0),
-    metricCard("OpenAlex cites", pubs.openalex_cited_by_total || 0),
+    metricCard("OpenAlex Citations", pubs.openalex_cited_by_total || 0),
     metricCard("Impact factors", pubs.impact_factor_count || 0),
     metricCard("Hidden/problem", pubs.suppressed || 0),
     metricCard("Missing year", pubs.missing_year || 0),
@@ -693,7 +783,7 @@ async function saveExportSettings() {
     method: "PUT",
     body: JSON.stringify({ home_language_label: label }),
   });
-  setStatus("Export language label saved");
+  setStatus("Native / second CV language saved");
 }
 
 function refreshExportLinks(profile, data) {
@@ -966,6 +1056,7 @@ async function saveIdentifier(event) {
   setStatus("Identifier saved");
   clearIdentifierForm();
   await loadPersonIdentifiers();
+  await loadConnections();
 }
 
 async function deleteIdentifier() {
@@ -975,6 +1066,7 @@ async function deleteIdentifier() {
   setStatus("Identifier deleted");
   clearIdentifierForm();
   await loadPersonIdentifiers();
+  await loadConnections();
 }
 
 async function savePerson(event) {
@@ -984,6 +1076,7 @@ async function savePerson(event) {
     payload[key] = value;
   });
   await api("/api/person", { method: "PUT", body: JSON.stringify(payload) });
+  await saveExportSettings();
   setStatus("Person saved");
   await loadCollaborationMap();
 }
@@ -1032,7 +1125,16 @@ async function loadPublications() {
     </tr>`)
     .join("");
   $$("#publicationsBody tr[data-publication-id]").forEach((row) => {
+    row.classList.toggle("selected", Number(row.dataset.publicationId) === state.selectedPublicationId);
+    row.addEventListener("click", () => {
+      if (state.suppressPublicationClick) return;
+      editPublication(Number(row.dataset.publicationId));
+    });
     row.addEventListener("dragstart", (event) => {
+      state.suppressPublicationClick = true;
+      setTimeout(() => {
+        state.suppressPublicationClick = false;
+      }, 150);
       state.draggedPublicationId = Number(row.dataset.publicationId);
       state.draggedDropProfile = null;
       state.draggedDropId = null;
@@ -1041,7 +1143,123 @@ async function loadPublications() {
       event.dataTransfer.setData("text/plain", String(state.draggedPublicationId));
     });
   });
+  if (state.selectedPublicationId && !state.publications.some((pub) => pub.id === state.selectedPublicationId)) {
+    clearPublicationForm();
+  }
   renderPublicationSortIndicators();
+}
+
+function clearPublicationForm() {
+  state.selectedPublicationId = null;
+  $("#publicationForm").reset();
+  $("#publicationId").value = "";
+  $("#publicationCategory").value = "peer_reviewed";
+  $$("#publicationsBody tr[data-publication-id]").forEach((row) => row.classList.remove("selected"));
+}
+
+function openPublicationEditor() {
+  const dialog = $("#publicationDialog");
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute("open", "");
+}
+
+function closePublicationEditor() {
+  const dialog = $("#publicationDialog");
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function editPublication(id) {
+  const pub = state.publications.find((row) => row.id === id);
+  if (!pub) return;
+  state.selectedPublicationId = id;
+  $("#publicationId").value = pub.id;
+  $("#publicationTitle").value = pub.title || "";
+  $("#publicationAuthors").value = pub.authors || "";
+  $("#publicationYear").value = pub.year || "";
+  $("#publicationCategory").value = pub.category || "";
+  $("#publicationVenue").value = pub.venue || "";
+  $("#publicationDoi").value = pub.doi || "";
+  $("#publicationPmid").value = pub.pmid || "";
+  $("#publicationUrl").value = pub.url || "";
+  $("#publicationRawCitation").value = pub.raw_citation || "";
+  $("#publicationShortCitation").value = pub.short_citation || "";
+  $("#publicationIncludeUltra").checked = Boolean(pub.include_ultrashort);
+  $("#publicationIncludeShort").checked = Boolean(pub.include_short);
+  $("#publicationSuppress").checked = Boolean(pub.suppress_display);
+  $("#publicationQualityNote").value = pub.quality_note || "";
+  $$("#publicationsBody tr[data-publication-id]").forEach((row) => {
+    row.classList.toggle("selected", Number(row.dataset.publicationId) === id);
+  });
+  openPublicationEditor();
+}
+
+function publicationPayload() {
+  return {
+    title: $("#publicationTitle").value,
+    authors: $("#publicationAuthors").value,
+    year: $("#publicationYear").value,
+    category: $("#publicationCategory").value,
+    venue: $("#publicationVenue").value,
+    doi: $("#publicationDoi").value,
+    pmid: $("#publicationPmid").value,
+    url: $("#publicationUrl").value,
+    raw_citation: $("#publicationRawCitation").value,
+    short_citation: $("#publicationShortCitation").value,
+    include_ultrashort: $("#publicationIncludeUltra").checked,
+    include_short: $("#publicationIncludeShort").checked,
+    suppress_display: $("#publicationSuppress").checked,
+    quality_note: $("#publicationQualityNote").value,
+  };
+}
+
+async function syncPublicationProfileFlag(profile, publicationId, include) {
+  const current = state.exportProfiles[profile] || {};
+  let ids = (current.selected || []).map((pub) => pub.id).filter((id) => id !== publicationId);
+  if (include) ids = ids.concat(publicationId);
+  await api(`/api/export-profiles/${profile}/publications`, {
+    method: "PUT",
+    body: JSON.stringify({
+      publication_limit: Math.max(Number(current.settings?.publication_limit || 10), ids.length, 1),
+      authorship_filter: current.settings?.authorship_filter || "first_last",
+      publications: ids.map((id, index) => ({ id, order: index + 1 })),
+    }),
+  });
+}
+
+async function savePublication(event) {
+  event.preventDefault();
+  const id = $("#publicationId").value;
+  const payload = publicationPayload();
+  const path = id ? `/api/publications/${id}` : "/api/publications";
+  const method = id ? "PUT" : "POST";
+  const data = await api(path, { method, body: JSON.stringify(payload) });
+  state.selectedPublicationId = Number(id || data.id || 0) || null;
+  if (state.selectedPublicationId) {
+    await syncPublicationProfileFlag("ultrashort", state.selectedPublicationId, payload.include_ultrashort);
+    await syncPublicationProfileFlag("short", state.selectedPublicationId, payload.include_short);
+  }
+  closePublicationEditor();
+  setStatus("Publication saved");
+  await loadPublications();
+  await loadSummary();
+  await loadExportProfile("ultrashort");
+  await loadExportProfile("short");
+  await loadBiosketch();
+}
+
+async function deletePublication() {
+  const id = $("#publicationId").value;
+  if (!id) return;
+  await api(`/api/publications/${id}`, { method: "DELETE" });
+  clearPublicationForm();
+  closePublicationEditor();
+  setStatus("Publication deleted");
+  await loadPublications();
+  await loadSummary();
+  await loadExportProfile("ultrashort");
+  await loadExportProfile("short");
+  await loadBiosketch();
 }
 
 async function loadJournalMetrics() {
@@ -1597,6 +1815,20 @@ async function init() {
   $("#useExampleDatabase").addEventListener("click", useExampleDatabase);
   $("#createBlankDatabase").addEventListener("click", createBlankDatabase);
   $("#loadDatabase").addEventListener("click", chooseDatabaseFile);
+  on("#cvImportProvider", "change", updateCvImportProviderVisibility);
+  on("#saveCvImportSettings", "click", saveCvImportSettings);
+  on("#chooseCvImportFile", "click", () => $("#cvImportFileInput")?.click());
+  on("#cvImportFileInput", "change", (event) => importCvFiles(event.target.files));
+  on("#importCvDropzone", "dragover", (event) => {
+    event.preventDefault();
+    $("#importCvDropzone")?.classList.add("dragover");
+  });
+  on("#importCvDropzone", "dragleave", () => $("#importCvDropzone")?.classList.remove("dragover"));
+  on("#importCvDropzone", "drop", (event) => {
+    event.preventDefault();
+    $("#importCvDropzone")?.classList.remove("dragover");
+    importCvFiles(event.dataTransfer.files);
+  });
   $("#databaseFileInput").addEventListener("change", async (event) => {
     try {
       await importDatabaseFile(event.target.files[0]);
@@ -1609,6 +1841,16 @@ async function init() {
   $$("#publicationsView th[data-sort]").forEach((header) => {
     header.addEventListener("click", () => sortPublicationsBy(header.dataset.sort));
   });
+  $("#newPublication").addEventListener("click", () => {
+    clearPublicationForm();
+    openPublicationEditor();
+  });
+  $("#closePublicationEditor").addEventListener("click", closePublicationEditor);
+  $("#publicationDialog").addEventListener("click", (event) => {
+    if (event.target === $("#publicationDialog")) closePublicationEditor();
+  });
+  $("#publicationForm").addEventListener("submit", savePublication);
+  $("#deletePublication").addEventListener("click", deletePublication);
   $("#newEntry").addEventListener("click", clearEntryForm);
   $("#entryForm").addEventListener("submit", saveEntry);
   $("#deleteEntry").addEventListener("click", deleteEntry);
@@ -1620,6 +1862,11 @@ async function init() {
   const sync = async () => {
     $("#syncOutput").textContent = "Syncing Zotero...";
     const data = await runAction("/api/actions/sync-zotero", "Zotero synced", "Syncing Zotero...");
+    actionLog("#syncOutput", data);
+  };
+  const syncSources = async () => {
+    $("#syncOutput").textContent = "Syncing publication sources...";
+    const data = await runAction("/api/actions/sync-publication-sources", "Publication sources synced", "Syncing publication sources...");
     actionLog("#syncOutput", data);
   };
   const buildUltra = async () => {
@@ -1676,6 +1923,7 @@ async function init() {
     actionLog("#syncOutput", data);
   };
   $("#syncZoteroDashboard").addEventListener("click", sync);
+  $("#syncSourcesDashboard").addEventListener("click", syncSources);
   $("#syncOrcidDashboard").addEventListener("click", syncOrcid);
   $("#enrichDoiDashboard").addEventListener("click", enrichDoi);
   $("#maintainPubsDashboard").addEventListener("click", maintainPubs);
@@ -1687,6 +1935,7 @@ async function init() {
   $("#homeLanguageLabel").addEventListener("change", saveExportSettings);
   await loadSummary();
   await loadDatabaseInfo();
+  await loadCvImportSettings();
   await loadConnections();
   await loadExportSettings();
   await loadMetrics();

@@ -12,7 +12,6 @@
   <header class="topbar">
     <div class="brand">
       <img class="brandLogo" src="/logo/vitamine_logo.png" alt="" width="1672" height="941">
-      <h1>VitaMine</h1>
       <p id="status">Ready</p>
     </div>
     <div class="actions"></div>
@@ -31,102 +30,153 @@
 
     <section id="dashboardView" class="view active" role="tabpanel" aria-labelledby="dashboardTab">
       <div class="dashboardGrid">
-        <section class="panel">
-          <div class="panelHeader">
-            <h2>Database</h2>
-            <p>Start with the bundled example, create a blank workspace, or load an existing VitaMine file.</p>
-          </div>
-          <div class="databaseStatus">
-            <span>Current database</span>
-            <strong id="databaseName">Loading...</strong>
-          </div>
-          <div class="buttonRow">
-            <button id="useExampleDatabase" type="button">Use Example</button>
-            <button id="createBlankDatabase" type="button">New Blank Database</button>
-            <button id="loadDatabase" type="button">Load Existing</button>
-            <input id="databaseFileInput" type="file" accept=".vitamine,.sqlite,.db,application/vnd.sqlite3,application/octet-stream" hidden>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panelHeader">
-            <h2>Sync</h2>
-            <p>Pull publication metadata from connected researcher services into the local VitaMine file.</p>
-          </div>
-          <form id="connectionsForm" class="connectionsForm">
-            <label>ORCID iD<input id="connectionOrcid" placeholder="0000-0000-0000-0000"></label>
-            <label>Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
-            <label>Zotero library
-              <select id="connectionZoteroLibrary">
-                <option value="">Auto-detect from key</option>
-              </select>
-            </label>
-            <label>Zotero source
-              <select id="connectionZoteroSource">
-                <option value="my_publications">My Publications</option>
-                <option value="library">Whole library</option>
-                <option value="collection">Collection</option>
-              </select>
-            </label>
-            <label id="connectionZoteroCollectionWrap">Collection
-              <select id="connectionZoteroCollection"></select>
-            </label>
-            <div class="buttonRow connectionActions">
-              <button type="submit">Save Connections</button>
-              <button id="connectZotero" type="button">Connect Zotero</button>
-              <button id="testZoteroConnection" type="button">Test Link</button>
-              <button id="loadZoteroCollections" type="button">Load Collections</button>
-              <span id="connectionStatus"></span>
+        <div class="dashboardLeft">
+          <section class="panel">
+            <div class="panelHeader">
+              <h2>Database</h2>
+              <p>Start with the bundled example, create a blank workspace, or load an existing VitaMine file.</p>
             </div>
-          </form>
-          <div class="buttonRow">
-            <button id="syncZoteroDashboard" type="button">Sync Zotero</button>
-            <button id="syncOrcidDashboard" type="button">Sync ORCID</button>
-            <button id="enrichDoiDashboard" type="button">Enrich DOI Metadata</button>
-            <button id="maintainPubsDashboard" type="button">Apply Journal Metrics / Clean</button>
-          </div>
-          <pre id="syncOutput" class="logBox">No sync run in this session.</pre>
-        </section>
-
-        <section class="panel">
-          <div class="panelHeader">
-            <h2>Metrics</h2>
-            <p>Quick overview of publication data and export readiness.</p>
-          </div>
-          <div id="metricsGrid" class="metricsGrid"></div>
-          <div class="subPanel">
-            <h3>Recent Publication Years</h3>
-            <div id="yearMetrics" class="miniList"></div>
-          </div>
-          <div class="subPanel">
-            <h3>Top Venues</h3>
-            <div id="venueMetrics" class="miniList"></div>
-          </div>
-          <div class="subPanel">
-            <div class="panelHeader compactHeader">
-              <h3>Journal Impact Factors</h3>
-              <p>Curated locally; save values to apply them to matching publication venues.</p>
+            <div class="databaseStatus">
+              <span>Current database</span>
+              <strong id="databaseName">Loading...</strong>
             </div>
-            <div class="metricToolbar">
-              <input id="journalMetricSearch" type="search" placeholder="Filter venues">
-              <button id="fetchJournalMetrics" type="button">Fetch OpenAlex Metrics</button>
-              <button id="saveJournalMetrics" type="button">Save IFs</button>
+            <div class="buttonRow">
+              <button id="useExampleDatabase" type="button">Use Example</button>
+              <button id="createBlankDatabase" type="button">New Blank Database</button>
+              <button id="loadDatabase" type="button">Load Existing</button>
+              <input id="databaseFileInput" type="file" accept=".vitamine,.sqlite,.db,application/vnd.sqlite3,application/octet-stream" hidden>
             </div>
-            <div id="journalMetricEditor" class="metricEditor"></div>
-          </div>
-        </section>
+          </section>
 
-        <section class="panel collaborationPanel">
-          <div class="panelHeader">
-            <h2>Collaboration Map</h2>
-            <p>OpenAlex coauthor institutions linked to the researcher’s institution.</p>
-          </div>
-          <div id="collaborationMap" class="collaborationMap" role="img" aria-label="World map of collaboration institutions"></div>
-          <div class="mapSummary">
-            <div id="collaborationMapStats" class="miniList"></div>
-            <div id="collaborationCountries" class="miniList"></div>
-          </div>
-        </section>
+          <section class="panel">
+            <div class="panelHeader">
+              <h2>Import CV</h2>
+              <p>Drop a long CV, NIH biosketch, or both. Publications are skipped for Zotero sync.</p>
+            </div>
+            <div id="importCvDropzone" class="dropzone">
+              <strong>Drop CV documents</strong>
+              <span>DOCX, PDF, TXT, or Markdown</span>
+            </div>
+            <input id="cvImportFileInput" type="file" accept=".docx,.pdf,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" multiple hidden>
+            <div class="grid two">
+              <label>LLM provider
+                <select id="cvImportProvider">
+                  <option value="none">Heuristic only</option>
+                  <option value="bundled_llama">Bundled Local LLM</option>
+                  <option value="ollama">Local Ollama</option>
+                  <option value="openai">OpenAI API</option>
+                  <option value="openai_compatible">Custom OpenAI-compatible API</option>
+                </select>
+              </label>
+              <div class="buttonRow">
+                <button id="chooseCvImportFile" type="button">Choose Files</button>
+                <button id="saveCvImportSettings" type="button">Save Settings</button>
+              </div>
+            </div>
+            <div id="cvImportOllamaFields" class="grid two" hidden>
+              <label>Ollama URL<input id="cvImportOllamaUrl" placeholder="http://127.0.0.1:11434"></label>
+              <label>Ollama model<input id="cvImportOllamaModel" placeholder="llama3.1:8b"></label>
+            </div>
+            <div id="cvImportApiFields" class="grid two" hidden>
+              <label id="cvImportApiBaseUrlField">API base URL<input id="cvImportApiBaseUrl" placeholder="https://api.openai.com/v1"></label>
+              <label id="cvImportApiModelField">Model<input id="cvImportApiModel" placeholder="gpt-4.1-mini"></label>
+              <label>API key<input id="cvImportApiKey" type="password" placeholder="Paste to set or replace"></label>
+              <span id="cvImportKeyStatus" class="fieldStatus"></span>
+            </div>
+            <pre id="cvImportOutput" class="logBox">No CV import run in this session.</pre>
+          </section>
+
+          <section class="panel">
+            <div class="panelHeader">
+              <h2>Metrics</h2>
+              <p>Quick overview of publication data and export readiness.</p>
+            </div>
+            <div id="metricsGrid" class="metricsGrid"></div>
+            <div class="subPanel">
+              <h3>Recent Publication Years</h3>
+              <div id="yearMetrics" class="miniList"></div>
+            </div>
+            <div class="subPanel">
+              <h3>Top Venues</h3>
+              <div id="venueMetrics" class="miniList"></div>
+            </div>
+            <div class="subPanel">
+              <div class="panelHeader compactHeader">
+                <h3>Journal Impact Factors</h3>
+                <p>Curated locally; save values to apply them to matching publication venues.</p>
+              </div>
+              <div class="metricToolbar">
+                <input id="journalMetricSearch" type="search" placeholder="Filter venues">
+                <button id="fetchJournalMetrics" type="button">Fetch OpenAlex Metrics</button>
+                <button id="saveJournalMetrics" type="button">Save IFs</button>
+              </div>
+              <div id="journalMetricEditor" class="metricEditor"></div>
+            </div>
+          </section>
+        </div>
+
+        <div class="dashboardRight">
+          <section class="panel">
+            <div class="panelHeader">
+              <h2>Sync</h2>
+              <p>Pull publication metadata from connected researcher services into the local VitaMine file.</p>
+            </div>
+            <form id="connectionsForm" class="connectionsForm">
+              <label>ORCID iD<input id="connectionOrcid" placeholder="0000-0000-0000-0000"></label>
+              <label>Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
+              <label>Zotero library
+                <select id="connectionZoteroLibrary">
+                  <option value="">Auto-detect from key</option>
+                </select>
+              </label>
+              <label>Zotero source
+                <select id="connectionZoteroSource">
+                  <option value="my_publications">My Publications</option>
+                  <option value="library">Whole library</option>
+                  <option value="collection">Collection</option>
+                </select>
+              </label>
+              <label id="connectionZoteroCollectionWrap">Collection
+                <select id="connectionZoteroCollection"></select>
+              </label>
+              <label>Publication source policy
+                <select id="publicationSourcePolicy">
+                  <option value="zotero_primary_orcid_validation">Zotero primary, ORCID validation</option>
+                  <option value="orcid_primary_zotero_validation">ORCID primary, Zotero validation</option>
+                  <option value="zotero_only">Zotero only</option>
+                  <option value="orcid_only">ORCID only</option>
+                </select>
+              </label>
+              <div class="buttonRow connectionActions">
+                <button type="submit">Save Connections</button>
+                <button id="connectZotero" type="button">Connect Zotero</button>
+                <button id="testZoteroConnection" type="button">Test Link</button>
+                <button id="loadZoteroCollections" type="button">Load Collections</button>
+                <span id="connectionStatus"></span>
+              </div>
+            </form>
+            <div class="buttonRow">
+              <button id="syncSourcesDashboard" type="button">Sync Sources</button>
+              <button id="syncZoteroDashboard" type="button">Sync Zotero</button>
+              <button id="syncOrcidDashboard" type="button">Sync ORCID</button>
+              <button id="enrichDoiDashboard" type="button">Enrich DOI Metadata</button>
+              <button id="maintainPubsDashboard" type="button">Apply Journal Metrics / Clean</button>
+            </div>
+            <pre id="syncOutput" class="logBox">No sync run in this session.</pre>
+          </section>
+
+          <section class="panel collaborationPanel">
+            <div class="panelHeader">
+              <h2>Collaboration Map</h2>
+              <p>OpenAlex coauthor institutions linked to the researcher’s institution.</p>
+            </div>
+            <div id="collaborationMap" class="collaborationMap" role="img" aria-label="World map of collaboration institutions"></div>
+            <div class="mapSummary">
+              <div id="collaborationMapStats" class="miniList"></div>
+              <div id="collaborationCountries" class="miniList"></div>
+            </div>
+          </section>
+        </div>
 
       </div>
     </section>
@@ -143,9 +193,6 @@
               <option value="en">English</option>
               <option id="homeLanguageOption" value="de">Deutsch</option>
             </select>
-          </label>
-          <label>Home language name
-            <input id="homeLanguageLabel" maxlength="40" value="Deutsch">
           </label>
         </div>
         <div class="exportList">
@@ -263,6 +310,7 @@
         <label>Display name<input name="display_name"></label>
         <label>Degrees<input name="degrees"></label>
         <label>Position title<input name="position_title"></label>
+        <label>Native / Second CV Language<input id="homeLanguageLabel" maxlength="40" value="Deutsch"></label>
         <label>Office address<input name="office_address"></label>
         <label>Home address<input name="home_address"></label>
         <label>Work phone<input name="work_phone"></label>
@@ -305,6 +353,7 @@
       <div class="toolbar">
         <input id="pubSearch" type="search" placeholder="Search publications">
         <label class="inlineCheck"><input id="showSuppressedPubs" type="checkbox"> Show hidden/problem rows</label>
+        <button id="newPublication" type="button">New Publication</button>
       </div>
       <div class="publicationWorkspace">
         <div class="publicationMainStack">
@@ -354,6 +403,39 @@
           </section>
         </aside>
       </div>
+      <dialog id="publicationDialog" class="publicationDialog">
+        <form id="publicationForm" class="editor publicationEditor">
+          <div class="dialogHeader">
+            <h2>Publication</h2>
+            <button id="closePublicationEditor" type="button" aria-label="Close publication editor">Close</button>
+          </div>
+          <input id="publicationId" type="hidden">
+          <label>Title<input id="publicationTitle"></label>
+          <label>Authors<textarea id="publicationAuthors" rows="2"></textarea></label>
+          <div class="grid two">
+            <label>Year<input id="publicationYear"></label>
+            <label>Category<input id="publicationCategory" placeholder="peer_reviewed"></label>
+          </div>
+          <label>Venue<input id="publicationVenue"></label>
+          <div class="grid two">
+            <label>DOI<input id="publicationDoi"></label>
+            <label>PMID<input id="publicationPmid"></label>
+          </div>
+          <label>URL<input id="publicationUrl"></label>
+          <label>Raw citation<textarea id="publicationRawCitation" rows="3"></textarea></label>
+          <label>Short citation<textarea id="publicationShortCitation" rows="2"></textarea></label>
+          <div class="grid two">
+            <label><input id="publicationIncludeUltra" type="checkbox"> One-page</label>
+            <label><input id="publicationIncludeShort" type="checkbox"> Short CV</label>
+          </div>
+          <label><input id="publicationSuppress" type="checkbox"> Hide/problem row</label>
+          <label>Note<textarea id="publicationQualityNote" rows="2"></textarea></label>
+          <div class="formActions">
+            <button type="submit">Save</button>
+            <button id="deletePublication" type="button">Delete</button>
+          </div>
+        </form>
+      </dialog>
     </section>
 
     <section id="narrativeView" class="view" role="tabpanel" aria-labelledby="narrativeTab">

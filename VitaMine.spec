@@ -3,9 +3,12 @@
 from pathlib import Path
 import shutil
 
+from PyInstaller.utils.hooks import collect_submodules
+
 
 ROOT = Path.cwd()
 TOOLCHAIN_BIN = ROOT / "vendor" / "export-tools" / "bin"
+MODELS_DIR = ROOT / "vendor" / "models"
 
 
 def existing_datas(items):
@@ -13,6 +16,15 @@ def existing_datas(items):
 
 
 def optional_tool_data(name):
+    bundled = TOOLCHAIN_BIN / name
+    path = str(bundled) if bundled.exists() else shutil.which(name)
+    if not path:
+        print(f"warning: {name} not found; run scripts/install_export_tools.py or install it on PATH")
+        return []
+    return [(path, "bin")]
+
+
+def optional_tool_binary(name):
     bundled = TOOLCHAIN_BIN / name
     path = str(bundled) if bundled.exists() else shutil.which(name)
     if not path:
@@ -30,10 +42,11 @@ datas = existing_datas(
         (ROOT / "vitamine" / "schema.sql", "vitamine"),
         (ROOT / "data" / "example.vitamine", "data"),
         (ROOT / "data" / "journal_metrics.csv", "data"),
+        (MODELS_DIR, "models"),
     ]
 ) + optional_tool_data("typst") + optional_tool_data("pandoc")
 
-binaries = []
+binaries = optional_tool_binary("pdftotext") + optional_tool_binary("llama-server")
 
 a = Analysis(
     ["vitamine/standalone.py"],
@@ -45,7 +58,8 @@ a = Analysis(
         "vitamine.paths",
         "vitamine.i18n",
         "vitamine.scripts.maintain_publications",
-    ],
+        "vitamine.scripts.import_uploaded_cv",
+    ] + collect_submodules("docx"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

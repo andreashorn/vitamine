@@ -18,3 +18,4 @@ data/*.sqlite-wal
 data/*.vitamine-shm
 data/*.vitamine-wal
 .env
+*.gguf

@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import urllib.parse
 
@@ -195,6 +196,52 @@ def fetch_configured_zotero_items(env: dict[str, str]) -> list[dict]:
     return items
 
 
+def normalize_doi(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    text = re.sub(r"^https?://(dx\.)?doi\.org/", "", text)
+    text = re.sub(r"^doi:\s*", "", text)
+    return text.rstrip(".")
+
+
+def normalize_title(value: str | None) -> str:
+    text = (value or "").casefold()
+    text = text.replace("‐", "-").replace("‑", "-").replace("–", "-")
+    return re.sub(r"\W+", " ", text).strip()
+
+
+def find_existing_publication(
+    con: sqlite3.Connection,
+    *,
+    key: str,
+    doi: str | None,
+    pmid: str | None,
+    title: str | None,
+    year: str | None,
+) -> sqlite3.Row | None:
+    if key:
+        row = con.execute("SELECT * FROM publications WHERE zotero_key = ?", (key,)).fetchone()
+        if row:
+            return row
+    doi_key = normalize_doi(doi)
+    if doi_key:
+        row = con.execute(
+            "SELECT * FROM publications WHERE lower(COALESCE(doi, '')) = ? ORDER BY zotero_key IS NOT NULL, id LIMIT 1",
+            (doi_key,),
+        ).fetchone()
+        if row:
+            return row
+    if pmid:
+        row = con.execute("SELECT * FROM publications WHERE pmid = ? ORDER BY zotero_key IS NOT NULL, id LIMIT 1", (pmid,)).fetchone()
+        if row:
+            return row
+    title_key = normalize_title(title)
+    if title_key and year:
+        for row in con.execute("SELECT * FROM publications WHERE year = ? ORDER BY zotero_key IS NOT NULL, id", (year,)).fetchall():
+            if normalize_title(row["title"]) == title_key:
+                return row
+    return None
+
+
 def ensure_zotero_document(con: sqlite3.Connection, env: dict[str, str]) -> int:
     now = dt.datetime.now(dt.timezone.utc).isoformat()
     source_label = sync_source_label(env)
@@ -218,6 +265,7 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
     own_connection = con is None
     if con is None:
         con = sqlite3.connect(DB)
+        con.row_factory = sqlite3.Row
     env = zotero_env(con)
     items = fetch_configured_zotero_items(env)
     document_id = ensure_zotero_document(con, env)
@@ -258,7 +306,14 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
             data.get("extra"),
             zotero_raw_citation(data),
         )
-        existing = con.execute("SELECT id FROM publications WHERE zotero_key = ?", (key,)).fetchone()
+        existing = find_existing_publication(
+            con,
+            key=key,
+            doi=data.get("DOI"),
+            pmid=zotero_pmid(data),
+            title=title,
+            year=zotero_year(data),
+        )
         if existing:
             con.execute(
                 """
@@ -268,7 +323,7 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
                   abstract=?, extra=?, raw_citation=?, confidence='high'
                 WHERE id=?
                 """,
-                (*params, existing[0]),
+                (*params, existing["id"]),
             )
         else:
             con.execute(

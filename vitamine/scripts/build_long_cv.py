@@ -9,10 +9,16 @@ import html
 import json
 import re
 import sqlite3
-import subprocess
 from pathlib import Path
 
-from vitamine.scripts.export_utils import compile_typst_if_available, convert_with_pandoc_if_available, markdown_to_html_body
+from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
+
+from vitamine.scripts.export_utils import compile_typst_if_available, markdown_to_html_body
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 
 DB = active_db_path()
@@ -385,6 +391,10 @@ def markdown_publication_citation(row: sqlite3.Row) -> str:
     venue = clean_cell(row["venue"])
     year = clean_cell(row["year"])
     link = doi_url(row)
+    authors = citation_cell(authors)
+    title = citation_cell(title)
+    venue = citation_cell(venue)
+    year = citation_cell(year)
     authors = re.sub(r"\b(Andreas\s+Horn|Horn\s+A\.?)\b", r"**\1**", authors)
     parts = []
     if authors:
@@ -395,6 +405,9 @@ def markdown_publication_citation(row: sqlite3.Row) -> str:
         parts.append(f"<u><em>{html_escape(venue.title() if venue.isupper() else venue)}</em></u>")
     if year:
         parts.append(year)
+    impact = impact_factor_label(row)
+    if impact:
+        parts.append(impact)
     citation = ". ".join(parts).strip()
     if link:
         citation = f"{citation}. [{link}]({link})"
@@ -516,11 +529,21 @@ def typ_rich_text(value: str | None, *, bold_names: bool = False, underline: boo
         pos = 0
         for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?)\b", text):
             if match.start() > pos:
-                pieces.append(typ_text(text[pos : match.start()]))
+                before = text[pos : match.start()]
+                stripped = before.rstrip()
+                if stripped:
+                    pieces.append(typ_text(stripped))
+                if before and before[-1].isspace():
+                    pieces.append("#h(0.28em)")
             pieces.append(typ_text(match.group(0), bold=True))
             pos = match.end()
         if pos < len(text):
-            pieces.append(typ_text(text[pos:]))
+            after = text[pos:]
+            if after and after[0].isspace():
+                pieces.append("#h(0.28em)")
+                after = after.lstrip()
+            if after:
+                pieces.append(typ_text(after))
         return "".join(pieces)
     body = typ_text(text)
     if italic:
@@ -533,8 +556,26 @@ def typ_rich_text(value: str | None, *, bold_names: bool = False, underline: boo
 def citation_cell(value: str | None) -> str:
     text = clean_cell(value).strip()
     text = re.sub(r"\s+([,.;:])", r"\1", text)
+    text = re.sub(r",(?=\S)", ", ", text)
     text = re.sub(r"\s{2,}", " ", text)
     return text.rstrip(" .")
+
+
+def sentence_part(value: str | None) -> str:
+    text = citation_cell(value)
+    return text if not text or text.endswith((".", "?", "!")) else f"{text}."
+
+
+def impact_factor_label(row: sqlite3.Row) -> str:
+    value = row["impact_factor"] if "impact_factor" in row.keys() else None
+    if value in (None, ""):
+        return ""
+    try:
+        formatted = f"{float(value):g}"
+    except (TypeError, ValueError):
+        formatted = clean_cell(str(value))
+    year = citation_cell(row["impact_factor_year"] if "impact_factor_year" in row.keys() else "")
+    return f"IF {formatted} ({year})" if year else f"IF {formatted}"
 
 
 def typ_link_text(url: str, display: str | None = None) -> str:
@@ -571,15 +612,18 @@ def typ_text_with_links(value: str | None) -> str:
 def typ_publication_citation(row: sqlite3.Row) -> str:
     parts = []
     if row["authors"]:
-        parts.append(typ_rich_text(citation_cell(row["authors"]) + ".", bold_names=True))
+        parts.append(typ_rich_text(sentence_part(row["authors"]), bold_names=True))
     if row["title"]:
-        parts.append(typ_text(citation_cell(row["title"]) + "."))
+        parts.append(typ_text(sentence_part(row["title"])))
     if row["venue"]:
         venue = citation_cell(row["venue"])
         venue = venue.title() if venue.isupper() else venue
-        parts.append(typ_rich_text(venue + ".", italic=True, underline=True))
+        parts.append(typ_rich_text(sentence_part(venue), italic=True, underline=True))
     if row["year"]:
-        parts.append(typ_text(citation_cell(row["year"]) + "."))
+        parts.append(typ_text(sentence_part(row["year"])))
+    impact = impact_factor_label(row)
+    if impact:
+        parts.append(typ_text(sentence_part(impact)))
     doi = citation_cell(row["doi"])
     if doi:
         parts.append(f'{typ_text("doi:")}{typ_link_text(doi_url(row), doi)}')
@@ -587,7 +631,7 @@ def typ_publication_citation(row: sqlite3.Row) -> str:
         link = doi_url(row)
         if link:
             parts.append(typ_link_text(link))
-    return typ_text(" ").join(parts)
+    return "#h(0.28em)".join(parts)
 
 
 def typ_invited_presentations(rows: list[sqlite3.Row]) -> str:
@@ -874,6 +918,262 @@ def output_stem() -> str:
     return "long_cv_de" if LANG == "de" else "long_cv"
 
 
+def set_run_font(run, *, size: float = 11, bold: bool | None = None, italic: bool | None = None, underline: bool | None = None) -> None:
+    run.font.name = "Arial"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.size = Pt(size)
+    if bold is not None:
+        run.bold = bold
+    if italic is not None:
+        run.italic = italic
+    if underline is not None:
+        run.underline = underline
+
+
+def set_paragraph_spacing(paragraph, *, before: float = 0, after: float = 0, line_spacing: float = 1.0) -> None:
+    paragraph.paragraph_format.space_before = Pt(before)
+    paragraph.paragraph_format.space_after = Pt(after)
+    paragraph.paragraph_format.line_spacing = line_spacing
+
+
+def add_paragraph_border(paragraph, *, top: bool = False, bottom: bool = False) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    p_bdr = p_pr.find(qn("w:pBdr"))
+    if p_bdr is None:
+        p_bdr = OxmlElement("w:pBdr")
+        p_pr.append(p_bdr)
+    for edge, enabled in (("top", top), ("bottom", bottom)):
+        if not enabled:
+            continue
+        node = p_bdr.find(qn(f"w:{edge}"))
+        if node is None:
+            node = OxmlElement(f"w:{edge}")
+            p_bdr.append(node)
+        node.set(qn("w:val"), "single")
+        node.set(qn("w:sz"), "8")
+        node.set(qn("w:space"), "4")
+        node.set(qn("w:color"), "000000")
+
+
+def add_text_paragraph(doc: Document, text_value: str = "", *, bold: bool = False, size: float = 11, before: float = 0, after: float = 0, justify: bool = False):
+    paragraph = doc.add_paragraph()
+    set_paragraph_spacing(paragraph, before=before, after=after)
+    if justify:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    if text_value:
+        run = paragraph.add_run(text_value)
+        set_run_font(run, size=size, bold=bold)
+    return paragraph
+
+
+def add_section_heading(doc: Document, marker: str, title: str) -> None:
+    paragraph = doc.add_paragraph()
+    set_paragraph_spacing(paragraph, before=8, after=2)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(0.35))
+    run = paragraph.add_run(f"{marker}\t{title}")
+    set_run_font(run, size=11, bold=True)
+
+
+def add_subheading(doc: Document, title: str) -> None:
+    paragraph = add_text_paragraph(doc, title, bold=True, before=3, after=1)
+    for run in paragraph.runs:
+        set_run_font(run, size=11, bold=True)
+
+
+def add_tabbed_paragraph(doc: Document, left: str, right: str, *, left_width: float = 1.28, size: float = 11) -> None:
+    paragraph = doc.add_paragraph()
+    set_paragraph_spacing(paragraph)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(left_width))
+    run = paragraph.add_run(clean_cell(left))
+    set_run_font(run, size=size)
+    run = paragraph.add_run("\t" + clean_cell(right))
+    set_run_font(run, size=size)
+
+
+def add_metadata_table(doc: Document, rows: list[tuple[str, str]]) -> None:
+    table = doc.add_table(rows=0, cols=2)
+    table.autofit = False
+    for label, value in rows:
+        if not clean_cell(value):
+            continue
+        cells = table.add_row().cells
+        cells[0].text = f"{label}:"
+        cells[1].text = clean_cell(value)
+        cells[0].width = Inches(1.55)
+        cells[1].width = Inches(5.75)
+        for cell in cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            for paragraph in cell.paragraphs:
+                set_paragraph_spacing(paragraph)
+                for run in paragraph.runs:
+                    set_run_font(run, size=11, bold=(cell is cells[0]))
+    table.style = "Table Grid"
+
+
+def format_entry_text(row: sqlite3.Row, *, include_amount: bool = False) -> str:
+    title, details, organization = detail_columns(row)
+    parts = [title]
+    if include_amount:
+        parts = [row_value(row, "title"), row_value(row, "organization"), row_value(row, "role"), row_value(row, "amount"), row_value(row, "description")]
+    else:
+        parts.extend([details, organization])
+    return "; ".join(clean_cell(part) for part in parts if clean_cell(part))
+
+
+def add_entry_rows_docx(doc: Document, rows: list[sqlite3.Row], achievements_by_entry: dict[int, list[str]] | None = None, *, include_amount: bool = False) -> None:
+    for row in rows:
+        details = format_entry_text(row, include_amount=include_amount)
+        achievements = (achievements_by_entry or {}).get(row["id"], [])
+        if achievements:
+            details = f"{details}; {tr('achievements')}: " + "; ".join(achievements)
+        add_tabbed_paragraph(doc, row_period(row).replace("\n", "-"), details)
+
+
+def add_publication_docx(doc: Document, index: int, row: sqlite3.Row) -> None:
+    paragraph = doc.add_paragraph()
+    set_paragraph_spacing(paragraph)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(0.32))
+    run = paragraph.add_run(f"{index}.\t")
+    set_run_font(run, size=10.5)
+    authors = citation_cell(row["authors"])
+    title = citation_cell(row["title"])
+    venue = citation_cell(row["venue"])
+    year = citation_cell(row["year"])
+    doi = citation_cell(row["doi"])
+    impact = impact_factor_label(row)
+    pieces = [(sentence_part(authors), False, False), (sentence_part(title), False, False), (sentence_part(venue.title() if venue.isupper() else venue), True, True), (sentence_part(year), False, False), (sentence_part(impact), False, False)]
+    first = True
+    for text_value, italic, underline in pieces:
+        if not text_value:
+            continue
+        if not first:
+            sep = paragraph.add_run(" ")
+            set_run_font(sep, size=10.5)
+        first = False
+        pos = 0
+        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?)\b", text_value):
+            if match.start() > pos:
+                run = paragraph.add_run(text_value[pos:match.start()])
+                set_run_font(run, size=10.5, italic=italic, underline=underline)
+            run = paragraph.add_run(match.group(0))
+            set_run_font(run, size=10.5, bold=True, italic=italic, underline=underline)
+            pos = match.end()
+        if pos < len(text_value):
+            run = paragraph.add_run(text_value[pos:])
+            set_run_font(run, size=10.5, italic=italic, underline=underline)
+    if doi:
+        run = paragraph.add_run(f" doi:{doi}")
+        set_run_font(run, size=10.5)
+
+
+def add_wrapped_body_paragraphs(doc: Document, value: str) -> None:
+    for block in re.split(r"\n\s*\n", clean_cell(value)):
+        text_value = " ".join(line.strip() for line in block.splitlines() if line.strip())
+        if text_value:
+            add_text_paragraph(doc, text_value, size=11, after=2, justify=True)
+
+
+def build_docx(path: Path, lang: str = "en") -> Path:
+    global LANG
+    LANG = "de" if lang == "de" else "en"
+    con = connect()
+    person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+    today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
+    doc = Document()
+    section = doc.sections[0]
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.top_margin = Inches(0.5)
+    section.bottom_margin = Inches(0.5)
+    section.left_margin = Inches(0.5)
+    section.right_margin = Inches(0.5)
+    styles = doc.styles
+    styles["Normal"].font.name = "Arial"
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    styles["Normal"].font.size = Pt(11)
+
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    set_paragraph_spacing(title, after=6)
+    add_paragraph_border(title, top=True, bottom=True)
+    run = title.add_run(tr("cv").upper())
+    set_run_font(run, size=13, bold=True)
+
+    if person:
+        rows = [
+            (tr("date_prepared").rstrip(":"), today),
+            (tr("name").rstrip(":"), person["display_name"] or person["full_name"]),
+            (tr("office_address").rstrip(":"), person["office_address"]),
+            (tr("work_phone").rstrip(":"), person["work_phone"]),
+            (tr("work_email").rstrip(":"), person["work_email"]),
+            (tr("place_of_birth").rstrip(":"), person["place_of_birth"]),
+        ]
+        add_metadata_table(doc, rows)
+
+    achievements_by_entry = trainee_achievement_map(con)
+    marker_ord = ord("A")
+    for section_key, section_title in SECTION_ORDER:
+        rows = entry_rows(con, section_key)
+        if not rows:
+            continue
+        add_section_heading(doc, f"{chr(marker_ord)}.", localized_section_title(section_key, section_title))
+        marker_ord += 1
+        if section_key in {"editorial_activities", "mentoring"}:
+            for subcategory, grouped in grouped_rows(rows):
+                if subcategory:
+                    add_subheading(doc, subcategory)
+                add_entry_rows_docx(
+                    doc,
+                    grouped,
+                    achievements_by_entry if section_key == "mentoring" else None,
+                    include_amount=False,
+                )
+        else:
+            add_entry_rows_docx(
+                doc,
+                rows,
+                achievements_by_entry if section_key == "mentoring" else None,
+                include_amount=section_key == "funding",
+            )
+
+    publication_rows = con.execute(
+        """
+        SELECT * FROM publications
+        WHERE COALESCE(suppress_display, 0) = 0
+        ORDER BY
+          CASE WHEN year IS NULL OR year = '' THEN 1 ELSE 0 END,
+          CAST(year AS INTEGER),
+          lower(title)
+        """
+    ).fetchall()
+    peer_rows = [row for row in publication_rows if row["category"] == "peer_reviewed"]
+    other_rows = [row for row in publication_rows if row["category"] != "peer_reviewed"]
+    if peer_rows or other_rows:
+        add_section_heading(doc, f"{chr(marker_ord)}.", tr("scholarship"))
+        marker_ord += 1
+        if peer_rows:
+            add_subheading(doc, tr("peer_reviewed"))
+            for index, row in enumerate(peer_rows, 1):
+                add_publication_docx(doc, index, row)
+        if other_rows:
+            add_subheading(doc, tr("other_scholarship"))
+            for index, row in enumerate(other_rows, 1):
+                add_publication_docx(doc, index, row)
+
+    report = con.execute("SELECT title, body, title_de, body_de FROM narrative_reports WHERE id=1").fetchone()
+    if report and clean_cell(row_value(report, "body")):
+        add_section_heading(doc, f"{chr(marker_ord)}.", row_value(report, "title") or tr("narrative_report"))
+        add_wrapped_body_paragraphs(doc, row_value(report, "body"))
+
+    con.close()
+    if person:
+        doc.core_properties.author = person["display_name"] or person["full_name"] or ""
+    doc.core_properties.title = tr("cv")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(path)
+    return path
+
+
 def build(lang: str = "en") -> dict[str, str]:
     global LANG
     LANG = "de" if lang == "de" else "en"
@@ -890,7 +1190,7 @@ def build(lang: str = "en") -> dict[str, str]:
     html_path.write_text(html_doc, encoding="utf-8")
     typ_path.write_text(build_typst(), encoding="utf-8")
     pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
-    docx, docx_warning = convert_with_pandoc_if_available(md_path, docx_path, ROOT, "-f", "markdown")
+    docx = build_docx(docx_path, LANG)
     result = {
         "markdown": f"output/{output_ref(md_path)}",
         "html": f"output/{output_ref(html_path)}",
@@ -900,7 +1200,7 @@ def build(lang: str = "en") -> dict[str, str]:
         result["pdf"] = f"output/{output_ref(pdf)}"
     if docx:
         result["docx"] = f"output/{output_ref(docx)}"
-    warnings = [item for item in (html_warning, warning, docx_warning) if item]
+    warnings = [item for item in (html_warning, warning) if item]
     if warnings:
         result["warning"] = " ".join(warnings)
     return result

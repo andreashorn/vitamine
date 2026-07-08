@@ -97,6 +97,146 @@ def text(value: str | None, *, bold: bool = False, size: str | None = None) -> s
     return f"#text({', '.join(args)})"
 
 
+def impact_factor_label(row: sqlite3.Row) -> str:
+    value = row["impact_factor"] if "impact_factor" in row.keys() else None
+    if value in (None, ""):
+        return ""
+    try:
+        formatted = f"{float(value):g}"
+    except (TypeError, ValueError):
+        formatted = clean(str(value))
+    year_value = clean(row["impact_factor_year"] if "impact_factor_year" in row.keys() else "")
+    return f"IF {formatted} ({year_value})" if year_value else f"IF {formatted}"
+
+
+def citation_text(value: str | None) -> str:
+    value = clean(value).strip()
+    value = normalize_citation_spacing(value)
+    return value.rstrip(" .")
+
+
+def normalize_citation_spacing(value: str | None) -> str:
+    value = clean(value).strip()
+    value = re.sub(r"\s+([,.;:])", r"\1", value)
+    value = re.sub(r",(?=\S)", ", ", value)
+    value = re.sub(r"\s{2,}", " ", value)
+    return value
+
+
+def typst_rich_text(value: str | None, *, bold_names: bool = False, underline: bool = False, italic: bool = False, size: str = "10.15pt") -> str:
+    value = normalize_citation_spacing(value)
+    if not value:
+        return text("", size=size)
+    if bold_names:
+        pieces = []
+        cursor = 0
+        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+            if match.start() > cursor:
+                before = value[cursor : match.start()]
+                stripped = before.rstrip()
+                if stripped:
+                    pieces.append(text(stripped, size=size))
+                if before and before[-1].isspace():
+                    pieces.append("#h(0.28em)")
+            pieces.append(text(match.group(0), bold=True, size=size))
+            cursor = match.end()
+        if cursor < len(value):
+            after = value[cursor:]
+            if after and after[0].isspace():
+                pieces.append("#h(0.28em)")
+                after = after.lstrip()
+            if after:
+                pieces.append(text(after, size=size))
+        return "".join(pieces)
+    body = text(value, size=size)
+    if italic:
+        body = f"#emph[{body}]"
+    if underline:
+        body = f"#underline[{body}]"
+    return body
+
+
+def typst_word_heading(heading: str) -> str:
+    return f"#block(above: 0.12in, below: 0.15in)[{text(heading, bold=True, size='10.7pt')}]"
+
+
+def typst_rule() -> str:
+    return '#line(length: 100%, stroke: 0.65pt)'
+
+
+def typst_rule_table(columns: str, rows: list[list[str]], *, size: str = "10.2pt") -> str:
+    if not rows:
+        return ""
+    header = rows[0]
+    body = rows[1:]
+    header_cells = ", ".join(f"[{text(cell, bold=True, size=size)}]" for cell in header)
+    parts = [
+        "#block(width: 100%)[",
+        f"#grid(columns: ({columns}), column-gutter: 0.13in, {header_cells})",
+        "#v(0.015in)",
+        typst_rule(),
+        "#v(0.04in)",
+    ]
+    for row in body:
+        cells = ", ".join(f"[{text(cell, size=size)}]" for cell in row)
+        parts.extend(
+            [
+                f"#grid(columns: ({columns}), column-gutter: 0.13in, {cells})",
+                "#v(0.04in)",
+            ]
+        )
+    parts.extend(["#v(0.004in)", typst_rule(), "]"])
+    return "\n".join(parts)
+
+
+def typst_awards(rows: list[str]) -> str:
+    award_rows: list[str] = []
+    for row in rows:
+        left, sep, right = row.partition(" – ")
+        if sep:
+            content = text(left, bold=True, size="10.15pt") + '#h(0.16em)' + text(f"– {right}", size="10.15pt")
+        else:
+            content = text(row, size="10.15pt")
+        award_rows.append(f"#grid(columns: (0.28in, 6.65in), column-gutter: 0.04in, [#text(\"•\")], [{content}])")
+    return "\n#v(0.052in)\n".join(award_rows)
+
+
+def typst_citation(row: sqlite3.Row) -> str:
+    parts = []
+    authors = citation_text(row["authors"])
+    if authors:
+        parts.append(typst_rich_text(authors + ".", bold_names=True))
+    title = citation_text(row["title"])
+    if title:
+        parts.append(text(title + ".", size="10.15pt"))
+    venue = citation_text(row["venue"])
+    if venue:
+        venue = venue.title() if venue.isupper() else venue
+        parts.append(typst_rich_text(venue + ".", italic=True, underline=True))
+    year_value = citation_text(row["year"])
+    if year_value:
+        parts.append(text(year_value + ".", size="10.15pt"))
+    impact = impact_factor_label(row)
+    if impact:
+        parts.append(text(citation_text(impact) + ".", size="10.15pt"))
+    doi = citation_text(row["doi"])
+    if doi:
+        parts.append(text(f"doi:{doi}.", size="10.15pt"))
+    return "#h(0.28em)".join(parts)
+
+
+def typst_publications(rows: list[sqlite3.Row]) -> str:
+    publication_rows: list[str] = []
+    for index, row in enumerate(rows, 1):
+        publication_rows.append(
+            "#block(below: 0.075in)["
+            f"#grid(columns: (0.38in, 6.55in), column-gutter: 0.08in, "
+            f"[{text(str(index) + '.', size='10.15pt')}], [{typst_citation(row)}])"
+            "]"
+        )
+    return "\n".join(publication_rows)
+
+
 def year(value: str | None) -> str:
     text = clean(value)
     if not text:
@@ -149,6 +289,59 @@ def set_cell(cell, text: str, *, bold: bool = False) -> None:
     set_simple_paragraph(paragraph, text, bold=bold)
     for extra in cell.paragraphs[1:]:
         clear_paragraph(extra)
+
+
+def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: bool = False, underline: bool = False) -> None:
+    if not value:
+        return
+    if not bold_names:
+        run = paragraph.add_run(value)
+        run.italic = italic
+        run.underline = underline
+        return
+    cursor = 0
+    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+        if match.start() > cursor:
+            run = paragraph.add_run(value[cursor : match.start()])
+            run.italic = italic
+            run.underline = underline
+        run = paragraph.add_run(match.group(0))
+        run.bold = True
+        run.italic = italic
+        run.underline = underline
+        cursor = match.end()
+    if cursor < len(value):
+        run = paragraph.add_run(value[cursor:])
+        run.italic = italic
+        run.underline = underline
+
+
+def add_publication_docx_text(paragraph, row: sqlite3.Row) -> None:
+    clear_paragraph(paragraph)
+    parts: list[tuple[str, bool, bool, bool]] = []
+    authors = citation_text(row["authors"])
+    if authors:
+        parts.append((authors + ".", True, False, False))
+    title = citation_text(row["title"])
+    if title:
+        parts.append((title + ".", False, False, False))
+    venue = citation_text(row["venue"])
+    if venue:
+        venue = venue.title() if venue.isupper() else venue
+        parts.append((venue + ".", False, True, True))
+    year_value = citation_text(row["year"])
+    if year_value:
+        parts.append((year_value + ".", False, False, False))
+    impact = impact_factor_label(row)
+    if impact:
+        parts.append((citation_text(impact) + ".", False, False, False))
+    doi = citation_text(row["doi"])
+    if doi:
+        parts.append((f"doi:{doi}.", False, False, False))
+    for index, (value, bold_names, italic, underline) in enumerate(parts):
+        if index:
+            paragraph.add_run(" ")
+        add_docx_piece(paragraph, value, bold_names=bold_names, italic=italic, underline=underline)
 
 
 def citation_parts(citation: str, bold_terms: tuple[str, ...]) -> list[tuple[str, bool]]:
@@ -350,24 +543,37 @@ def build_typst_document(publication_limit_value: int) -> str:
     person, edu, positions, awards, publications = load_tabular_data(publication_limit_value)
     name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "Curriculum Vitae"
     title = clean(person["position_title"] if person else "")
+    degrees = clean(person["degrees"] if person else "")
+    heading_name = f"Prof. Dr. {name}"
+    if degrees:
+        heading_name += f", {degrees}"
+    edu_three_columns = [list(row[:3]) for row in edu]
     lines = [
-        '#set page(width: 8.5in, height: 11in, margin: (left: 0.58in, right: 0.58in, top: 0.5in, bottom: 0.5in))',
-        f'#set text(font: "Arial", size: 8.6pt, lang: "{LANG}")',
-        "#set par(leading: 0.36em)",
-        text(name, bold=True, size="15pt"),
+        '#set page(width: 8.5in, height: 11in, margin: (left: 0.72in, right: 0.72in, top: 0.58in, bottom: 0.58in))',
+        f'#set text(font: "Arial", size: 10.2pt, lang: "{LANG}", fill: black)',
+        "#set par(leading: 0.78em, spacing: 0pt)",
+        text(heading_name, bold=True, size="11.2pt"),
+        "#linebreak()",
     ]
     if title:
-        lines.append(text(title, bold=True))
-    sections = [
-        (tr("Education and Training", "Ausbildung"), [" | ".join(row) for row in edu[1:]]),
-        (tr("Positions and Scientific Appointments", "Positionen und wissenschaftliche Berufungen"), [f"{a} | {b}" for a, b in positions[1:]]),
-        (tr("Awards, Research Funding and Presentations", "Auszeichnungen, Forschungsförderung und Vorträge"), awards),
-        (tr("Selected Publications", "Ausgewählte Publikationen"), [publication_citation(row) for row in publications]),
-    ]
-    for heading, rows in sections:
-        lines.append(f"\n#line(length: 100%)\n{text(heading, bold=True)}")
-        for row in rows:
-            lines.append(text(row, size="8.4pt"))
+        lines.append(text(title, bold=True, size="11.2pt"))
+        lines.append("#linebreak()")
+    lines.extend(
+        [
+            text("Institute for Network Stimulation & Department of Stereotaxy and Functional Neurosurgery", size="11.2pt"),
+            "#linebreak()",
+            text("University Hospital Cologne, Germany", size="11.2pt"),
+            "#v(0.07in)",
+            typst_word_heading(tr("Education and Training", "Ausbildung")),
+            typst_rule_table("1.18in, 1.92in, 3.82in", edu_three_columns),
+            typst_word_heading(tr("Positions and Scientific Appointments", "Positionen und wissenschaftliche Berufungen")),
+            typst_rule_table("1.18in, 5.75in", [list(row) for row in positions]),
+            typst_word_heading(tr("Awards, Research Funding and Presentations", "Auszeichnungen, Forschungsförderung und Vorträge")),
+            typst_awards(awards),
+            typst_word_heading(tr("Selected Publications", "Ausgewählte Publikationen")),
+            typst_publications(publications),
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
@@ -443,8 +649,7 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
         add_text(paragraph, split_year_prefix(line))
     publication_paragraphs = doc.paragraphs[12 : 12 + publication_limit]
     for paragraph, publication in zip(publication_paragraphs, publications):
-        citation = publication_citation(publication)
-        add_text(paragraph, citation_parts(citation, ("Horn", clean(publication["venue"]))))
+        add_publication_docx_text(paragraph, publication)
     for paragraph in publication_paragraphs[len(publications) :]:
         clear_paragraph(paragraph)
 

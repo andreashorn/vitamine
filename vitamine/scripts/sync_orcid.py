@@ -56,6 +56,51 @@ def ensure_person_columns(con: sqlite3.Connection) -> None:
     )
 
 
+def upsert_person_orcid_identifier(con: sqlite3.Connection, orcid_id: str) -> None:
+    row = con.execute(
+        """
+        SELECT id
+        FROM person_identifiers
+        WHERE person_id = 1 AND lower(platform) = 'orcid'
+        ORDER BY id
+        LIMIT 1
+        """
+    ).fetchone()
+    url = f"https://orcid.org/{orcid_id}"
+    if row:
+        con.execute(
+            """
+            DELETE FROM person_identifiers
+            WHERE person_id=1 AND lower(platform)='orcid' AND id != ?
+            """,
+            (row["id"],),
+        )
+        con.execute(
+            """
+            UPDATE person_identifiers
+            SET platform='ORCID',
+                identifier_type='ORCID iD',
+                identifier_value=?,
+                url=?,
+                source='orcid-sync',
+                verified_at=datetime('now'),
+                notes='Primary persistent researcher identifier.'
+            WHERE id=? AND person_id=1
+            """,
+            (orcid_id, url, row["id"]),
+        )
+    else:
+        con.execute(
+            """
+            INSERT INTO person_identifiers
+              (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+            VALUES (1, 'ORCID', 'ORCID iD', ?, ?, 'orcid-sync', datetime('now'), 'Primary persistent researcher identifier.')
+            """,
+            (orcid_id, url),
+        )
+    con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
+
+
 def normalize_doi(value: str | None) -> str:
     text = (value or "").strip().lower()
     text = re.sub(r"^https?://(dx\\.)?doi\\.org/", "", text)
@@ -121,6 +166,11 @@ def work_summaries(payload: dict) -> list[dict]:
 
 
 def find_existing(con: sqlite3.Connection, summary: dict) -> sqlite3.Row | None:
+    put_code = str(summary.get("put-code") or "")
+    if put_code:
+        row = con.execute("SELECT * FROM publications WHERE orcid_put_code = ? ORDER BY id LIMIT 1", (put_code,)).fetchone()
+        if row:
+            return row
     ids = external_ids(summary)
     doi = normalize_doi(ids.get("doi"))
     if doi:
@@ -239,18 +289,7 @@ def sync_orcid(orcid_id: str | None = None) -> dict[str, int | str]:
         )
         if not orcid_id:
             raise RuntimeError("Add an ORCID iD in Connections or Person > Identifiers before syncing ORCID.")
-        con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
-        con.execute(
-            """
-            INSERT INTO person_identifiers
-              (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
-            VALUES (1, 'ORCID', 'ORCID iD', ?, ?, 'orcid-sync', datetime('now'), 'Primary persistent researcher identifier.')
-            ON CONFLICT(person_id, platform, identifier_type, identifier_value) DO UPDATE SET
-              url=excluded.url,
-              verified_at=excluded.verified_at
-            """,
-            (orcid_id, f"https://orcid.org/{orcid_id}"),
-        )
+        upsert_person_orcid_identifier(con, orcid_id)
         payload = fetch_orcid_works(orcid_id)
         summaries = work_summaries(payload)
         document_id = ensure_orcid_document(con, orcid_id)
@@ -265,7 +304,8 @@ def sync_orcid(orcid_id: str | None = None) -> dict[str, int | str]:
                 update_existing(con, row, summary)
                 matched += 1
             else:
-                skipped += 1
+                insert_work(con, document_id, summary)
+                inserted += 1
         con.commit()
     maintenance = maintain()
     return {"orcid_id": orcid_id, "fetched": len(summaries), "matched": matched, "inserted": inserted, "skipped_new": skipped, **maintenance}

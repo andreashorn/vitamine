@@ -35,6 +35,8 @@ SCRIPTS = PACKAGE / "scripts"
 SCHEMA = PACKAGE / "schema.sql"
 BIN = RESOURCE_ROOT / "bin"
 LOCAL_TOOLCHAIN_BIN = ROOT / "vendor" / "export-tools" / "bin"
+MODELS = RESOURCE_ROOT / "models"
+LOCAL_MODELS = ROOT / "vendor" / "models"
 BUNDLED_DATA = RESOURCE_ROOT / "data"
 BUNDLED_EXAMPLE_DB = BUNDLED_DATA / "example.vitamine"
 BUNDLED_LEGACY_EXAMPLE_DB = BUNDLED_DATA / "example.sqlite"
@@ -193,3 +195,11 @@ def tool_path(name: str) -> str | None:
         if bundled.exists():
             return str(bundled)
     return shutil.which(name)
+
+
+def bundled_model_path(name: str = "vitamine-import.gguf") -> Path | None:
+    candidates = [MODELS / name, LOCAL_MODELS / name]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
