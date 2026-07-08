@@ -1,0 +1,14 @@
+[project]
+name = "vitamine"
+version = "0.1.0"
+description = "Local CV and biosketch workbench"
+requires-python = ">=3.9"
+dependencies = [
+  "eval-type-backport",
+  "fastapi",
+  "python-docx",
+  "uvicorn",
+]
+
+[tool.setuptools]
+packages = ["vitamine", "vitamine.scripts"]

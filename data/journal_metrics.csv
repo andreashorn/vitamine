@@ -1,0 +1,84 @@
+venue,impact_factor,impact_factor_year,metric_source
+Acta neurochirurgica,2.258,2025,OpenAlex 2yr_mean_citedness
+Allergo Journal,0.053,2025,OpenAlex 2yr_mean_citedness
+Allergologie,0.095,2025,OpenAlex 2yr_mean_citedness
+Allergy Proceedings,0,2025,OpenAlex 2yr_mean_citedness
+ALZHEIMERS & DEMENTIA,0,2025,OpenAlex 2yr_mean_citedness
+AMERICAN JOURNAL OF NEURORADIOLOGY,4.863,2025,OpenAlex 2yr_mean_citedness
+Annals of Clinical and Translational Neurology,3.411,2025,OpenAlex 2yr_mean_citedness
+Annals of Neurology,7.5,2025,JCR override (BioxBio 2026 update / ANA journal page)
+Aperture neuro,1.623,2025,OpenAlex 2yr_mean_citedness
+Biological Psychiatry,10.3,2025,JCR override (Elsevier journal insights)
+Biological psychiatry. Cognitive neuroscience and neuroimaging,1.743,2025,OpenAlex 2yr_mean_citedness
+Biological Psychiatry: Cognitive Neuroscience and Neuroimaging,4.7,2025,JCR override (Elsevier journal page)
+Brain,12.6,2025,JCR override (BioxBio 2026 update; OUP/Brain reports current JIF separately)
+Brain and Cognition,2.476,2025,OpenAlex 2yr_mean_citedness
+Brain communications,3.938,2025,OpenAlex 2yr_mean_citedness
+BRAIN SCIENCES,3.625,2025,OpenAlex 2yr_mean_citedness
+Brain Stimulation,1.783,2025,OpenAlex 2yr_mean_citedness
+Cell,37.752,2025,OpenAlex 2yr_mean_citedness
+Cell Reports,7.726,2025,OpenAlex 2yr_mean_citedness
+CEREBRAL CORTEX,3.862,2025,OpenAlex 2yr_mean_citedness
+CEREBROVASCULAR DISEASES,1.418,2025,OpenAlex 2yr_mean_citedness
+CLINICAL NEUROPHYSIOLOGY,1.217,2025,OpenAlex 2yr_mean_citedness
+Communications Biology,5.707,2025,OpenAlex 2yr_mean_citedness
+CURRENT OPINION IN NEUROLOGY,4.83,2025,OpenAlex 2yr_mean_citedness
+DATA IN BRIEF,2.355,2025,OpenAlex 2yr_mean_citedness
+Dystonia,1.349,2025,OpenAlex 2yr_mean_citedness
+ELIFE,1.656,2025,OpenAlex 2yr_mean_citedness
+ENEURO,3.258,2025,OpenAlex 2yr_mean_citedness
+Epilepsia,4.23,2025,OpenAlex 2yr_mean_citedness
+EUROPEAN JOURNAL OF NEUROSCIENCE,2.508,2025,OpenAlex 2yr_mean_citedness
+Experimental Neurology,3.678,2025,OpenAlex 2yr_mean_citedness
+FRONTIERS IN BEHAVIORAL NEUROSCIENCE,3.254,2025,OpenAlex 2yr_mean_citedness
+Frontiers in Human Neuroscience,3.188,2025,OpenAlex 2yr_mean_citedness
+FRONTIERS IN NEUROLOGY,2.757,2025,OpenAlex 2yr_mean_citedness
+Frontiers in Neuroscience,3.939,2025,OpenAlex 2yr_mean_citedness
+GASTROINTESTINAL ENDOSCOPY,0.346,2025,OpenAlex 2yr_mean_citedness
+Human brain mapping,4.467,2025,OpenAlex 2yr_mean_citedness
+Infectious Diseases in Clinical Practice,0.216,2025,OpenAlex 2yr_mean_citedness
+iScience,4.325,2025,OpenAlex 2yr_mean_citedness
+JAMA Network Open,8.652,2025,OpenAlex 2yr_mean_citedness
+JAMA Neurology,10.946,2025,OpenAlex 2yr_mean_citedness
+JAMA psychiatry,11.939,2025,OpenAlex 2yr_mean_citedness
+JOURNAL OF AFFECTIVE DISORDERS,4.512,2025,OpenAlex 2yr_mean_citedness
+Journal of Allergy and Clinical Immunology,1.734,2025,OpenAlex 2yr_mean_citedness
+JOURNAL OF ALZHEIMERS DISEASE,0,2025,OpenAlex 2yr_mean_citedness
+JOURNAL OF NEURAL TRANSMISSION,2.939,2025,OpenAlex 2yr_mean_citedness
+JOURNAL OF NEUROLOGY,4.309,2025,OpenAlex 2yr_mean_citedness
+Journal of Neurosurgery - Spine,2.468,2025,OpenAlex 2yr_mean_citedness
+Journal of Parkinson’s Disease,0,2025,OpenAlex 2yr_mean_citedness
+Life Science Alliance,4.205,2025,OpenAlex 2yr_mean_citedness
+Medical Image Analysis,9.883,2025,OpenAlex 2yr_mean_citedness
+Movement Disorders,7.7,2025,JCR override (Wiley journal metrics)
+MOVEMENT DISORDERS CLINICAL PRACTICE,1.731,2025,OpenAlex 2yr_mean_citedness
+Nature biomedical engineering,12.751,2025,OpenAlex 2yr_mean_citedness
+NATURE COMMUNICATIONS,16.081,2025,OpenAlex 2yr_mean_citedness
+NATURE HUMAN BEHAVIOUR,12.979,2025,OpenAlex 2yr_mean_citedness
+Nature Neuroscience,16.515,2025,OpenAlex 2yr_mean_citedness
+NATURE REVIEWS NEUROLOGY,14.215,2025,OpenAlex 2yr_mean_citedness
+NEURO-ONCOLOGY,0.994,2025,OpenAlex 2yr_mean_citedness
+NEUROBIOLOGY OF DISEASE,4.649,2025,OpenAlex 2yr_mean_citedness
+NeuroImage,5.3,2025,JCR override (BioxBio 2026 update)
+NEUROIMAGE-CLINICAL,3.293,2025,OpenAlex 2yr_mean_citedness
+NeuroImage. Clinical,3.293,2025,OpenAlex 2yr_mean_citedness
+NeuroImage: Clinical,3.293,2025,OpenAlex 2yr_mean_citedness
+NEUROLOGY,1.058,2025,OpenAlex 2yr_mean_citedness
+NEUROSCIENCE,3.817,2025,OpenAlex 2yr_mean_citedness
+Neurosurgery,0.887,2025,OpenAlex 2yr_mean_citedness
+Neurotherapeutics,5.373,2025,OpenAlex 2yr_mean_citedness
+Operative Neurosurgery,0.902,2025,OpenAlex 2yr_mean_citedness
+Parkinson's Disease,0,2025,OpenAlex 2yr_mean_citedness
+PARKINSONISM & RELATED DISORDERS,1.513,2025,OpenAlex 2yr_mean_citedness
+Parkinsonism and Related Disorders,1.513,2025,OpenAlex 2yr_mean_citedness
+Proceedings of the National Academy of Sciences,7.921,2025,OpenAlex 2yr_mean_citedness
+Progress in Neurobiology,3.987,2025,OpenAlex 2yr_mean_citedness
+Science Advances,11.977,2025,OpenAlex 2yr_mean_citedness
+SCIENTIFIC DATA,5.209,2025,OpenAlex 2yr_mean_citedness
+SCIENTIFIC REPORTS,4.561,2025,OpenAlex 2yr_mean_citedness
+Stereotactic and Functional Neurosurgery,1.395,2025,OpenAlex 2yr_mean_citedness
+The European journal of neuroscience,0,2025,OpenAlex 2yr_mean_citedness
+The Journal of Neuropsychiatry and Clinical Neurosciences,1.994,2025,OpenAlex 2yr_mean_citedness
+The Lancet Digital Health,14.904,2025,OpenAlex 2yr_mean_citedness
+Transcranial Magnetic Stimulation,0.244,2025,OpenAlex 2yr_mean_citedness
+Trends in Neurosciences,7.093,2025,OpenAlex 2yr_mean_citedness

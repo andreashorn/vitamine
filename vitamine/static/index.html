@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VitaMine</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20260708-repo-db">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img class="brandLogo" src="/logo/vitamine_logo.png" alt="" width="1002" height="756">
+      <h1>VitaMine</h1>
+      <p id="status">Ready</p>
+    </div>
+    <div class="actions"></div>
+  </header>
+
+  <main>
+    <nav class="tabs" aria-label="Views" role="tablist">
+      <button class="tab active" id="dashboardTab" data-view="dashboard" type="button" role="tab" aria-selected="true" aria-controls="dashboardView">Dashboard</button>
+      <button class="tab" id="exportsTab" data-view="exports" type="button" role="tab" aria-selected="false" aria-controls="exportsView" tabindex="-1">Exports</button>
+      <button class="tab" id="entriesTab" data-view="entries" type="button" role="tab" aria-selected="false" aria-controls="entriesView" tabindex="-1">Entries</button>
+      <button class="tab" id="personTab" data-view="person" type="button" role="tab" aria-selected="false" aria-controls="personView" tabindex="-1">Person</button>
+      <button class="tab" id="publicationsTab" data-view="publications" type="button" role="tab" aria-selected="false" aria-controls="publicationsView" tabindex="-1">Publications</button>
+      <button class="tab" id="narrativeTab" data-view="narrative" type="button" role="tab" aria-selected="false" aria-controls="narrativeView" tabindex="-1">Narrative</button>
+      <button class="tab" id="summaryTab" data-view="summary" type="button" role="tab" aria-selected="false" aria-controls="summaryView" tabindex="-1">Summary</button>
+    </nav>
+
+    <section id="dashboardView" class="view active" role="tabpanel" aria-labelledby="dashboardTab">
+      <div class="dashboardGrid">
+        <section class="panel">
+          <div class="panelHeader">
+            <h2>Database</h2>
+            <p>Start with the bundled example or create a blank workspace.</p>
+          </div>
+          <div class="databaseStatus">
+            <span>Current database</span>
+            <strong id="databaseName">Loading...</strong>
+          </div>
+          <div class="buttonRow">
+            <button id="useExampleDatabase" type="button">Use Example</button>
+            <button id="createBlankDatabase" type="button">New Blank Database</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panelHeader">
+            <h2>Sync</h2>
+            <p>Pull publication metadata from the Netstim Zotero group into the local SQLite database.</p>
+          </div>
+          <div class="buttonRow">
+            <button id="syncZoteroDashboard" type="button">Sync Zotero</button>
+            <button id="syncOrcidDashboard" type="button">Sync ORCID</button>
+            <button id="enrichDoiDashboard" type="button">Enrich DOI Metadata</button>
+            <button id="maintainPubsDashboard" type="button">Apply Journal Metrics / Clean</button>
+          </div>
+          <pre id="syncOutput" class="logBox">No sync run in this session.</pre>
+        </section>
+
+        <section class="panel">
+          <div class="panelHeader">
+            <h2>Metrics</h2>
+            <p>Quick overview of publication data and export readiness.</p>
+          </div>
+          <div id="metricsGrid" class="metricsGrid"></div>
+          <div class="subPanel">
+            <h3>Recent Publication Years</h3>
+            <div id="yearMetrics" class="miniList"></div>
+          </div>
+          <div class="subPanel">
+            <h3>Top Venues</h3>
+            <div id="venueMetrics" class="miniList"></div>
+          </div>
+          <div class="subPanel">
+            <div class="panelHeader compactHeader">
+              <h3>Journal Impact Factors</h3>
+              <p>Curated locally; save values to apply them to matching publication venues.</p>
+            </div>
+            <div class="metricToolbar">
+              <input id="journalMetricSearch" type="search" placeholder="Filter venues">
+              <button id="fetchJournalMetrics" type="button">Fetch OpenAlex Metrics</button>
+              <button id="saveJournalMetrics" type="button">Save IFs</button>
+            </div>
+            <div id="journalMetricEditor" class="metricEditor"></div>
+          </div>
+        </section>
+
+      </div>
+    </section>
+
+    <section id="exportsView" class="view" role="tabpanel" aria-labelledby="exportsTab">
+      <section id="exportsPanel" class="panel">
+        <div class="panelHeader">
+          <h2>Exports</h2>
+          <p>Build CV variants from the curated database.</p>
+        </div>
+        <div class="exportList">
+          <article class="exportCard">
+            <h3>One-page tabular CV</h3>
+            <p>Younger-style DOCX with a tightly curated publication list.</p>
+            <div class="buttonRow">
+              <button id="buildUltraDashboard" type="button">Build</button>
+              <a href="/output/ultrashort_tabular_cv.docx" target="_blank">View DOCX</a>
+            </div>
+          </article>
+          <article class="exportCard">
+            <h3>Short CV</h3>
+            <p>Compact PDF/HTML export with a separate selected-publications list.</p>
+            <div class="buttonRow">
+              <button id="buildShortDashboard" type="button">Build</button>
+              <a href="/output/short_cv.html" target="_blank">View HTML</a>
+              <a href="/output/short_cv.pdf" target="_blank">View PDF</a>
+            </div>
+          </article>
+          <article class="exportCard">
+            <h3>Long CV</h3>
+            <p>Current long CV builder. This will become the Harvard-style export.</p>
+            <label>Language
+              <select id="longCvLanguage">
+                <option value="en">English</option>
+                <option value="de">Deutsch</option>
+              </select>
+            </label>
+            <div class="buttonRow">
+              <button id="buildLongDashboard" type="button">Build</button>
+              <a id="openLongDashboardHtml" href="/output/long_cv.html" target="_blank">View HTML</a>
+              <a id="openLongDashboardPdf" href="/output/long_cv.pdf" target="_blank">View PDF</a>
+            </div>
+          </article>
+          <article class="exportCard">
+            <h3>NIH Biosketch</h3>
+            <p>Biosketch export with current contributions to science.</p>
+            <div class="buttonRow">
+              <button id="buildBiosketchDashboard" type="button">Build</button>
+              <a href="/output/biosketch.html" target="_blank">View HTML</a>
+              <a href="/output/biosketch.pdf" target="_blank">View PDF</a>
+            </div>
+          </article>
+        </div>
+        <pre id="exportOutput" class="logBox">No export run in this session.</pre>
+      </section>
+    </section>
+
+    <section id="entriesView" class="view" role="tabpanel" aria-labelledby="entriesTab">
+      <div class="toolbar">
+        <select id="sectionFilter"></select>
+        <input id="entrySearch" type="search" placeholder="Search entries">
+        <button id="newEntry" type="button">New Entry</button>
+      </div>
+      <div class="split">
+        <div class="tablepane">
+          <table>
+            <thead>
+              <tr>
+                <th>Section</th>
+                <th>Dates</th>
+                <th>Title</th>
+                <th>Organization</th>
+              </tr>
+            </thead>
+            <tbody id="entriesBody"></tbody>
+          </table>
+        </div>
+        <form id="entryForm" class="editor">
+          <input type="hidden" id="entryId">
+          <label>Section<select id="entrySection" name="section_key"></select></label>
+          <div class="grid two">
+            <label>Start<input name="start_date" id="entryStart"></label>
+            <label>End<input name="end_date" id="entryEnd"></label>
+          </div>
+          <fieldset>
+            <legend>English</legend>
+            <label>Title<input name="title" id="entryTitle"></label>
+            <label>Organization<input name="organization" id="entryOrganization"></label>
+            <label>Location<input name="location" id="entryLocation"></label>
+            <label>Role<input name="role" id="entryRole"></label>
+            <label>Amount<input name="amount" id="entryAmount"></label>
+            <label>Description<textarea name="description" id="entryDescription" rows="6"></textarea></label>
+          </fieldset>
+          <fieldset>
+            <legend>German</legend>
+            <label>Title<input name="title_de" id="entryTitleDe"></label>
+            <label>Organization<input name="organization_de" id="entryOrganizationDe"></label>
+            <label>Location<input name="location_de" id="entryLocationDe"></label>
+            <label>Role<input name="role_de" id="entryRoleDe"></label>
+            <label>Amount<input name="amount_de" id="entryAmountDe"></label>
+            <label>Description<textarea name="description_de" id="entryDescriptionDe" rows="6"></textarea></label>
+          </fieldset>
+          <fieldset>
+            <legend>Achievements</legend>
+            <div id="entryAchievements" class="achievementList"></div>
+          </fieldset>
+          <div class="grid four">
+            <label><input type="checkbox" id="includeExtended" checked> Extended</label>
+            <label><input type="checkbox" id="includeLong" checked> Long</label>
+            <label><input type="checkbox" id="includeShort"> Short</label>
+            <label><input type="checkbox" id="includeBiosketch"> Biosketch</label>
+          </div>
+          <div class="formActions">
+            <button type="submit">Save</button>
+            <button id="deleteEntry" type="button">Delete</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section id="personView" class="view" role="tabpanel" aria-labelledby="personTab">
+      <form id="personForm" class="personGrid">
+        <label>Full name<input name="full_name"></label>
+        <label>Display name<input name="display_name"></label>
+        <label>Degrees<input name="degrees"></label>
+        <label>Position title<input name="position_title"></label>
+        <label>Office address<input name="office_address"></label>
+        <label>Home address<input name="home_address"></label>
+        <label>Work phone<input name="work_phone"></label>
+        <label>Work email<input name="work_email"></label>
+        <label>Place of birth<input name="place_of_birth"></label>
+        <label>eRA Commons<input name="era_commons"></label>
+        <button type="submit">Save Person</button>
+      </form>
+      <section class="identifierPanel">
+        <div class="panelHeader compactHeader">
+          <h2>Identifiers</h2>
+          <p>Researcher profiles and persistent IDs stored in the local CV database.</p>
+        </div>
+        <form id="identifierForm" class="identifierForm">
+          <input id="identifierId" type="hidden">
+          <label>Platform<input id="identifierPlatform" placeholder="ORCID"></label>
+          <label>Type<input id="identifierType" placeholder="ORCID iD"></label>
+          <label>Value<input id="identifierValue" placeholder="0000-0002-0695-6025"></label>
+          <label>URL<input id="identifierUrl" placeholder="https://orcid.org/..."></label>
+          <label class="identifierNotesField">Notes<textarea id="identifierNotes" rows="2"></textarea></label>
+          <div class="buttonRow">
+            <button type="submit">Save Identifier</button>
+            <button id="newIdentifier" type="button">New</button>
+            <button id="deleteIdentifier" type="button">Delete</button>
+          </div>
+        </form>
+        <div id="personIdentifiers" class="identifierList"></div>
+      </section>
+    </section>
+
+    <section id="publicationsView" class="view" role="tabpanel" aria-labelledby="publicationsTab">
+      <div class="toolbar">
+        <input id="pubSearch" type="search" placeholder="Search publications">
+        <label class="inlineCheck"><input id="showSuppressedPubs" type="checkbox"> Show hidden/problem rows</label>
+      </div>
+      <div class="publicationWorkspace">
+        <div class="publicationMainStack">
+          <div class="tablepane publicationMainPane">
+            <table>
+              <thead>
+                <tr>
+                  <th data-sort="year">Year</th>
+                  <th data-sort="source">Source</th>
+                  <th data-sort="flags">Flags</th>
+                  <th data-sort="order">Order</th>
+                  <th data-sort="title">Title</th>
+                  <th data-sort="venue">Venue</th>
+                  <th data-sort="impact_factor">IF</th>
+                  <th data-sort="doi">DOI</th>
+                </tr>
+              </thead>
+              <tbody id="publicationsBody"></tbody>
+            </table>
+          </div>
+          <section class="dropPanel biosketchDropPanel">
+            <div class="dropPanelHeader">
+              <h2>Biosketch</h2>
+              <span id="biosketchDropCount">0 / 20</span>
+            </div>
+            <div class="buttonRow compactButtons">
+              <button id="newBiosketchAchievement" type="button">New Achievement</button>
+              <button id="deleteBiosketchAchievement" type="button">Delete Achievement</button>
+            </div>
+            <div id="biosketchAchievements" class="biosketchAchievements"></div>
+          </section>
+        </div>
+        <aside class="publicationSidebar">
+          <section class="dropPanel" data-profile="ultrashort">
+            <div class="dropPanelHeader">
+              <h2>Include in One-page CV</h2>
+              <span id="ultrashortDropCount">0</span>
+            </div>
+            <div id="ultrashortDropList" class="dropList" data-profile="ultrashort"></div>
+          </section>
+          <section class="dropPanel" data-profile="short">
+            <div class="dropPanelHeader">
+              <h2>Include in Short CV</h2>
+              <span id="shortDropCount">0</span>
+            </div>
+            <div id="shortDropList" class="dropList" data-profile="short"></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+
+    <section id="narrativeView" class="view" role="tabpanel" aria-labelledby="narrativeTab">
+      <form id="narrativeForm" class="narrativeEditor">
+        <fieldset>
+          <legend>English</legend>
+          <label>Title<input name="title" id="narrativeTitle"></label>
+          <label>Body<textarea name="body" id="narrativeBody" rows="18"></textarea></label>
+        </fieldset>
+        <fieldset>
+          <legend>German</legend>
+          <label>Title<input name="title_de" id="narrativeTitleDe"></label>
+          <label>Body<textarea name="body_de" id="narrativeBodyDe" rows="18"></textarea></label>
+        </fieldset>
+        <div class="formActions">
+          <button type="submit">Save Narrative</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="summaryView" class="view" role="tabpanel" aria-labelledby="summaryTab">
+      <div id="summaryGrid" class="summaryGrid"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=20260708-repo-db"></script>
+</body>
+</html>

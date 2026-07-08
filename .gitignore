@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+output/*
+!output/.gitkeep
+data/active_db.txt
+data/*.sqlite
+!data/example.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+.env
