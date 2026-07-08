@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from vitamine.scripts.export_utils import compile_typst_if_available, markdown_to_html_body
 from vitamine.paths import OUTPUT, ROOT, active_db_path
 
 DB = active_db_path()
@@ -831,14 +832,10 @@ def build_typst() -> str:
     return "\n".join(lines) + "\n"
 
 
-def markdown_to_html(markdown: str) -> str:
-    body = subprocess.check_output(
-        ["pandoc", "-f", "markdown", "-t", "html"],
-        input=markdown,
-        text=True,
-        cwd=ROOT,
-    )
-    return f"""<!doctype html>
+def markdown_to_html(markdown: str) -> tuple[str, str | None]:
+    body, warning = markdown_to_html_body(markdown, ROOT)
+    warning_html = f'<p class="warning">{html.escape(warning)}</p>' if warning else ""
+    html_doc = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -857,6 +854,7 @@ def markdown_to_html(markdown: str) -> str:
     th {{ background: #f1f1f1; text-align: left; font-weight: 700; }}
     td:first-child, th:first-child {{ width: 112px; }}
     p {{ margin: 0 0 6px; }}
+    .warning {{ border: 1px solid #d8b24c; background: #fff8db; padding: 8px; color: #5d4700; }}
     @media print {{
       body {{ margin: 0; max-width: none; }}
       a {{ color: #111; text-decoration: none; }}
@@ -864,10 +862,12 @@ def markdown_to_html(markdown: str) -> str:
   </style>
 </head>
 <body>
+{warning_html}
 {body}
 </body>
 </html>
 """
+    return html_doc, warning
 
 
 def output_stem() -> str:
@@ -885,24 +885,21 @@ def build(lang: str = "en") -> dict[str, str]:
     pdf_path = OUTPUT / f"{stem}.pdf"
     typ_path = OUTPUT / f"{stem}.typ"
     md_path.write_text(markdown, encoding="utf-8")
-    html_path.write_text(markdown_to_html(markdown), encoding="utf-8")
+    html_doc, html_warning = markdown_to_html(markdown)
+    html_path.write_text(html_doc, encoding="utf-8")
     typ_path.write_text(build_typst(), encoding="utf-8")
-    subprocess.run(
-        [
-            "typst",
-            "compile",
-            str(typ_path),
-            str(pdf_path),
-        ],
-        cwd=ROOT,
-        check=True,
-    )
-    return {
+    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
+    result = {
         "markdown": str(md_path.relative_to(ROOT)),
         "html": str(html_path.relative_to(ROOT)),
         "typst": str(typ_path.relative_to(ROOT)),
-        "pdf": str(pdf_path.relative_to(ROOT)),
     }
+    if pdf:
+        result["pdf"] = str(pdf.relative_to(ROOT))
+    warnings = [item for item in (html_warning, warning) if item]
+    if warnings:
+        result["warning"] = " ".join(warnings)
+    return result
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from vitamine.scripts.export_utils import compile_typst_if_available
 from vitamine.paths import OUTPUT, ROOT, active_db_path
 
 DB = active_db_path()
@@ -271,12 +272,16 @@ def build() -> dict[str, str]:
     pdf_path = OUTPUT / "short_cv.pdf"
     html_path.write_text(build_html(), encoding="utf-8")
     typ_path.write_text(build_typst(), encoding="utf-8")
-    subprocess.run(["typst", "compile", str(typ_path), str(pdf_path)], cwd=ROOT, check=True)
-    return {
+    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
+    result = {
         "html": str(html_path.relative_to(ROOT)),
         "typst": str(typ_path.relative_to(ROOT)),
-        "pdf": str(pdf_path.relative_to(ROOT)),
     }
+    if pdf:
+        result["pdf"] = str(pdf.relative_to(ROOT))
+    if warning:
+        result["warning"] = warning
+    return result
 
 
 if __name__ == "__main__":

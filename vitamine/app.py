@@ -1286,6 +1286,23 @@ def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def build_response(stdout: str, cache_key: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"ok": True, "stdout": stdout}
+    for line in stdout.splitlines():
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if key in {"html", "markdown", "typst", "pdf", "docx"} and value:
+            payload[key] = f"/{value}?v={cache_key}"
+        elif key == "warning" and value:
+            payload["warning"] = value
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 @app.get("/api/database")
 def database_info() -> dict[str, Any]:
     db = active_db_path()
@@ -1366,14 +1383,7 @@ def build_long_action(lang: str = "en") -> JSONResponse:
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse({
-        "ok": True,
-        "stdout": result.stdout,
-        "html": f"/output/{'long_cv_de' if lang == 'de' else 'long_cv'}.html?v={cache_key}",
-        "markdown": f"/output/{'long_cv_de' if lang == 'de' else 'long_cv'}.md?v={cache_key}",
-        "pdf": f"/output/{'long_cv_de' if lang == 'de' else 'long_cv'}.pdf?v={cache_key}",
-        "language": lang,
-    })
+    return JSONResponse(build_response(result.stdout, cache_key, {"language": lang}))
 
 
 @app.post("/api/actions/build-short")
@@ -1385,13 +1395,7 @@ def build_short_action() -> JSONResponse:
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse({
-        "ok": True,
-        "stdout": curated.stdout + result.stdout,
-        "html": f"/output/short_cv.html?v={cache_key}",
-        "typst": f"/output/short_cv.typ?v={cache_key}",
-        "pdf": f"/output/short_cv.pdf?v={cache_key}",
-    })
+    return JSONResponse(build_response(curated.stdout + result.stdout, cache_key))
 
 
 @app.post("/api/actions/build-ultrashort-tabular")
@@ -1400,11 +1404,7 @@ def build_ultrashort_tabular_action() -> JSONResponse:
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse({
-        "ok": True,
-        "stdout": result.stdout,
-        "docx": f"/output/ultrashort_tabular_cv.docx?v={cache_key}",
-    })
+    return JSONResponse(build_response(f"docx: output/ultrashort_tabular_cv.docx\n{result.stdout}", cache_key))
 
 
 @app.post("/api/actions/build-biosketch")
@@ -1421,13 +1421,7 @@ def build_biosketch_action() -> JSONResponse:
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse({
-        "ok": True,
-        "stdout": imported_stdout + result.stdout,
-        "html": f"/output/biosketch.html?v={cache_key}",
-        "typst": f"/output/biosketch.typ?v={cache_key}",
-        "pdf": f"/output/biosketch.pdf?v={cache_key}",
-    })
+    return JSONResponse(build_response(imported_stdout + result.stdout, cache_key))
 
 
 @app.post("/api/actions/build-harvard")
