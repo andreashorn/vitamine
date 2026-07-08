@@ -19,7 +19,7 @@ from typing import Any
 
 from docx import Document
 
-from vitamine.paths import ROOT, bundled_model_path, tool_path
+from vitamine.paths import APP_SUPPORT, ROOT, bundled_model_path, tool_path
 from vitamine.scripts.import_background_docs import (
     clean_markup,
     extract_biosketch_contributions,
@@ -431,6 +431,7 @@ def call_bundled_llama(text: str, settings: dict[str, str]) -> dict[str, Any]:
     model = Path(configured_model).expanduser() if configured_model else bundled_model_path()
     if not model or not model.exists():
         raise RuntimeError("Bundled local LLM model was not found. Add vendor/models/vitamine-import.gguf before packaging.")
+    model = cached_runtime_model(model)
     port = free_local_port()
     base_url = f"http://127.0.0.1:{port}"
     command = [
@@ -473,6 +474,23 @@ def call_bundled_llama(text: str, settings: dict[str, str]) -> dict[str, Any]:
                 process.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+
+
+def cached_runtime_model(source: Path) -> Path:
+    cache_dir = APP_SUPPORT / "models"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    target = cache_dir / source.name
+    try:
+        source_stat = source.stat()
+        target_stat = target.stat() if target.exists() else None
+        if target_stat and target_stat.st_size == source_stat.st_size and int(target_stat.st_mtime) >= int(source_stat.st_mtime):
+            return target
+        tmp = target.with_suffix(f"{target.suffix}.tmp")
+        shutil.copy2(source, tmp)
+        tmp.replace(target)
+        return target
+    except OSError:
+        return source
 
 
 def llm_extract(text: str, settings: dict[str, str]) -> tuple[dict[str, Any] | None, str | None]:

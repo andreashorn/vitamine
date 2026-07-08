@@ -43,6 +43,7 @@ datas = existing_datas(
         (ROOT / "data" / "example.vitamine", "data"),
         (ROOT / "data" / "journal_metrics.csv", "data"),
         (MODELS_DIR, "models"),
+        (ROOT / "vendor" / "export-tools" / "lib", "lib"),
     ]
 ) + optional_tool_data("typst") + optional_tool_data("pandoc")
 

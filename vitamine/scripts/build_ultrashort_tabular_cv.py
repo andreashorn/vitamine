@@ -115,6 +115,11 @@ def citation_text(value: str | None) -> str:
     return value.rstrip(" .")
 
 
+def sentence_part(value: str | None) -> str:
+    value = citation_text(value)
+    return value if not value or value.endswith((".", "?", "!")) else f"{value}."
+
+
 def normalize_citation_spacing(value: str | None) -> str:
     value = clean(value).strip()
     value = re.sub(r"\s+([,.;:])", r"\1", value)
@@ -205,23 +210,23 @@ def typst_citation(row: sqlite3.Row) -> str:
     parts = []
     authors = citation_text(row["authors"])
     if authors:
-        parts.append(typst_rich_text(authors + ".", bold_names=True))
+        parts.append(typst_rich_text(sentence_part(authors), bold_names=True))
     title = citation_text(row["title"])
     if title:
-        parts.append(text(title + ".", size="10.15pt"))
+        parts.append(text(sentence_part(title), size="10.15pt"))
     venue = citation_text(row["venue"])
     if venue:
         venue = venue.title() if venue.isupper() else venue
-        parts.append(typst_rich_text(venue + ".", italic=True, underline=True))
+        parts.append(typst_rich_text(sentence_part(venue), italic=True, underline=True))
     year_value = citation_text(row["year"])
     if year_value:
-        parts.append(text(year_value + ".", size="10.15pt"))
+        parts.append(text(sentence_part(year_value), size="10.15pt"))
     impact = impact_factor_label(row)
     if impact:
-        parts.append(text(citation_text(impact) + ".", size="10.15pt"))
+        parts.append(text(sentence_part(impact), size="10.15pt"))
     doi = citation_text(row["doi"])
     if doi:
-        parts.append(text(f"doi:{doi}.", size="10.15pt"))
+        parts.append(text(sentence_part(f"doi:{doi}"), size="10.15pt"))
     return "#h(0.28em)".join(parts)
 
 
@@ -321,23 +326,23 @@ def add_publication_docx_text(paragraph, row: sqlite3.Row) -> None:
     parts: list[tuple[str, bool, bool, bool]] = []
     authors = citation_text(row["authors"])
     if authors:
-        parts.append((authors + ".", True, False, False))
+        parts.append((sentence_part(authors), True, False, False))
     title = citation_text(row["title"])
     if title:
-        parts.append((title + ".", False, False, False))
+        parts.append((sentence_part(title), False, False, False))
     venue = citation_text(row["venue"])
     if venue:
         venue = venue.title() if venue.isupper() else venue
-        parts.append((venue + ".", False, True, True))
+        parts.append((sentence_part(venue), False, True, True))
     year_value = citation_text(row["year"])
     if year_value:
-        parts.append((year_value + ".", False, False, False))
+        parts.append((sentence_part(year_value), False, False, False))
     impact = impact_factor_label(row)
     if impact:
-        parts.append((citation_text(impact) + ".", False, False, False))
+        parts.append((sentence_part(impact), False, False, False))
     doi = citation_text(row["doi"])
     if doi:
-        parts.append((f"doi:{doi}.", False, False, False))
+        parts.append((sentence_part(f"doi:{doi}"), False, False, False))
     for index, (value, bold_names, italic, underline) in enumerate(parts):
         if index:
             paragraph.add_run(" ")
