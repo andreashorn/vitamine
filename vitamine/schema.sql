@@ -23,7 +23,12 @@ CREATE TABLE IF NOT EXISTS person (
   place_of_birth TEXT,
   era_commons TEXT,
   orcid_id TEXT,
-  raw_json TEXT
+  raw_json TEXT,
+  own_institution_name TEXT,
+  own_institution_country TEXT,
+  own_institution_country_code TEXT,
+  own_institution_latitude REAL,
+  own_institution_longitude REAL
 );
 
 CREATE TABLE IF NOT EXISTS person_identifiers (
@@ -37,6 +42,20 @@ CREATE TABLE IF NOT EXISTS person_identifiers (
   verified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   notes TEXT,
   UNIQUE(person_id, platform, identifier_type, identifier_value)
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS journal_metrics (
+  venue TEXT PRIMARY KEY,
+  impact_factor REAL,
+  impact_factor_year TEXT,
+  metric_source TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS sections (
@@ -124,6 +143,32 @@ CREATE TABLE IF NOT EXISTS export_settings (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_publications_zotero_key
 ON publications(zotero_key)
 WHERE zotero_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS collaboration_institutions (
+  id INTEGER PRIMARY KEY,
+  publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+  openalex_work_id TEXT,
+  publication_title TEXT,
+  publication_year TEXT,
+  author_name TEXT,
+  author_position TEXT,
+  institution_id TEXT NOT NULL,
+  institution_name TEXT NOT NULL,
+  ror TEXT,
+  country_code TEXT,
+  country TEXT,
+  latitude REAL,
+  longitude REAL,
+  source TEXT NOT NULL DEFAULT 'openalex',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(publication_id, author_name, institution_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_pub
+ON collaboration_institutions(publication_id);
+
+CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_inst
+ON collaboration_institutions(institution_id);
 
 CREATE TABLE IF NOT EXISTS biosketch_contributions (
   id INTEGER PRIMARY KEY,

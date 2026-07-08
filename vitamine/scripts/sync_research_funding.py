@@ -251,7 +251,7 @@ def insert_entry(con: sqlite3.Connection, data: dict, source_note: str) -> int:
         con.execute(
             """
             INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
-            VALUES ('manual_cv_database', 'Manual CV database edits', 'data/example.sqlite', 'sqlite', datetime('now'), 'Research funding normalized from source documents.')
+            VALUES ('manual_cv_database', 'Manual CV database edits', 'data/example.vitamine', 'vitamine', datetime('now'), 'Research funding normalized from source documents.')
             """
         )
         document_id = con.execute("SELECT id FROM documents WHERE slug='manual_cv_database'").fetchone()[0]

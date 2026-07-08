@@ -9,18 +9,16 @@ an open, impact-factor-like journal metric.
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import re
 import sqlite3
 import time
 import urllib.parse
 import urllib.request
-from pathlib import Path
 from typing import Any
 
 from maintain_publications import maintain
-from vitamine.paths import METRICS_CSV, active_db_path
+from vitamine.paths import active_db_path
 
 
 DB = active_db_path()
@@ -31,6 +29,17 @@ SOURCE_NAME = "OpenAlex 2yr_mean_citedness"
 def connect() -> sqlite3.Connection:
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal_metrics (
+          venue TEXT PRIMARY KEY,
+          impact_factor REAL,
+          impact_factor_year TEXT,
+          metric_source TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     return con
 
 
@@ -62,23 +71,52 @@ def title_score(query: str, candidate: dict[str, Any]) -> int:
 
 
 def read_existing_metrics() -> dict[str, dict[str, str]]:
-    if not METRICS_CSV.exists():
-        return {}
-    with METRICS_CSV.open(newline="", encoding="utf-8") as handle:
-        return {
-            (row.get("venue") or "").casefold(): row
-            for row in csv.DictReader(handle)
-            if (row.get("venue") or "").strip()
+    with connect() as con:
+        rows = con.execute(
+            """
+            SELECT venue, impact_factor, impact_factor_year, metric_source
+            FROM journal_metrics
+            WHERE venue != ''
+            """
+        ).fetchall()
+    return {
+        str(row["venue"]).casefold(): {
+            "venue": str(row["venue"]),
+            "impact_factor": "" if row["impact_factor"] is None else str(row["impact_factor"]),
+            "impact_factor_year": str(row["impact_factor_year"] or ""),
+            "metric_source": str(row["metric_source"] or ""),
         }
+        for row in rows
+        if str(row["venue"] or "").strip()
+    }
 
 
 def write_metrics(metrics: dict[str, dict[str, str]]) -> None:
-    METRICS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    with METRICS_CSV.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["venue", "impact_factor", "impact_factor_year", "metric_source"])
-        writer.writeheader()
-        for row in sorted(metrics.values(), key=lambda item: item["venue"].casefold()):
-            writer.writerow(row)
+    with connect() as con:
+        for row in metrics.values():
+            venue = str(row.get("venue") or "").strip()
+            impact_factor = str(row.get("impact_factor") or "").strip()
+            if not venue or not impact_factor:
+                continue
+            con.execute(
+                """
+                INSERT INTO journal_metrics
+                  (venue, impact_factor, impact_factor_year, metric_source, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(venue) DO UPDATE SET
+                  impact_factor=excluded.impact_factor,
+                  impact_factor_year=excluded.impact_factor_year,
+                  metric_source=excluded.metric_source,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    venue,
+                    float(impact_factor),
+                    str(row.get("impact_factor_year") or "").strip() or None,
+                    str(row.get("metric_source") or "").strip() or None,
+                ),
+            )
+        con.commit()
 
 
 def publication_venues(limit: int | None = None) -> list[str]:

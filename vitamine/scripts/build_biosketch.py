@@ -4,15 +4,17 @@
 from __future__ import annotations
 
 import html
+import argparse
 import json
 import sqlite3
 import subprocess
 from pathlib import Path
 
-from vitamine.scripts.export_utils import compile_typst_if_available
-from vitamine.paths import OUTPUT, ROOT, active_db_path
+from vitamine.scripts.export_utils import compile_typst_if_available, convert_with_pandoc_if_available
+from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 
 DB = active_db_path()
+LANG = "en"
 
 
 PERSONAL_STATEMENT = (
@@ -97,7 +99,7 @@ def paragraph(value: str, *, size: str | None = None) -> str:
 
 def html_page(body: str) -> str:
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{LANG}">
 <head>
   <meta charset="utf-8">
   <title>NIH Biosketch</title>
@@ -229,33 +231,48 @@ def build_typst() -> str:
     for contribution in contributions:
         citations = json.loads(contribution["citations_json"] or "[]")
         title_line = f"{contribution['ordinal']}. {contribution['title']}. "
-        lines.append(f"#block(below: 0.055in)[{text(title_line, bold=True)}{text(contribution['narrative'])}]")
+        lines.append(f"#block(below: 0.115in)[{text(title_line, bold=True)}{text(contribution['narrative'])}]")
         for citation in citations:
-            lines.append("#grid(columns: (0.22in, 6.92in), gutter: 0.08in, row-gutter: 0pt,\n"
+            lines.append("#grid(columns: (0.22in, 6.92in), gutter: 0.08in, row-gutter: 0.015in,\n"
                          f"  [{text('')}],\n  [{text(citation, size='9pt')}]\n)")
     lines.append(paragraph("Complete List of Published Work in MyBibliography: https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/", size="9pt"))
     return "\n".join(lines) + "\n"
 
 
-def build() -> dict[str, str]:
+def output_stem() -> str:
+    return "biosketch_de" if LANG == "de" else "biosketch"
+
+
+def build(lang: str = "en") -> dict[str, str]:
+    global LANG
+    LANG = "de" if lang == "de" else "en"
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    html_path = OUTPUT / "biosketch.html"
-    typ_path = OUTPUT / "biosketch.typ"
-    pdf_path = OUTPUT / "biosketch.pdf"
+    stem = output_stem()
+    html_path = OUTPUT / f"{stem}.html"
+    typ_path = OUTPUT / f"{stem}.typ"
+    pdf_path = OUTPUT / f"{stem}.pdf"
+    docx_path = OUTPUT / f"{stem}.docx"
     html_path.write_text(build_html(), encoding="utf-8")
     typ_path.write_text(build_typst(), encoding="utf-8")
     pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
+    docx, docx_warning = convert_with_pandoc_if_available(html_path, docx_path, ROOT)
     result = {
-        "html": str(html_path.relative_to(ROOT)),
-        "typst": str(typ_path.relative_to(ROOT)),
+        "html": f"output/{output_ref(html_path)}",
+        "typst": f"output/{output_ref(typ_path)}",
     }
     if pdf:
-        result["pdf"] = str(pdf.relative_to(ROOT))
-    if warning:
-        result["warning"] = warning
+        result["pdf"] = f"output/{output_ref(pdf)}"
+    if docx:
+        result["docx"] = f"output/{output_ref(docx)}"
+    warnings = [item for item in (warning, docx_warning) if item]
+    if warnings:
+        result["warning"] = " ".join(warnings)
     return result
 
 
 if __name__ == "__main__":
-    for name, path in build().items():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lang", choices=["en", "de"], default="en")
+    args = parser.parse_args()
+    for name, path in build(args.lang).items():
         print(f"{name}: {path}")

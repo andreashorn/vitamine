@@ -7,6 +7,7 @@ dependencies = [
   "eval-type-backport",
   "fastapi",
   "python-docx",
+  "python-multipart",
   "uvicorn",
 ]
 

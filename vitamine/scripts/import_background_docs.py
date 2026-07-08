@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 
 from vitamine.i18n import GERMAN_FIELD_PAIRS, draft_translate_to_german
-from vitamine.paths import DATA, ROOT, SCHEMA, active_db_path
+from vitamine.paths import DATA, ROOT, SCHEMA, active_db_path, tool_path
 
 EXTRACTS = ROOT / "extracts"
 DB = active_db_path()
@@ -108,8 +108,11 @@ ZOTERO_ITEM_CATEGORIES = {
 
 
 def run_pandoc(path: Path) -> str:
+    pandoc = tool_path("pandoc")
+    if pandoc is None:
+        raise RuntimeError("Pandoc is required to import DOCX background documents but was not found.")
     return subprocess.check_output(
-        ["pandoc", "-t", "markdown", "--wrap=none", str(path)],
+        [pandoc, "-t", "markdown", "--wrap=none", str(path)],
         cwd=ROOT,
         text=True,
     )

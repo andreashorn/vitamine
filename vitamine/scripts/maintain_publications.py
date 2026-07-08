@@ -3,13 +3,10 @@
 
 from __future__ import annotations
 
-import csv
 import re
 import sqlite3
-from pathlib import Path
 
-
-from vitamine.paths import METRICS_CSV, ROOT, active_db_path
+from vitamine.paths import active_db_path
 
 PREPRINT_VENUES = {
     "arxiv",
@@ -64,6 +61,17 @@ def ensure_columns(con: sqlite3.Connection) -> None:
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE publications ADD COLUMN {column} {definition}")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal_metrics (
+          venue TEXT PRIMARY KEY,
+          impact_factor REAL,
+          impact_factor_year TEXT,
+          metric_source TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
 
 
 def normalize_title(value: str | None) -> str:
@@ -330,32 +338,30 @@ def suppress_orcid_only_records(con: sqlite3.Connection) -> int:
 
 
 def apply_journal_metrics(con: sqlite3.Connection) -> int:
-    if not METRICS_CSV.exists():
-        return 0
     updated = 0
-    with METRICS_CSV.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            venue = (row.get("venue") or "").strip()
-            impact_factor = (row.get("impact_factor") or "").strip()
-            if not venue or not impact_factor:
-                continue
-            cursor = con.execute(
-                """
-                UPDATE publications
-                SET impact_factor=?,
-                    impact_factor_year=?,
-                    metric_source=?
-                WHERE lower(venue) = lower(?)
-                """,
-                (
-                    float(impact_factor),
-                    (row.get("impact_factor_year") or "").strip() or None,
-                    (row.get("metric_source") or "").strip() or None,
-                    venue,
-                ),
-            )
-            updated += cursor.rowcount
+    for row in con.execute(
+        """
+        SELECT venue, impact_factor, impact_factor_year, metric_source
+        FROM journal_metrics
+        WHERE venue != '' AND impact_factor IS NOT NULL
+        """
+    ).fetchall():
+        cursor = con.execute(
+            """
+            UPDATE publications
+            SET impact_factor=?,
+                impact_factor_year=?,
+                metric_source=?
+            WHERE lower(venue) = lower(?)
+            """,
+            (
+                row["impact_factor"],
+                row["impact_factor_year"],
+                row["metric_source"],
+                row["venue"],
+            ),
+        )
+        updated += cursor.rowcount
     return updated
 
 

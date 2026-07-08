@@ -7,13 +7,21 @@ import html
 import json
 import re
 import sqlite3
-import subprocess
+import argparse
 from pathlib import Path
 
+from docx import Document
+from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
+
 from vitamine.scripts.export_utils import compile_typst_if_available
-from vitamine.paths import OUTPUT, ROOT, active_db_path
+from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 
 DB = active_db_path()
+LANG = "en"
 
 
 SECTION_TITLES = {
@@ -25,6 +33,17 @@ SECTION_TITLES = {
     "funding": "Selected Funding",
     "mentoring": "Mentoring",
     "invited_presentations": "Selected Presentations",
+}
+
+SECTION_TITLES_DE = {
+    "education": "Ausbildung",
+    "postdoctoral_training": "Postdoktorale Ausbildung",
+    "academic_appointments": "Positionen und Berufungen",
+    "hospital_appointments": "Klinische Positionen",
+    "honors": "Ausgewählte Auszeichnungen",
+    "funding": "Ausgewählte Forschungsförderung",
+    "mentoring": "Betreuung",
+    "invited_presentations": "Ausgewählte Vorträge",
 }
 
 SECTION_ORDER = [
@@ -76,6 +95,19 @@ def clean(value: str | None) -> str:
     return (value or "").strip()
 
 
+def row_value(row: sqlite3.Row, field: str) -> str:
+    if LANG == "de":
+        german = f"{field}_de"
+        if german in row.keys() and clean(row[german]):
+            return clean(row[german])
+    return clean(row[field])
+
+
+def section_title(section_key: str) -> str:
+    labels = SECTION_TITLES_DE if LANG == "de" else SECTION_TITLES
+    return labels.get(section_key, section_key.replace("_", " ").title())
+
+
 def typ(value: str | None) -> str:
     return json.dumps(clean(value), ensure_ascii=False)
 
@@ -111,11 +143,11 @@ def normalize_text(value: str) -> str:
 
 
 def entry_detail(row: sqlite3.Row) -> str:
-    title = clean(row["title"])
-    organization = clean(row["organization"])
-    role = clean(row["role"])
-    amount = clean(row["amount"])
-    description = clean(row["description"])
+    title = row_value(row, "title")
+    organization = row_value(row, "organization")
+    role = row_value(row, "role")
+    amount = row_value(row, "amount")
+    description = row_value(row, "description")
     if row["section_key"] == "honors":
         pieces = [title]
         if organization and normalize_text(organization) not in normalize_text(title):
@@ -206,18 +238,18 @@ def build_html() -> str:
     if title:
         body.append(f"<p class=\"subtitle\">{html.escape(title)}</p>")
     for section_key, rows in grouped_sections(entries):
-        body.append(f"<h2>{html.escape(SECTION_TITLES.get(section_key, section_key.replace('_', ' ').title()))}</h2>")
+        body.append(f"<h2>{html.escape(section_title(section_key))}</h2>")
         body.append("<table>")
         for row in rows:
             body.append(f"<tr><td>{html.escape(year_label(row))}</td><td>{html.escape(entry_detail(row))}</td></tr>")
         body.append("</table>")
     if pubs:
-        body.append("<h2>Selected Publications</h2><ol>")
+        body.append(f"<h2>{html.escape('Ausgewählte Publikationen' if LANG == 'de' else 'Selected Publications')}</h2><ol>")
         for row in pubs:
             body.append(f"<li>{html.escape(citation(row))}</li>")
         body.append("</ol>")
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{LANG}">
 <head>
   <meta charset="utf-8">
   <title>Short CV</title>
@@ -244,46 +276,242 @@ def build_typst() -> str:
     title = clean(person["position_title"] if person else "")
     lines = [
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.65in, right: 0.65in, top: 0.65in, bottom: 0.58in))',
-        '#set text(font: "Arial", size: 10pt)',
+        f'#set text(font: "Arial", size: 10pt, lang: "{LANG}")',
         "#set par(leading: 0.45em)",
         text(name, bold=True, size="16pt"),
     ]
     if title:
         lines.append(text(title, bold=True))
     for section_key, rows in grouped_sections(entries):
-        lines.append(f"\n#line(length: 100%)\n{text(SECTION_TITLES.get(section_key, section_key.replace('_', ' ').title()), bold=True)}")
+        lines.append(f"\n#line(length: 100%)\n{text(section_title(section_key), bold=True)}")
         cells = []
         for row in rows:
             cells.append(f"[{text(year_label(row), bold=True)}]")
             cells.append(f"[{text(entry_detail(row))}]")
         lines.append("#grid(columns: (1.45in, 5.55in), gutter: 0.2in, row-gutter: 0.045in,\n" + ",\n".join(cells) + "\n)")
     if pubs:
-        lines.append(f"\n#line(length: 100%)\n{text('Selected Publications', bold=True)}")
+        lines.append(f"\n#line(length: 100%)\n{text('Ausgewählte Publikationen' if LANG == 'de' else 'Selected Publications', bold=True)}")
         for index, row in enumerate(pubs, 1):
             lines.append("#grid(columns: (0.3in, 6.8in), gutter: 0.08in,\n"
                          f"  [{text(str(index)+'.')}],\n  [{text(citation(row), size='9pt')}]\n)")
     return "\n".join(lines) + "\n"
 
 
-def build() -> dict[str, str]:
+def set_cell_shading(cell, fill: str) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    shd = tc_pr.find(qn("w:shd"))
+    if shd is None:
+        shd = OxmlElement("w:shd")
+        tc_pr.append(shd)
+    shd.set(qn("w:fill"), fill)
+
+
+def set_cell_margins(cell, top: int = 70, start: int = 90, bottom: int = 70, end: int = 90) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_mar = tc_pr.find(qn("w:tcMar"))
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+    for side, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        node = tc_mar.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            tc_mar.append(node)
+        node.set(qn("w:w"), str(value))
+        node.set(qn("w:type"), "dxa")
+
+
+def set_table_borders(table, color: str = "D7DCE2") -> None:
+    tbl_pr = table._tbl.tblPr
+    borders = tbl_pr.first_child_found_in("w:tblBorders")
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        tbl_pr.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        tag = f"w:{edge}"
+        element = borders.find(qn(tag))
+        if element is None:
+            element = OxmlElement(tag)
+            borders.append(element)
+        element.set(qn("w:val"), "single")
+        element.set(qn("w:sz"), "4")
+        element.set(qn("w:space"), "0")
+        element.set(qn("w:color"), color)
+
+
+def set_paragraph_font(paragraph, *, size: float = 8.7, bold: bool = False, color: str = "111827") -> None:
+    for run in paragraph.runs:
+        run.font.name = "Arial"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+        run.font.size = Pt(size)
+        run.bold = bold
+        run.font.color.rgb = RGBColor.from_string(color)
+    paragraph.paragraph_format.space_before = Pt(0)
+    paragraph.paragraph_format.space_after = Pt(0)
+    paragraph.paragraph_format.line_spacing = 1.03
+
+
+def add_compact_heading(doc: Document, label: str) -> None:
+    paragraph = doc.add_paragraph()
+    paragraph.paragraph_format.space_before = Pt(6)
+    paragraph.paragraph_format.space_after = Pt(2)
+    run = paragraph.add_run(label)
+    run.font.name = "Arial"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.size = Pt(9.3)
+    run.bold = True
+    run.font.color.rgb = RGBColor.from_string("111827")
+
+
+def set_table_width(table, widths) -> None:
+    table.autofit = False
+    total = sum(int(width) for width in widths)
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.first_child_found_in("w:tblW")
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:w"), str(total))
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_grid = table._tbl.tblGrid
+    for child in list(tbl_grid):
+        tbl_grid.remove(child)
+    for width in widths:
+        grid_col = OxmlElement("w:gridCol")
+        grid_col.set(qn("w:w"), str(int(width)))
+        tbl_grid.append(grid_col)
+    for row in table.rows:
+        for cell, width in zip(row.cells, widths):
+            cell.width = width
+            tc_pr = cell._tc.get_or_add_tcPr()
+            tc_w = tc_pr.find(qn("w:tcW"))
+            if tc_w is None:
+                tc_w = OxmlElement("w:tcW")
+                tc_pr.append(tc_w)
+            tc_w.set(qn("w:w"), str(int(width)))
+            tc_w.set(qn("w:type"), "dxa")
+
+
+def add_entries_table(doc: Document, rows: list[sqlite3.Row]) -> None:
+    table = doc.add_table(rows=0, cols=2)
+    table.style = "Table Grid"
+    set_table_borders(table)
+    set_table_width(table, [Inches(1.18), Inches(6.12)])
+    for index, row in enumerate(rows):
+        cells = table.add_row().cells
+        cells[0].text = year_label(row)
+        cells[1].text = entry_detail(row)
+        for cell in cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            set_cell_margins(cell)
+            if index % 2 == 0:
+                set_cell_shading(cell, "F8FAFC")
+        for paragraph in cells[0].paragraphs:
+            set_paragraph_font(paragraph, size=8.3, bold=True, color="334155")
+        for paragraph in cells[1].paragraphs:
+            set_paragraph_font(paragraph, size=8.4)
+
+
+def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
+    table = doc.add_table(rows=0, cols=2)
+    table.style = "Table Grid"
+    set_table_borders(table)
+    set_table_width(table, [Inches(0.32), Inches(6.98)])
+    for index, row in enumerate(pubs, 1):
+        cells = table.add_row().cells
+        cells[0].text = f"{index}."
+        cells[1].text = citation(row)
+        for cell in cells:
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            set_cell_margins(cell, top=60, start=75, bottom=60, end=75)
+        for paragraph in cells[0].paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            set_paragraph_font(paragraph, size=8.0, bold=True, color="334155")
+        for paragraph in cells[1].paragraphs:
+            set_paragraph_font(paragraph, size=8.0)
+
+
+def build_docx(path: Path) -> Path:
+    person, entries, pubs = load_data()
+    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    title = clean(person["position_title"] if person else "")
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(0.55)
+    section.bottom_margin = Inches(0.55)
+    section.left_margin = Inches(0.58)
+    section.right_margin = Inches(0.58)
+    styles = doc.styles
+    styles["Normal"].font.name = "Arial"
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    styles["Normal"].font.size = Pt(8.6)
+
+    title_p = doc.add_paragraph()
+    title_p.paragraph_format.space_after = Pt(1)
+    run = title_p.add_run(name)
+    run.font.name = "Arial"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.size = Pt(15)
+    run.bold = True
+    run.font.color.rgb = RGBColor.from_string("111827")
+    if title:
+        subtitle = doc.add_paragraph()
+        subtitle.paragraph_format.space_after = Pt(6)
+        run = subtitle.add_run(title)
+        run.font.name = "Arial"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+        run.font.size = Pt(8.8)
+        run.bold = True
+        run.font.color.rgb = RGBColor.from_string("334155")
+
+    for section_key, rows in grouped_sections(entries):
+        add_compact_heading(doc, section_title(section_key))
+        add_entries_table(doc, rows)
+    if pubs:
+        add_compact_heading(doc, "Ausgewählte Publikationen" if LANG == "de" else "Selected Publications")
+        add_publications_table(doc, pubs)
+
+    doc.core_properties.title = "Short CV"
+    doc.core_properties.author = name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(path)
+    return path
+
+
+def output_stem() -> str:
+    return "short_cv_de" if LANG == "de" else "short_cv"
+
+
+def build(lang: str = "en") -> dict[str, str]:
+    global LANG
+    LANG = "de" if lang == "de" else "en"
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    html_path = OUTPUT / "short_cv.html"
-    typ_path = OUTPUT / "short_cv.typ"
-    pdf_path = OUTPUT / "short_cv.pdf"
+    stem = output_stem()
+    html_path = OUTPUT / f"{stem}.html"
+    typ_path = OUTPUT / f"{stem}.typ"
+    pdf_path = OUTPUT / f"{stem}.pdf"
+    docx_path = OUTPUT / f"{stem}.docx"
     html_path.write_text(build_html(), encoding="utf-8")
     typ_path.write_text(build_typst(), encoding="utf-8")
     pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
+    docx = build_docx(docx_path)
     result = {
-        "html": str(html_path.relative_to(ROOT)),
-        "typst": str(typ_path.relative_to(ROOT)),
+        "html": f"output/{output_ref(html_path)}",
+        "typst": f"output/{output_ref(typ_path)}",
     }
     if pdf:
-        result["pdf"] = str(pdf.relative_to(ROOT))
-    if warning:
-        result["warning"] = warning
+        result["pdf"] = f"output/{output_ref(pdf)}"
+    if docx:
+        result["docx"] = f"output/{output_ref(docx)}"
+    warnings = [item for item in (warning,) if item]
+    if warnings:
+        result["warning"] = " ".join(warnings)
     return result
 
 
 if __name__ == "__main__":
-    for name, path in build().items():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--lang", choices=["en", "de"], default="en")
+    args = parser.parse_args()
+    for name, path in build(args.lang).items():
         print(f"{name}: {path}")

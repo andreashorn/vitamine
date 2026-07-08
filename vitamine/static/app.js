@@ -4,6 +4,9 @@ const state = {
   publications: [],
   journalMetrics: [],
   identifiers: [],
+  connections: {},
+  zoteroCollections: [],
+  zoteroLibraries: [],
   exportProfiles: {
     short: { selected: [], candidates: [], settings: {} },
     ultrashort: { selected: [], candidates: [], settings: {} },
@@ -23,6 +26,12 @@ const state = {
   draggedBiosketchContributionId: null,
   draggedBiosketchPublicationId: null,
   selectedBiosketchContributionId: null,
+  collaborationMap: {
+    data: null,
+    zoom: 2,
+    origin: null,
+    drag: null,
+  },
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -33,8 +42,9 @@ function setStatus(text) {
 }
 
 async function api(path, options = {}) {
+  const headers = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options,
   });
   const data = await response.json();
@@ -52,8 +62,13 @@ function setActionButtons(disabled) {
     "#maintainPubsDashboard",
     "#fetchJournalMetrics",
     "#saveJournalMetrics",
+    "#connectionsForm button[type='submit']",
+    "#connectZotero",
+    "#testZoteroConnection",
+    "#loadZoteroCollections",
     "#useExampleDatabase",
     "#createBlankDatabase",
+    "#loadDatabase",
     "#buildUltraDashboard",
     "#buildShortDashboard",
     "#buildLongDashboard",
@@ -64,6 +79,7 @@ function setActionButtons(disabled) {
     const button = $(selector);
     if (button) button.disabled = disabled;
   });
+  if (!disabled && $("#connectionZoteroSource")) updateZoteroSourceVisibility();
 }
 
 function fillSectionSelects() {
@@ -111,6 +127,200 @@ async function createBlankDatabase() {
   window.location.reload();
 }
 
+async function useDatabasePath(path) {
+  await api("/api/database/use", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+  setStatus(`Loaded ${path}`);
+  window.location.reload();
+}
+
+async function importDatabaseFile(file) {
+  if (!file) return;
+  if (file.path) {
+    await useDatabasePath(file.path);
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file);
+  await api("/api/database/import", {
+    method: "POST",
+    body: form,
+  });
+  setStatus(`Loaded ${file.name}`);
+  window.location.reload();
+}
+
+async function chooseDatabaseFile() {
+  try {
+    const data = await api("/api/database/choose", { method: "POST" });
+    if (data.cancelled) return;
+    setStatus(`Loaded ${data.active_name}`);
+    window.location.reload();
+  } catch (error) {
+    setStatus(error.message);
+  }
+}
+
+async function loadConnections() {
+  const data = await api("/api/connections");
+  state.connections = data;
+  $("#connectionOrcid").value = data.orcid_id || "";
+  $("#connectionZoteroKey").value = "";
+  renderZoteroLibraries();
+  $("#connectionZoteroLibrary").value = data.zotero_library_value || "";
+  $("#connectionZoteroSource").value = data.zotero_source_mode || "my_publications";
+  renderZoteroCollections();
+  $("#connectionStatus").textContent = data.zotero_api_key_set ? "Zotero key saved" : "No Zotero key";
+  updateZoteroSourceVisibility();
+}
+
+async function saveConnections(event) {
+  event.preventDefault();
+  const sourceMode = $("#connectionZoteroSource").value;
+  const selected = sourceMode === "collection" ? selectedZoteroCollection() : null;
+  await api("/api/connections", {
+    method: "PUT",
+    body: JSON.stringify({
+      orcid_id: $("#connectionOrcid").value,
+      zotero_api_key: $("#connectionZoteroKey").value,
+      zotero_library_value: $("#connectionZoteroLibrary").value,
+      zotero_source_mode: sourceMode,
+      zotero_collection_key: selected?.key || "",
+      zotero_collection_name: selected?.name || "",
+    }),
+  });
+  $("#connectionZoteroKey").value = "";
+  setStatus("Connections saved");
+  await loadConnections();
+  if (state.connections.zotero_api_key_set) {
+    await testZoteroConnection();
+  }
+  await loadPersonIdentifiers();
+}
+
+function renderZoteroLibraries() {
+  const current = state.connections || {};
+  const existing = [];
+  if (current.zotero_library_value) {
+    existing.push({
+      type: current.zotero_library_type || "users",
+      id: current.zotero_library_id || "",
+      name: current.zotero_group_name || current.zotero_library_value,
+      kind: current.zotero_library_type === "groups" ? "Group library" : "Personal library",
+    });
+  }
+  const merged = [...existing, ...state.zoteroLibraries];
+  const seen = new Set();
+  const libraries = merged.filter((item) => {
+    const id = `${item.type}:${item.id}`;
+    if (!item.id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  $("#connectionZoteroLibrary").innerHTML = [
+    '<option value="">Auto-detect from key</option>',
+    ...libraries.map((item) => {
+      const label = item.kind ? `${item.name} (${item.kind})` : item.name;
+      return `<option value="${escapeHtml(`${item.type}:${item.id}`)}">${escapeHtml(label)}</option>`;
+    }),
+  ].join("");
+}
+
+function selectedZoteroCollection() {
+  const value = $("#connectionZoteroCollection").value || "";
+  return state.zoteroCollections.find((item) => `${item.mode}:${item.key || ""}` === value) || null;
+}
+
+function renderZoteroCollections() {
+  const current = state.connections || {};
+  const existing = [];
+  if (current.zotero_collection_key || current.zotero_collection_name) {
+    existing.push({
+      mode: "collection",
+      key: current.zotero_collection_key || "",
+      name: current.zotero_collection_name || current.zotero_collection_key || "Selected collection",
+    });
+  }
+  const base = [
+    { mode: "my_publications", key: "", name: "My Publications" },
+    { mode: "library", key: "", name: "Whole library" },
+  ];
+  const merged = [...base, ...existing, ...state.zoteroCollections];
+  const seen = new Set();
+  state.zoteroCollections = merged.filter((item) => {
+    const id = `${item.mode}:${item.key || ""}`;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+  $("#connectionZoteroCollection").innerHTML = state.zoteroCollections
+    .filter((item) => item.mode === "collection")
+    .map((item) => `<option value="${escapeHtml(`${item.mode}:${item.key || ""}`)}">${escapeHtml(item.path || item.name)}</option>`)
+    .join("");
+  if (current.zotero_collection_key) {
+    $("#connectionZoteroCollection").value = `collection:${current.zotero_collection_key}`;
+  }
+}
+
+function updateZoteroSourceVisibility() {
+  const source = $("#connectionZoteroSource").value;
+  const collectionWrap = $("#connectionZoteroCollectionWrap");
+  const collectionSelect = $("#connectionZoteroCollection");
+  const loadCollectionsButton = $("#loadZoteroCollections");
+  const collectionMode = source === "collection";
+  if (collectionWrap) collectionWrap.hidden = !collectionMode;
+  if (collectionSelect) {
+    collectionSelect.disabled = !collectionMode;
+    if (!collectionMode) collectionSelect.value = "";
+  }
+  if (loadCollectionsButton) loadCollectionsButton.disabled = !collectionMode;
+}
+
+async function connectZotero() {
+  const data = await api("/api/zotero/connect-url");
+  window.open(data.url, "_blank", "noopener,width=980,height=760,left=0,top=0");
+  setStatus(data.oauth_available ? "Opening Zotero authorization" : "Opening Zotero key setup");
+}
+
+async function loadZoteroCollections() {
+  const data = await api("/api/zotero/collections");
+  state.zoteroCollections = data.collections || [];
+  renderZoteroCollections();
+  updateZoteroSourceVisibility();
+  state.connections = {
+    ...state.connections,
+    zotero_library_type: data.library_type,
+    zotero_library_id: data.library_id,
+    zotero_library_value: `${data.library_type}:${data.library_id}`,
+  };
+  renderZoteroLibraries();
+  $("#connectionZoteroLibrary").value = state.connections.zotero_library_value;
+  $("#connectionStatus").textContent = `${state.zoteroCollections.filter((item) => item.mode === "collection").length} collections loaded`;
+  setStatus("Zotero collections loaded");
+}
+
+async function testZoteroConnection() {
+  const data = await api("/api/zotero/status");
+  state.zoteroLibraries = data.libraries || [];
+  if (data.library) {
+    state.connections = {
+      ...state.connections,
+      zotero_library_type: data.library.type,
+      zotero_library_id: data.library.id,
+      zotero_library_value: `${data.library.type}:${data.library.id}`,
+      zotero_group_name: data.library.type === "groups" ? data.library.name : "",
+    };
+  }
+  renderZoteroLibraries();
+  if (state.connections.zotero_library_value) {
+    $("#connectionZoteroLibrary").value = state.connections.zotero_library_value;
+  }
+  $("#connectionStatus").textContent = data.ok ? `${data.message} ${data.collection_count ?? 0} collections found.` : data.message;
+  setStatus(data.ok ? "Zotero link established" : data.message);
+}
+
 async function loadMetrics() {
   const data = await api("/api/metrics");
   const pubs = data.publications || {};
@@ -142,6 +352,304 @@ function metricCard(label, value) {
   return `<div class="metricCard"><strong>${value}</strong><span>${label}</span></div>`;
 }
 
+const MAP_WIDTH = 1000;
+const MAP_HEIGHT = 520;
+const MAP_ZOOM = 2;
+const MAP_MIN_ZOOM = 2;
+const MAP_MAX_ZOOM = 6;
+const MAP_TILE_SIZE = 256;
+
+function mapWorldSize(zoom) {
+  return MAP_TILE_SIZE * (2 ** zoom);
+}
+
+function defaultMapOrigin(zoom = MAP_ZOOM) {
+  const world = mapWorldSize(zoom);
+  return {
+    x: (world - MAP_WIDTH) / 2,
+    y: (world - MAP_HEIGHT) / 2,
+  };
+}
+
+function clampMapOrigin(origin, zoom) {
+  const world = mapWorldSize(zoom);
+  return {
+    x: Math.max(0, Math.min(Math.max(0, world - MAP_WIDTH), origin.x)),
+    y: Math.max(0, Math.min(Math.max(0, world - MAP_HEIGHT), origin.y)),
+  };
+}
+
+function projectMapPoint(longitude, latitude) {
+  return mapPoint({ longitude, latitude }, mapExtent());
+}
+
+function lonLatToTile(longitude, latitude, zoom) {
+  const boundedLatitude = Math.max(-85.0511, Math.min(85.0511, Number(latitude)));
+  const latRad = boundedLatitude * Math.PI / 180;
+  const scale = 2 ** zoom;
+  return {
+    x: (Number(longitude) + 180) / 360 * scale,
+    y: (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * scale,
+  };
+}
+
+function tileToPixel(tile, origin, tileSize = MAP_TILE_SIZE) {
+  return {
+    x: (tile.x - origin.x) * tileSize,
+    y: (tile.y - origin.y) * tileSize,
+  };
+}
+
+function mapExtent() {
+  const zoom = state.collaborationMap.zoom || MAP_ZOOM;
+  const origin = clampMapOrigin(state.collaborationMap.origin || defaultMapOrigin(zoom), zoom);
+  state.collaborationMap.origin = origin;
+  return {
+    zoom,
+    origin: {
+      x: origin.x / MAP_TILE_SIZE,
+      y: origin.y / MAP_TILE_SIZE,
+    },
+    width: MAP_WIDTH,
+    height: MAP_HEIGHT,
+  };
+}
+
+function mapPoint(node, extent) {
+  return tileToPixel(lonLatToTile(node.longitude, node.latitude, extent.zoom), extent.origin);
+}
+
+function osmTiles(extent) {
+  const tileSize = MAP_TILE_SIZE;
+  const scale = 2 ** extent.zoom;
+  const startX = Math.floor(extent.origin.x);
+  const endX = Math.ceil(extent.origin.x + extent.width / tileSize);
+  const startY = Math.floor(extent.origin.y);
+  const endY = Math.ceil(extent.origin.y + extent.height / tileSize);
+  const tiles = [];
+  for (let x = startX; x <= endX; x += 1) {
+    for (let y = startY; y <= endY; y += 1) {
+      if (x < 0 || x >= scale) continue;
+      if (y < 0 || y >= scale) continue;
+      tiles.push(
+        `<image href="https://tile.openstreetmap.org/${extent.zoom}/${x}/${y}.png" x="${((x - extent.origin.x) * tileSize).toFixed(1)}" y="${((y - extent.origin.y) * tileSize).toFixed(1)}" width="${tileSize}" height="${tileSize}" preserveAspectRatio="none"></image>`
+      );
+    }
+  }
+  return tiles.join("");
+}
+
+function mapPath(points) {
+  return points
+    .map(([longitude, latitude], index) => {
+      const point = projectMapPoint(longitude, latitude);
+      return `${index ? "L" : "M"}${point.x.toFixed(1)} ${point.y.toFixed(1)}`;
+    })
+    .join(" ") + " Z";
+}
+
+function collaborationLandPaths() {
+  const shapes = [
+    [[-168, 72], [-52, 72], [-56, 50], [-92, 16], [-118, 22], [-125, 48], [-168, 58]],
+    [[-82, 13], [-35, 10], [-46, -56], [-72, -54], [-80, -18]],
+    [[-18, 72], [44, 70], [35, 36], [-10, 35], [-30, 58]],
+    [[-18, 35], [52, 34], [48, -35], [16, -35], [-18, 5]],
+    [[35, 70], [178, 68], [150, 8], [94, 8], [70, 28], [42, 35]],
+    [[110, -10], [156, -12], [154, -44], [114, -39]],
+  ];
+  return shapes.map((shape) => `<path d="${mapPath(shape)}"></path>`).join("");
+}
+
+function edgePath(source, target) {
+  const start = projectMapPoint(source.longitude, source.latitude);
+  const end = projectMapPoint(target.longitude, target.latitude);
+  const midX = (start.x + end.x) / 2;
+  const lift = Math.min(90, Math.max(24, Math.abs(end.x - start.x) * 0.12));
+  const midY = Math.min(start.y, end.y) - lift;
+  return `M${start.x.toFixed(1)} ${start.y.toFixed(1)} Q${midX.toFixed(1)} ${midY.toFixed(1)} ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+}
+
+function mapEdgePath(source, target, extent) {
+  const start = mapPoint(source, extent);
+  const end = mapPoint(target, extent);
+  const midX = (start.x + end.x) / 2;
+  const lift = Math.min(90, Math.max(22, Math.abs(end.x - start.x) * 0.14));
+  const midY = Math.min(start.y, end.y) - lift;
+  return `M${start.x.toFixed(1)} ${start.y.toFixed(1)} Q${midX.toFixed(1)} ${midY.toFixed(1)} ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+}
+
+function mapTooltip(node) {
+  const authors = (node.authors || []).slice(0, 8).join(", ");
+  const extra = (node.authors || []).length > 8 ? `, +${node.authors.length - 8} more` : "";
+  return [
+    `<strong>${escapeHtml(node.name)}</strong>`,
+    node.country ? `<span>${escapeHtml(node.country)}</span>` : "",
+    node.publication_count ? `<span>${node.publication_count} publication${node.publication_count === 1 ? "" : "s"}</span>` : "",
+    authors ? `<span>${escapeHtml(authors + extra)}</span>` : "",
+  ].filter(Boolean).join("");
+}
+
+async function loadCollaborationMap() {
+  const data = await api("/api/collaboration-map");
+  state.collaborationMap.data = data;
+  if (!state.collaborationMap.origin) {
+    state.collaborationMap.zoom = MAP_ZOOM;
+    state.collaborationMap.origin = defaultMapOrigin(MAP_ZOOM);
+  }
+  renderCollaborationMap();
+}
+
+function renderCollaborationMap() {
+  const data = state.collaborationMap.data;
+  if (!data) return;
+  const container = $("#collaborationMap");
+  const own = data.nodes.find((node) => node.own) || data.own;
+  const collaborators = (data.nodes || []).filter((node) => !node.own);
+  if (!collaborators.length) {
+    container.innerHTML = `
+      <div class="emptyMap">
+        <strong>No collaboration geography yet</strong>
+        <span>Run DOI metadata enrichment to collect OpenAlex institution locations.</span>
+      </div>`;
+    $("#collaborationMapStats").innerHTML = `<span>Institutions: <strong>0</strong></span>`;
+    $("#collaborationCountries").innerHTML = "";
+    return;
+  }
+
+  const nodeById = Object.fromEntries((data.nodes || []).map((node) => [node.id, node]));
+  const extent = mapExtent(data.nodes || []);
+  const edges = (data.edges || [])
+    .map((edge) => ({ ...edge, sourceNode: nodeById[edge.source], targetNode: nodeById[edge.target] }))
+    .filter((edge) => edge.sourceNode && edge.targetNode);
+  const edgeSvg = edges
+    .map((edge) => {
+      const width = Math.min(5, 0.8 + Number(edge.weight || 1) * 0.45);
+      return `<path class="collabEdge" d="${mapEdgePath(edge.sourceNode, edge.targetNode, extent)}" stroke-width="${width.toFixed(1)}">
+        <title>${escapeHtml(edge.targetNode.name)}: ${edge.weight} publication links</title>
+      </path>`;
+    })
+    .join("");
+  const nodeMarkers = collaborators
+    .map((node) => {
+      const point = mapPoint(node, extent);
+      const radius = Math.min(12, 3.5 + Math.sqrt(Number(node.publication_count || 1)) * 2);
+      return `<button class="mapMarker collabMarker" type="button" style="left:${(point.x / MAP_WIDTH * 100).toFixed(3)}%;top:${(point.y / MAP_HEIGHT * 100).toFixed(3)}%;width:${(radius * 2).toFixed(1)}px;height:${(radius * 2).toFixed(1)}px" aria-label="${escapeHtml(node.name)}">
+        <span class="mapTooltip">${mapTooltip(node)}</span>
+      </button>`;
+    })
+    .join("");
+  const ownPoint = mapPoint(own, extent);
+  container.innerHTML = `
+    <svg viewBox="0 0 1000 520" preserveAspectRatio="none" class="osmTiles" aria-hidden="true">
+      ${osmTiles(extent)}
+    </svg>
+    <svg viewBox="0 0 1000 520" preserveAspectRatio="none" class="collaborationSvg mapFallback" aria-hidden="true">
+      <rect class="mapOcean" x="0" y="0" width="1000" height="520"></rect>
+      <g class="mapLand">${collaborationLandPaths()}</g>
+    </svg>
+    <svg viewBox="0 0 1000 520" preserveAspectRatio="none" class="collaborationOverlay" aria-hidden="true">
+      ${edgeSvg}
+    </svg>`;
+  container.insertAdjacentHTML(
+    "beforeend",
+    `${nodeMarkers}
+    <button class="mapMarker ownMarker" type="button" style="left:${(ownPoint.x / MAP_WIDTH * 100).toFixed(3)}%;top:${(ownPoint.y / MAP_HEIGHT * 100).toFixed(3)}%" aria-label="${escapeHtml(own.name)}">
+      <span class="mapTooltip"><strong>${escapeHtml(own.name)}</strong><span>${escapeHtml(own.country || "")}</span></span>
+    </button>
+    <div class="mapControls" aria-label="Map controls">
+      <button type="button" data-map-zoom="in" aria-label="Zoom in">+</button>
+      <button type="button" data-map-zoom="out" aria-label="Zoom out">-</button>
+      <button type="button" data-map-zoom="reset" aria-label="Reset map">Reset</button>
+    </div>
+    <a class="osmCredit" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">© OpenStreetMap</a>`
+  );
+  bindCollaborationMapControls(container);
+  $("#collaborationMapStats").innerHTML = [
+    `<span>Institutions: <strong>${data.institution_count}</strong></span>`,
+    `<span>Links: <strong>${data.publication_links}</strong></span>`,
+  ].join("");
+  $("#collaborationCountries").innerHTML = (data.top_countries || [])
+    .map((row) => `<span>${escapeHtml(row.country)}: <strong>${row.publication_count}</strong></span>`)
+    .join("");
+}
+
+function mapViewPoint(event, container) {
+  const rect = container.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) / rect.width * MAP_WIDTH,
+    y: (event.clientY - rect.top) / rect.height * MAP_HEIGHT,
+  };
+}
+
+function zoomCollaborationMap(direction, focal = { x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 }) {
+  const oldZoom = state.collaborationMap.zoom || MAP_ZOOM;
+  const nextZoom = Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, oldZoom + direction));
+  if (nextZoom === oldZoom) return;
+  const oldOrigin = state.collaborationMap.origin || defaultMapOrigin(oldZoom);
+  const scale = mapWorldSize(nextZoom) / mapWorldSize(oldZoom);
+  state.collaborationMap.zoom = nextZoom;
+  state.collaborationMap.origin = clampMapOrigin(
+    {
+      x: (oldOrigin.x + focal.x) * scale - focal.x,
+      y: (oldOrigin.y + focal.y) * scale - focal.y,
+    },
+    nextZoom
+  );
+  renderCollaborationMap();
+}
+
+function resetCollaborationMap() {
+  state.collaborationMap.zoom = MAP_ZOOM;
+  state.collaborationMap.origin = defaultMapOrigin(MAP_ZOOM);
+  renderCollaborationMap();
+}
+
+function bindCollaborationMapControls(container) {
+  if (container.dataset.mapEventsBound) return;
+  container.dataset.mapEventsBound = "true";
+  container.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-map-zoom]");
+    if (!button) return;
+    const action = button.dataset.mapZoom;
+    if (action === "in") zoomCollaborationMap(1);
+    if (action === "out") zoomCollaborationMap(-1);
+    if (action === "reset") resetCollaborationMap();
+  });
+  container.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    zoomCollaborationMap(event.deltaY < 0 ? 1 : -1, mapViewPoint(event, container));
+  }, { passive: false });
+  container.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".mapMarker, .mapControls, .osmCredit")) return;
+    container.setPointerCapture(event.pointerId);
+    state.collaborationMap.drag = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: { ...(state.collaborationMap.origin || defaultMapOrigin(state.collaborationMap.zoom || MAP_ZOOM)) },
+    };
+    container.classList.add("dragging");
+  });
+  container.addEventListener("pointermove", (event) => {
+    const drag = state.collaborationMap.drag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const rect = container.getBoundingClientRect();
+    const dx = (event.clientX - drag.startX) / rect.width * MAP_WIDTH;
+    const dy = (event.clientY - drag.startY) / rect.height * MAP_HEIGHT;
+    const zoom = state.collaborationMap.zoom || MAP_ZOOM;
+    state.collaborationMap.origin = clampMapOrigin({ x: drag.origin.x - dx, y: drag.origin.y - dy }, zoom);
+    renderCollaborationMap();
+  });
+  const stopDrag = (event) => {
+    const drag = state.collaborationMap.drag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    state.collaborationMap.drag = null;
+    container.classList.remove("dragging");
+  };
+  container.addEventListener("pointerup", stopDrag);
+  container.addEventListener("pointercancel", stopDrag);
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -166,20 +674,62 @@ function actionLog(target, data) {
   $(target).textContent = lines.filter(Boolean).join("\n") || "Done.";
 }
 
-function refreshExportLinks(data) {
-  if (data.html && data.html.includes("long_cv")) enableExportLink("#openLongDashboardHtml", data.html);
-  if (data.pdf && data.pdf.includes("long_cv")) enableExportLink("#openLongDashboardPdf", data.pdf);
-  if (data.html && data.html.includes("short_cv")) enableExportLink("#openShortDashboardHtml", data.html);
-  if (data.pdf && data.pdf.includes("short_cv")) enableExportLink("#openShortDashboardPdf", data.pdf);
-  if (data.html && data.html.includes("biosketch")) enableExportLink("#openBiosketchDashboardHtml", data.html);
-  if (data.pdf && data.pdf.includes("biosketch")) enableExportLink("#openBiosketchDashboardPdf", data.pdf);
-  if (data.docx) enableExportLink("#openUltraDashboardDocx", data.docx);
+function exportLanguage() {
+  return $("#exportLanguage")?.value || "en";
 }
 
-function enableExportLink(selector, href) {
+async function loadExportSettings() {
+  const data = await api("/api/export-settings");
+  const label = data.home_language_label || "Deutsch";
+  $("#homeLanguageLabel").value = label;
+  $("#homeLanguageOption").textContent = label;
+}
+
+async function saveExportSettings() {
+  const label = $("#homeLanguageLabel").value.trim() || "Deutsch";
+  $("#homeLanguageLabel").value = label;
+  $("#homeLanguageOption").textContent = label;
+  await api("/api/export-settings", {
+    method: "PUT",
+    body: JSON.stringify({ home_language_label: label }),
+  });
+  setStatus("Export language label saved");
+}
+
+function refreshExportLinks(profile, data) {
+  const selectors = {
+    ultrashort: {
+      docx: "#openUltraDashboardDocx",
+      html: "#openUltraDashboardHtml",
+      pdf: "#openUltraDashboardPdf",
+    },
+    short: {
+      docx: "#openShortDashboardDocx",
+      html: "#openShortDashboardHtml",
+      pdf: "#openShortDashboardPdf",
+    },
+    long: {
+      docx: "#openLongDashboardDocx",
+      html: "#openLongDashboardHtml",
+      pdf: "#openLongDashboardPdf",
+    },
+    biosketch: {
+      docx: "#openBiosketchDashboardDocx",
+      html: "#openBiosketchDashboardHtml",
+      pdf: "#openBiosketchDashboardPdf",
+    },
+  }[profile];
+  if (!selectors) return;
+  Object.entries(selectors).forEach(([format, selector]) => {
+    if (data[format]) enableExportLink(selector, data[format], data[`${format}_path`]);
+  });
+}
+
+function enableExportLink(selector, href, path = "") {
   const link = $(selector);
   if (!link) return;
   link.href = href;
+  if (path) link.title = path;
   link.classList.remove("disabledLink");
   link.removeAttribute("aria-disabled");
   link.removeAttribute("tabindex");
@@ -435,6 +985,7 @@ async function savePerson(event) {
   });
   await api("/api/person", { method: "PUT", body: JSON.stringify(payload) });
   setStatus("Person saved");
+  await loadCollaborationMap();
 }
 
 async function loadNarrativeReport() {
@@ -976,6 +1527,7 @@ async function runAction(path, doneText, workingText = "Working...") {
     setStatus(doneText);
     await loadSummary();
     await loadMetrics();
+    await loadCollaborationMap();
     await loadPublications();
     return data;
   } catch (error) {
@@ -1037,8 +1589,21 @@ async function init() {
   $("#showSuppressedPubs").addEventListener("change", loadPublications);
   $("#journalMetricSearch").addEventListener("input", debounce(loadJournalMetrics));
   $("#saveJournalMetrics").addEventListener("click", saveJournalMetrics);
+  $("#connectionsForm").addEventListener("submit", saveConnections);
+  $("#connectZotero").addEventListener("click", connectZotero);
+  $("#testZoteroConnection").addEventListener("click", testZoteroConnection);
+  $("#loadZoteroCollections").addEventListener("click", loadZoteroCollections);
+  $("#connectionZoteroSource").addEventListener("change", updateZoteroSourceVisibility);
   $("#useExampleDatabase").addEventListener("click", useExampleDatabase);
   $("#createBlankDatabase").addEventListener("click", createBlankDatabase);
+  $("#loadDatabase").addEventListener("click", chooseDatabaseFile);
+  $("#databaseFileInput").addEventListener("change", async (event) => {
+    try {
+      await importDatabaseFile(event.target.files[0]);
+    } catch (error) {
+      setStatus(error.message);
+    }
+  });
   $("#newBiosketchAchievement").addEventListener("click", createBiosketchAchievement);
   $("#deleteBiosketchAchievement").addEventListener("click", deleteBiosketchAchievement);
   $$("#publicationsView th[data-sort]").forEach((header) => {
@@ -1058,31 +1623,34 @@ async function init() {
     actionLog("#syncOutput", data);
   };
   const buildUltra = async () => {
-    $("#exportOutput").textContent = "Building tabular one page CV...";
-    const data = await runAction("/api/actions/build-ultrashort-tabular", "Tabular one page CV built", "Building tabular one page CV...");
-    refreshExportLinks(data);
+    const language = exportLanguage();
+    $("#exportOutput").textContent = `Building tabular one page CV (${language})...`;
+    const data = await runAction(`/api/actions/build-ultrashort-tabular?lang=${encodeURIComponent(language)}`, "Tabular one page CV built", "Building tabular one page CV...");
+    refreshExportLinks("ultrashort", data);
     actionLog("#exportOutput", data);
     openBuiltArtifact(data);
   };
   const buildLong = async () => {
-    const language = $("#longCvLanguage").value || "en";
+    const language = exportLanguage();
     $("#exportOutput").textContent = `Building long CV (${language})...`;
     const data = await runAction(`/api/actions/build-long?lang=${encodeURIComponent(language)}`, "Long CV built", "Building long CV...");
-    refreshExportLinks(data);
+    refreshExportLinks("long", data);
     actionLog("#exportOutput", data);
     openBuiltArtifact(data);
   };
   const buildShort = async () => {
-    $("#exportOutput").textContent = "Building short CV...";
-    const data = await runAction("/api/actions/build-short", "Short CV built", "Building short CV...");
-    refreshExportLinks(data);
+    const language = exportLanguage();
+    $("#exportOutput").textContent = `Building short CV (${language})...`;
+    const data = await runAction(`/api/actions/build-short?lang=${encodeURIComponent(language)}`, "Short CV built", "Building short CV...");
+    refreshExportLinks("short", data);
     actionLog("#exportOutput", data);
     openBuiltArtifact(data);
   };
   const buildBiosketch = async () => {
-    $("#exportOutput").textContent = "Building biosketch...";
-    const data = await runAction("/api/actions/build-biosketch", "Biosketch built", "Building biosketch...");
-    refreshExportLinks(data);
+    const language = exportLanguage();
+    $("#exportOutput").textContent = `Building biosketch (${language})...`;
+    const data = await runAction(`/api/actions/build-biosketch?lang=${encodeURIComponent(language)}`, "Biosketch built", "Building biosketch...");
+    refreshExportLinks("biosketch", data);
     actionLog("#exportOutput", data);
     openBuiltArtifact(data);
   };
@@ -1116,9 +1684,13 @@ async function init() {
   $("#buildShortDashboard").addEventListener("click", buildShort);
   $("#buildLongDashboard").addEventListener("click", buildLong);
   $("#buildBiosketchDashboard").addEventListener("click", buildBiosketch);
+  $("#homeLanguageLabel").addEventListener("change", saveExportSettings);
   await loadSummary();
   await loadDatabaseInfo();
+  await loadConnections();
+  await loadExportSettings();
   await loadMetrics();
+  await loadCollaborationMap();
   await loadJournalMetrics();
   await loadExportProfile("ultrashort");
   await loadExportProfile("short");

@@ -16,12 +16,13 @@ from pathlib import Path
 from typing import Any
 
 from maintain_publications import maintain
-from vitamine.paths import OUTPUT, ROOT, active_db_path
+from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 
 
 DB = active_db_path()
 REPORT = OUTPUT / "doi_enrichment_report.json"
 USER_AGENT = "vitamine/0.1"
+INSTITUTION_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def connect() -> sqlite3.Connection:
@@ -42,6 +43,41 @@ def ensure_columns(con: sqlite3.Connection) -> None:
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE publications ADD COLUMN {column} {definition}")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS collaboration_institutions (
+          id INTEGER PRIMARY KEY,
+          publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+          openalex_work_id TEXT,
+          publication_title TEXT,
+          publication_year TEXT,
+          author_name TEXT,
+          author_position TEXT,
+          institution_id TEXT NOT NULL,
+          institution_name TEXT NOT NULL,
+          ror TEXT,
+          country_code TEXT,
+          country TEXT,
+          latitude REAL,
+          longitude REAL,
+          source TEXT NOT NULL DEFAULT 'openalex',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(publication_id, author_name, institution_id)
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_pub
+        ON collaboration_institutions(publication_id)
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_inst
+        ON collaboration_institutions(institution_id)
+        """
+    )
 
 
 def normalize_doi(value: str | None) -> str:
@@ -68,6 +104,72 @@ def request_json(url: str) -> dict[str, Any] | None:
             return json.load(response)
     except (TimeoutError, urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
         return None
+
+
+def openalex_institution(institution_id: str) -> dict[str, Any]:
+    if not institution_id:
+        return {}
+    if institution_id in INSTITUTION_CACHE:
+        return INSTITUTION_CACHE[institution_id]
+    if institution_id.startswith("https://openalex.org/"):
+        api_id = institution_id.rstrip("/").split("/")[-1]
+        url = f"https://api.openalex.org/institutions/{urllib.parse.quote(api_id, safe='')}"
+    else:
+        url = institution_id
+    payload = request_json(url)
+    INSTITUTION_CACHE[institution_id] = payload or {}
+    return INSTITUTION_CACHE[institution_id]
+
+
+def institution_geo(institution: dict[str, Any]) -> dict[str, Any]:
+    full = openalex_institution(str(institution.get("id") or ""))
+    geo = full.get("geo") or {}
+    return {
+        "country_code": geo.get("country_code") or full.get("country_code") or institution.get("country_code") or "",
+        "country": geo.get("country") or "",
+        "latitude": geo.get("latitude"),
+        "longitude": geo.get("longitude"),
+    }
+
+
+def openalex_collaboration_rows(publication_id: int, row: sqlite3.Row, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    work_id = payload.get("id") or ""
+    publication_title = clean_text(payload.get("display_name")) or clean_text(row["title"])
+    publication_year = str(payload.get("publication_year") or row["year"] or "")
+    records: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for authorship in payload.get("authorships") or []:
+        author = authorship.get("author") or {}
+        author_name = clean_text(author.get("display_name") or authorship.get("raw_author_name"))
+        author_position = clean_text(authorship.get("author_position"))
+        for institution in authorship.get("institutions") or []:
+            institution_id = str(institution.get("id") or "").strip()
+            institution_name = clean_text(institution.get("display_name"))
+            if not institution_id or not institution_name:
+                continue
+            key = (author_name, institution_id, work_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            geo = institution_geo(institution)
+            records.append(
+                {
+                    "publication_id": publication_id,
+                    "openalex_work_id": work_id,
+                    "publication_title": publication_title,
+                    "publication_year": publication_year,
+                    "author_name": author_name,
+                    "author_position": author_position,
+                    "institution_id": institution_id,
+                    "institution_name": institution_name,
+                    "ror": institution.get("ror") or "",
+                    "country_code": geo["country_code"],
+                    "country": geo["country"],
+                    "latitude": geo["latitude"],
+                    "longitude": geo["longitude"],
+                }
+            )
+    return records
 
 
 def year_from_date_parts(parts: Any) -> str:
@@ -142,6 +244,7 @@ def openalex_metadata(doi: str) -> dict[str, Any]:
         "venue": clean_text(source.get("display_name")),
         "year": str(payload.get("publication_year") or ""),
         "authors": ", ".join(authors),
+        "_payload": payload,
     }
 
 
@@ -230,6 +333,51 @@ def update_row(con: sqlite3.Connection, row_id: int, values: dict[str, Any], sou
     )
 
 
+def upsert_collaboration_rows(con: sqlite3.Connection, rows: list[dict[str, Any]]) -> int:
+    count = 0
+    for row in rows:
+        con.execute(
+            """
+            INSERT INTO collaboration_institutions (
+              publication_id, openalex_work_id, publication_title, publication_year,
+              author_name, author_position, institution_id, institution_name, ror,
+              country_code, country, latitude, longitude, source, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'openalex', datetime('now'))
+            ON CONFLICT(publication_id, author_name, institution_id) DO UPDATE SET
+              openalex_work_id=excluded.openalex_work_id,
+              publication_title=excluded.publication_title,
+              publication_year=excluded.publication_year,
+              author_position=excluded.author_position,
+              institution_name=excluded.institution_name,
+              ror=excluded.ror,
+              country_code=excluded.country_code,
+              country=excluded.country,
+              latitude=excluded.latitude,
+              longitude=excluded.longitude,
+              source='openalex',
+              updated_at=datetime('now')
+            """,
+            (
+                row["publication_id"],
+                row["openalex_work_id"],
+                row["publication_title"],
+                row["publication_year"],
+                row["author_name"],
+                row["author_position"],
+                row["institution_id"],
+                row["institution_name"],
+                row["ror"],
+                row["country_code"],
+                row["country"],
+                row["latitude"],
+                row["longitude"],
+            ),
+        )
+        count += 1
+    return count
+
+
 def enrich(
     limit: int | None = None,
     include_suppressed: bool = False,
@@ -245,6 +393,7 @@ def enrich(
     report: list[dict[str, Any]] = []
     fetched = 0
     updated = 0
+    institutions = 0
     with connect() as con:
         rows = con.execute(
             f"""
@@ -267,11 +416,25 @@ def enrich(
             values = merged_metadata(row, crossref, openalex, pmid)
             changes = changes_for_row(row, values)
             sources = [name for name, data in [("crossref", crossref), ("openalex", openalex), ("pubmed", pmid)] if data]
+            collaboration_rows = []
+            if openalex.get("_payload"):
+                collaboration_rows = openalex_collaboration_rows(row["id"], row, openalex["_payload"])
+                if collaboration_rows and not dry_run:
+                    institutions += upsert_collaboration_rows(con, collaboration_rows)
             if changes:
                 updated += 1
                 if not dry_run:
                     update_row(con, row["id"], values, "+".join(sources) or "doi")
-                report.append({"id": row["id"], "doi": doi, "title": row["title"], "sources": sources, "changes": changes})
+                report.append(
+                    {
+                        "id": row["id"],
+                        "doi": doi,
+                        "title": row["title"],
+                        "sources": sources,
+                        "changes": changes,
+                        "institutions": len(collaboration_rows),
+                    }
+                )
         if not dry_run:
             con.commit()
     maintenance = maintain() if not dry_run else {}
@@ -280,9 +443,10 @@ def enrich(
     return {
         "checked": fetched,
         "updated": updated,
+        "institutions": institutions,
         "dry_run": dry_run,
         "refresh": refresh,
-        "report": str(REPORT.relative_to(ROOT)),
+        "report": f"output/{output_ref(REPORT)}",
         **maintenance,
     }
 

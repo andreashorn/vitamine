@@ -7,15 +7,12 @@ import json
 import re
 import sqlite3
 import urllib.request
-from pathlib import Path
 
 from maintain_publications import ensure_columns, maintain
-from vitamine.paths import DATA, active_db_path
+from vitamine.paths import active_db_path
 
 
 DB = active_db_path()
-DEFAULT_ORCID = "0000-0002-0695-6025"
-
 ORCID_TYPE_CATEGORIES = {
     "journal-article": "peer_reviewed",
     "book": "books_chapters",
@@ -239,8 +236,9 @@ def sync_orcid(orcid_id: str | None = None) -> dict[str, int | str]:
             orcid_id
             or (identifier["identifier_value"] if identifier else None)
             or (person["orcid_id"] if person and "orcid_id" in person.keys() else None)
-            or DEFAULT_ORCID
         )
+        if not orcid_id:
+            raise RuntimeError("Add an ORCID iD in Connections or Person > Identifiers before syncing ORCID.")
         con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
         con.execute(
             """
@@ -268,8 +266,6 @@ def sync_orcid(orcid_id: str | None = None) -> dict[str, int | str]:
                 matched += 1
             else:
                 skipped += 1
-        DATA.mkdir(parents=True, exist_ok=True)
-        (DATA / "orcid_works.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         con.commit()
     maintenance = maintain()
     return {"orcid_id": orcid_id, "fetched": len(summaries), "matched": matched, "inserted": inserted, "skipped_new": skipped, **maintenance}

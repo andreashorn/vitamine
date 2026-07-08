@@ -4,12 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine</title>
+  <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
+  <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
   <link rel="stylesheet" href="/static/styles.css?v=20260708-export-links">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <img class="brandLogo" src="/logo/vitamine_logo.png" alt="" width="1002" height="756">
+      <img class="brandLogo" src="/logo/vitamine_logo.png" alt="" width="1672" height="941">
       <h1>VitaMine</h1>
       <p id="status">Ready</p>
     </div>
@@ -32,7 +34,7 @@
         <section class="panel">
           <div class="panelHeader">
             <h2>Database</h2>
-            <p>Start with the bundled example or create a blank workspace.</p>
+            <p>Start with the bundled example, create a blank workspace, or load an existing VitaMine file.</p>
           </div>
           <div class="databaseStatus">
             <span>Current database</span>
@@ -41,14 +43,42 @@
           <div class="buttonRow">
             <button id="useExampleDatabase" type="button">Use Example</button>
             <button id="createBlankDatabase" type="button">New Blank Database</button>
+            <button id="loadDatabase" type="button">Load Existing</button>
+            <input id="databaseFileInput" type="file" accept=".vitamine,.sqlite,.db,application/vnd.sqlite3,application/octet-stream" hidden>
           </div>
         </section>
 
         <section class="panel">
           <div class="panelHeader">
             <h2>Sync</h2>
-            <p>Pull publication metadata from the Netstim Zotero group into the local SQLite database.</p>
+            <p>Pull publication metadata from connected researcher services into the local VitaMine file.</p>
           </div>
+          <form id="connectionsForm" class="connectionsForm">
+            <label>ORCID iD<input id="connectionOrcid" placeholder="0000-0000-0000-0000"></label>
+            <label>Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
+            <label>Zotero library
+              <select id="connectionZoteroLibrary">
+                <option value="">Auto-detect from key</option>
+              </select>
+            </label>
+            <label>Zotero source
+              <select id="connectionZoteroSource">
+                <option value="my_publications">My Publications</option>
+                <option value="library">Whole library</option>
+                <option value="collection">Collection</option>
+              </select>
+            </label>
+            <label id="connectionZoteroCollectionWrap">Collection
+              <select id="connectionZoteroCollection"></select>
+            </label>
+            <div class="buttonRow connectionActions">
+              <button type="submit">Save Connections</button>
+              <button id="connectZotero" type="button">Connect Zotero</button>
+              <button id="testZoteroConnection" type="button">Test Link</button>
+              <button id="loadZoteroCollections" type="button">Load Collections</button>
+              <span id="connectionStatus"></span>
+            </div>
+          </form>
           <div class="buttonRow">
             <button id="syncZoteroDashboard" type="button">Sync Zotero</button>
             <button id="syncOrcidDashboard" type="button">Sync ORCID</button>
@@ -86,6 +116,18 @@
           </div>
         </section>
 
+        <section class="panel collaborationPanel">
+          <div class="panelHeader">
+            <h2>Collaboration Map</h2>
+            <p>OpenAlex coauthor institutions linked to the researcher’s institution.</p>
+          </div>
+          <div id="collaborationMap" class="collaborationMap" role="img" aria-label="World map of collaboration institutions"></div>
+          <div class="mapSummary">
+            <div id="collaborationMapStats" class="miniList"></div>
+            <div id="collaborationCountries" class="miniList"></div>
+          </div>
+        </section>
+
       </div>
     </section>
 
@@ -95,6 +137,17 @@
           <h2>Exports</h2>
           <p>Build CV variants from the curated database.</p>
         </div>
+        <div class="exportControls">
+          <label>Language
+            <select id="exportLanguage">
+              <option value="en">English</option>
+              <option id="homeLanguageOption" value="de">Deutsch</option>
+            </select>
+          </label>
+          <label>Home language name
+            <input id="homeLanguageLabel" maxlength="40" value="Deutsch">
+          </label>
+        </div>
         <div class="exportList">
           <article class="exportCard">
             <h3>Tabular One Page CV</h3>
@@ -102,6 +155,8 @@
             <div class="buttonRow">
               <button id="buildUltraDashboard" type="button">Build</button>
               <a id="openUltraDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
+              <a id="openUltraDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
+              <a id="openUltraDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
           </article>
           <article class="exportCard">
@@ -109,6 +164,7 @@
             <p>Compact PDF/HTML export with a separate selected-publications list.</p>
             <div class="buttonRow">
               <button id="buildShortDashboard" type="button">Build</button>
+              <a id="openShortDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
               <a id="openShortDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
               <a id="openShortDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
@@ -116,14 +172,9 @@
           <article class="exportCard">
             <h3>Long CV</h3>
             <p>Current long CV builder. This will become the Harvard-style export.</p>
-            <label>Language
-              <select id="longCvLanguage">
-                <option value="en">English</option>
-                <option value="de">Deutsch</option>
-              </select>
-            </label>
             <div class="buttonRow">
               <button id="buildLongDashboard" type="button">Build</button>
+              <a id="openLongDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
               <a id="openLongDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
               <a id="openLongDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
@@ -133,6 +184,7 @@
             <p>Biosketch export with current contributions to science.</p>
             <div class="buttonRow">
               <button id="buildBiosketchDashboard" type="button">Build</button>
+              <a id="openBiosketchDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
               <a id="openBiosketchDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
               <a id="openBiosketchDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
@@ -217,6 +269,14 @@
         <label>Work email<input name="work_email"></label>
         <label>Place of birth<input name="place_of_birth"></label>
         <label>eRA Commons<input name="era_commons"></label>
+        <fieldset class="ownInstitutionFields">
+          <legend>Map Institution</legend>
+          <label>Institution<input name="own_institution_name" placeholder="University Hospital Cologne"></label>
+          <label>Country<input name="own_institution_country" placeholder="Germany"></label>
+          <label>Country code<input name="own_institution_country_code" placeholder="DE"></label>
+          <label>Latitude<input name="own_institution_latitude" type="number" step="0.000001" placeholder="50.9242"></label>
+          <label>Longitude<input name="own_institution_longitude" type="number" step="0.000001" placeholder="6.9184"></label>
+        </fieldset>
         <button type="submit">Save Person</button>
       </form>
       <section class="identifierPanel">
@@ -228,7 +288,7 @@
           <input id="identifierId" type="hidden">
           <label>Platform<input id="identifierPlatform" placeholder="ORCID"></label>
           <label>Type<input id="identifierType" placeholder="ORCID iD"></label>
-          <label>Value<input id="identifierValue" placeholder="0000-0002-0695-6025"></label>
+          <label>Value<input id="identifierValue" placeholder="0000-0000-0000-0000"></label>
           <label>URL<input id="identifierUrl" placeholder="https://orcid.org/..."></label>
           <label class="identifierNotesField">Notes<textarea id="identifierNotes" rows="2"></textarea></label>
           <div class="buttonRow">

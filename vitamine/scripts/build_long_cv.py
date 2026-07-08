@@ -12,8 +12,8 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from vitamine.scripts.export_utils import compile_typst_if_available, markdown_to_html_body
-from vitamine.paths import OUTPUT, ROOT, active_db_path
+from vitamine.scripts.export_utils import compile_typst_if_available, convert_with_pandoc_if_available, markdown_to_html_body
+from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 
 DB = active_db_path()
 
@@ -882,6 +882,7 @@ def build(lang: str = "en") -> dict[str, str]:
     stem = output_stem()
     md_path = OUTPUT / f"{stem}.md"
     html_path = OUTPUT / f"{stem}.html"
+    docx_path = OUTPUT / f"{stem}.docx"
     pdf_path = OUTPUT / f"{stem}.pdf"
     typ_path = OUTPUT / f"{stem}.typ"
     md_path.write_text(markdown, encoding="utf-8")
@@ -889,14 +890,17 @@ def build(lang: str = "en") -> dict[str, str]:
     html_path.write_text(html_doc, encoding="utf-8")
     typ_path.write_text(build_typst(), encoding="utf-8")
     pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
+    docx, docx_warning = convert_with_pandoc_if_available(md_path, docx_path, ROOT, "-f", "markdown")
     result = {
-        "markdown": str(md_path.relative_to(ROOT)),
-        "html": str(html_path.relative_to(ROOT)),
-        "typst": str(typ_path.relative_to(ROOT)),
+        "markdown": f"output/{output_ref(md_path)}",
+        "html": f"output/{output_ref(html_path)}",
+        "typst": f"output/{output_ref(typ_path)}",
     }
     if pdf:
-        result["pdf"] = str(pdf.relative_to(ROOT))
-    warnings = [item for item in (html_warning, warning) if item]
+        result["pdf"] = f"output/{output_ref(pdf)}"
+    if docx:
+        result["docx"] = f"output/{output_ref(docx)}"
+    warnings = [item for item in (html_warning, warning, docx_warning) if item]
     if warnings:
         result["warning"] = " ".join(warnings)
     return result

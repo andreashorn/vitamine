@@ -639,6 +639,17 @@ legend {
   max-width: 980px;
 }
 
+.ownInstitutionFields {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ownInstitutionFields legend {
+  grid-column: 1 / -1;
+}
+
 .narrativeEditor {
   max-width: 980px;
 }
@@ -712,6 +723,34 @@ legend {
   overflow-wrap: anywhere;
 }
 
+.connectionsForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.connectionsForm label {
+  min-width: 0;
+}
+
+.connectionActions {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.connectionActions a,
+.connectionActions span {
+  align-self: center;
+  font-size: 12px;
+}
+
+.connectionActions span {
+  color: var(--muted);
+}
+
 .exportCard h3 {
   font-size: 14px;
 }
@@ -760,10 +799,11 @@ legend {
 
 .exportControls {
   display: grid;
-  grid-template-columns: 120px minmax(190px, 1fr) auto auto;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 260px));
   gap: 8px;
   align-items: end;
   margin-top: 10px;
+  margin-bottom: 12px;
 }
 
 .exportSearch {
@@ -953,6 +993,227 @@ legend {
   font-size: 11px;
 }
 
+.collaborationPanel {
+  grid-column: 1 / -1;
+  width: min(100%, 1120px);
+  justify-self: center;
+}
+
+.collaborationMap {
+  position: relative;
+  min-height: 300px;
+  aspect-ratio: 1000 / 520;
+  border: 1px solid var(--line);
+  background: #eef6f7;
+  overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.collaborationMap.dragging {
+  cursor: grabbing;
+}
+
+.osmTiles,
+.mapFallback,
+.collaborationOverlay {
+  position: absolute;
+  inset: 0;
+}
+
+.osmTiles {
+  z-index: 1;
+  background: transparent;
+  width: 100%;
+  height: 100%;
+}
+
+.collaborationSvg {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1000 / 520;
+}
+
+.mapFallback {
+  z-index: 0;
+}
+
+.collaborationOverlay {
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.mapOcean {
+  fill: #eef6f7;
+}
+
+.mapGrid line {
+  stroke: #c7d8dd;
+  stroke-width: 1;
+}
+
+.mapLand path {
+  fill: #dfe7df;
+  stroke: #c5d0c5;
+  stroke-width: 1.2;
+}
+
+.collabEdge {
+  fill: none;
+  stroke: rgba(15, 118, 110, 0.34);
+  stroke-linecap: round;
+}
+
+.collabNode {
+  fill: #155e75;
+  fill-opacity: 0.78;
+  stroke: #ffffff;
+  stroke-width: 1.5;
+}
+
+.ownNodeHalo {
+  fill: rgba(168, 50, 50, 0.18);
+  stroke: rgba(168, 50, 50, 0.45);
+  stroke-width: 2;
+}
+
+.ownNode {
+  fill: var(--danger);
+  stroke: #ffffff;
+  stroke-width: 2;
+}
+
+.mapMarker {
+  position: absolute;
+  z-index: 3;
+  min-height: 0;
+  padding: 0;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 6px rgba(15, 23, 42, 0.35);
+}
+
+.collabMarker {
+  background: #155e75;
+  opacity: 0.86;
+}
+
+.ownMarker {
+  width: 18px;
+  height: 18px;
+  background: var(--danger);
+  box-shadow: 0 0 0 8px rgba(168, 50, 50, 0.18), 0 1px 7px rgba(15, 23, 42, 0.35);
+}
+
+.mapMarker:hover,
+.mapMarker:focus-visible {
+  z-index: 4;
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mapControls {
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.mapControls button {
+  min-width: 30px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-color: rgba(51, 65, 85, 0.55);
+  background: rgba(255, 255, 255, 0.92);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mapTooltip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  min-width: 210px;
+  max-width: 310px;
+  transform: translateX(-50%);
+  display: none;
+  padding: 8px 9px;
+  border: 1px solid #94a3b8;
+  background: rgba(255, 255, 255, 0.97);
+  color: var(--ink);
+  text-align: left;
+  font-size: 12px;
+  line-height: 1.35;
+  border-radius: 6px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.16);
+  pointer-events: none;
+}
+
+.mapTooltip strong,
+.mapTooltip span {
+  display: block;
+}
+
+.mapTooltip span {
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.mapMarker:hover .mapTooltip,
+.mapMarker:focus-visible .mapTooltip {
+  display: block;
+}
+
+.osmCredit {
+  position: absolute;
+  right: 6px;
+  bottom: 5px;
+  z-index: 4;
+  min-height: 0;
+  padding: 2px 5px;
+  border: 1px solid rgba(148, 163, 184, 0.7);
+  background: rgba(255, 255, 255, 0.86);
+  color: #334155;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.emptyMap {
+  min-height: 310px;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  text-align: center;
+  padding: 18px;
+}
+
+.emptyMap strong {
+  font-size: 14px;
+}
+
+.emptyMap span {
+  max-width: 360px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.mapSummary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 14px;
+  margin-top: 10px;
+  align-items: start;
+}
+
 .miniList {
   display: flex;
   flex-wrap: wrap;
@@ -1018,6 +1279,8 @@ legend {
   .exportGrid,
   .exportCard,
   .metricsGrid,
+  .mapSummary,
+  .ownInstitutionFields,
   .metricRow {
     grid-template-columns: 1fr;
   }

@@ -6,12 +6,14 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import json
 import urllib.error
 import urllib.request
 import webbrowser
 import argparse
 import os
 import signal
+import shutil
 import venv
 from pathlib import Path
 
@@ -25,7 +27,8 @@ LOG = ROOT / "output" / "vitamine_server.log"
 RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "vitamine"
 VENV_DIR = RUNTIME_DIR / ".venv"
 VENV_PYTHON = VENV_DIR / "bin" / "python"
-REQUIRED_PACKAGES = ("fastapi", "uvicorn", "python-docx", "eval-type-backport")
+REQUIRED_PACKAGES = ("fastapi", "uvicorn", "python-docx", "python-multipart", "eval-type-backport")
+SERVER_APP_MODULES = ("vitamine.app:app", "projects.cv.app:app")
 
 
 def wait_for_server(url: str, timeout: float = 10.0) -> bool:
@@ -34,8 +37,11 @@ def wait_for_server(url: str, timeout: float = 10.0) -> bool:
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(health_url, timeout=0.5) as response:
-                return response.status == 200
-        except (OSError, urllib.error.URLError):
+                if response.status != 200:
+                    continue
+                payload = json.loads(response.read().decode("utf-8"))
+                return payload.get("ok") is True and payload.get("app") == "vitamine"
+        except (OSError, urllib.error.URLError, json.JSONDecodeError):
             time.sleep(0.25)
     return False
 
@@ -53,36 +59,72 @@ def server_command() -> list[str]:
     ]
 
 
-def runtime_python() -> Path:
-    if not VENV_PYTHON.exists():
-        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-        venv.EnvBuilder(with_pip=True, clear=False).create(VENV_DIR)
+def runtime_env() -> dict[str, str]:
+    return {**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
 
+
+def runtime_import_probe() -> bool:
     probe = subprocess.run(
         [
             str(VENV_PYTHON),
             "-c",
-            "import fastapi, uvicorn, docx, eval_type_backport",
+            "import fastapi, uvicorn, docx, multipart, eval_type_backport",
         ],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=runtime_env(),
         check=False,
     )
-    if probe.returncode != 0:
-        subprocess.run(
-            [
-                str(VENV_PYTHON),
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                *REQUIRED_PACKAGES,
-            ],
-            cwd=ROOT,
-            check=True,
-        )
+    return probe.returncode == 0
+
+
+def install_runtime_packages() -> None:
+    install = subprocess.run(
+        [
+            str(VENV_PYTHON),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--upgrade",
+            *REQUIRED_PACKAGES,
+        ],
+        cwd=ROOT,
+        env=runtime_env(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if install.returncode != 0:
+        if install.stdout:
+            print(install.stdout, file=sys.stderr, end="")
+        if install.stderr:
+            print(install.stderr, file=sys.stderr, end="")
+        raise subprocess.CalledProcessError(install.returncode, install.args)
+
+
+def create_runtime_venv(clear: bool = False) -> None:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    if clear and VENV_DIR.exists():
+        shutil.rmtree(VENV_DIR)
+    venv.EnvBuilder(with_pip=True, clear=False).create(VENV_DIR)
+
+
+def runtime_python() -> Path:
+    if not VENV_PYTHON.exists():
+        create_runtime_venv()
+
+    if not runtime_import_probe():
+        create_runtime_venv(clear=True)
+        install_runtime_packages()
+        if not runtime_import_probe():
+            raise RuntimeError("VitaMine runtime environment was rebuilt, but required packages still cannot be imported.")
     return VENV_PYTHON
+
+
+def is_vitamine_server_command(command: str) -> bool:
+    return "uvicorn" in command and any(module in command for module in SERVER_APP_MODULES)
 
 
 def cv_server_pids() -> list[int]:
@@ -106,7 +148,7 @@ def cv_server_pids() -> list[int]:
             capture_output=True,
             check=False,
         ).stdout
-        if "uvicorn" in command and "vitamine.app:app" in command:
+        if is_vitamine_server_command(command):
             pids.append(pid)
     return pids
 
@@ -144,10 +186,9 @@ def open_running_server(open_existing: bool = False) -> bool:
 
 
 def start_background(restart: bool = False, open_existing: bool = False) -> int:
-    if restart:
-        stop_running_server()
-    elif open_running_server(open_existing=open_existing):
+    if open_existing and not restart and open_running_server(open_existing=True):
         return 0
+    stop_running_server()
 
     LOG.parent.mkdir(parents=True, exist_ok=True)
     log = LOG.open("ab")
@@ -169,10 +210,9 @@ def start_background(restart: bool = False, open_existing: bool = False) -> int:
 
 
 def start_foreground(restart: bool = False, open_existing: bool = False) -> int:
-    if restart:
-        stop_running_server()
-    elif open_running_server(open_existing=open_existing):
+    if open_existing and not restart and open_running_server(open_existing=True):
         return 0
+    stop_running_server()
 
     process = subprocess.Popen(server_command(), cwd=ROOT)
     try:

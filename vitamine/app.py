@@ -5,20 +5,25 @@ from __future__ import annotations
 
 import json
 import csv
+import filecmp
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
 import os
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .i18n import GERMAN_FIELD_PAIRS, fill_german_drafts
 from .paths import (
+    BUNDLED_METRICS_CSV,
     DATA,
     EXAMPLE_DB,
     LOGO,
@@ -31,6 +36,7 @@ from .paths import (
     create_blank_database,
     sanitize_database_name,
     set_active_db,
+    validate_database,
 )
 from .scripts.maintain_publications import maintain
 
@@ -59,6 +65,15 @@ SECTION_LABELS = {
 
 BIOSKETCH_CONTRIBUTION_LIMIT = 5
 BIOSKETCH_PRODUCTS_PER_CONTRIBUTION_LIMIT = 4
+
+OWN_INSTITUTION = {
+    "id": "own-institution",
+    "name": "University Hospital Cologne",
+    "country": "Germany",
+    "country_code": "DE",
+    "latitude": 50.9242,
+    "longitude": 6.9184,
+}
 
 ENTRY_FIELDS = [
     "section_key",
@@ -110,9 +125,12 @@ def connect() -> sqlite3.Connection:
     con.execute("PRAGMA foreign_keys = ON")
     ensure_person_columns(con)
     ensure_publication_columns(con)
+    ensure_collaboration_tables(con)
     ensure_biosketch_tables(con)
     ensure_narrative_report_table(con)
     ensure_export_settings_table(con)
+    ensure_app_settings_table(con)
+    ensure_journal_metrics_table(con)
     return con
 
 
@@ -122,6 +140,59 @@ def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def rows_dict(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
+
+
+def is_own_institution(name: str | None) -> bool:
+    text = (name or "").casefold()
+    own_tokens = [
+        "university hospital cologne",
+        "universitätsklinikum köln",
+        "universitatsklinikum koln",
+        "university of cologne",
+        "universität zu köln",
+        "universitat zu koln",
+    ]
+    return any(token in text for token in own_tokens)
+
+
+def own_institution_from_person(person: dict[str, Any] | None) -> dict[str, Any]:
+    person = person or {}
+    def number(value: Any, fallback: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    return {
+        "id": "own-institution",
+        "name": str(person.get("own_institution_name") or OWN_INSTITUTION["name"]).strip() or OWN_INSTITUTION["name"],
+        "country": str(person.get("own_institution_country") or OWN_INSTITUTION["country"]).strip() or OWN_INSTITUTION["country"],
+        "country_code": str(person.get("own_institution_country_code") or OWN_INSTITUTION["country_code"]).strip() or OWN_INSTITUTION["country_code"],
+        "latitude": number(person.get("own_institution_latitude"), OWN_INSTITUTION["latitude"]),
+        "longitude": number(person.get("own_institution_longitude"), OWN_INSTITUTION["longitude"]),
+    }
+
+
+def unique_database_path(filename: str) -> Path:
+    path = DATA / filename
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = DATA / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise HTTPException(status_code=409, detail="Could not choose an unused database filename")
+
+
+def database_payload(db: Path) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "active": str(db),
+        "active_name": db.name,
+        "is_example": db.resolve() == EXAMPLE_DB.resolve(),
+    }
 
 
 def display_venue_name(value: str | None) -> str:
@@ -153,59 +224,284 @@ def display_venue_name(value: str | None) -> str:
     return text
 
 
-def journal_metric_count() -> int:
-    if not METRICS_CSV.exists():
-        return 0
-    with METRICS_CSV.open(newline="", encoding="utf-8") as handle:
-        return sum(
-            1
-            for row in csv.DictReader(handle)
-            if (row.get("venue") or "").strip() and (row.get("impact_factor") or "").strip()
+def ensure_app_settings_table(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
+        """
+    )
 
 
-def read_journal_metrics() -> dict[str, dict[str, str]]:
-    if not METRICS_CSV.exists():
-        return {}
-    metrics = {}
-    with METRICS_CSV.open(newline="", encoding="utf-8") as handle:
+def ensure_journal_metrics_table(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS journal_metrics (
+          venue TEXT PRIMARY KEY,
+          impact_factor REAL,
+          impact_factor_year TEXT,
+          metric_source TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    count = con.execute("SELECT COUNT(*) FROM journal_metrics").fetchone()[0]
+    source_csv = METRICS_CSV if METRICS_CSV.exists() else BUNDLED_METRICS_CSV
+    if count or not source_csv.exists():
+        return
+    with source_csv.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
             venue = str(row.get("venue") or "").strip()
             impact_factor = str(row.get("impact_factor") or "").strip()
             if not venue or not impact_factor:
                 continue
-            metrics[venue.casefold()] = {
-                "venue": venue,
-                "impact_factor": impact_factor,
-                "impact_factor_year": str(row.get("impact_factor_year") or "").strip(),
-                "metric_source": str(row.get("metric_source") or "").strip() or "manual",
+            con.execute(
+                """
+                INSERT OR REPLACE INTO journal_metrics
+                  (venue, impact_factor, impact_factor_year, metric_source, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                """,
+                (
+                    venue,
+                    float(impact_factor),
+                    str(row.get("impact_factor_year") or "").strip() or None,
+                    str(row.get("metric_source") or "").strip() or "manual",
+                ),
+            )
+
+
+def get_setting(con: sqlite3.Connection, key: str) -> str:
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return str(row["value"] or "") if row else ""
+
+
+def set_setting(con: sqlite3.Connection, key: str, value: str | None) -> None:
+    con.execute(
+        """
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES (?, ?, datetime('now'))
+        ON CONFLICT(key) DO UPDATE SET
+          value=excluded.value,
+          updated_at=excluded.updated_at
+        """,
+        (key, value),
+    )
+
+
+def zotero_saved_env(con: sqlite3.Connection) -> dict[str, str]:
+    api_key = get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
+    library_type = get_setting(con, "zotero_library_type") or os.environ.get("ZOTERO_LIBRARY_TYPE") or "users"
+    library_id = get_setting(con, "zotero_library_id") or os.environ.get("ZOTERO_LIBRARY_ID") or ""
+    group_name = get_setting(con, "zotero_group_name") or os.environ.get("ZOTERO_GROUP_NAME") or ""
+    collection_key = get_setting(con, "zotero_collection_key") or os.environ.get("ZOTERO_COLLECTION_KEY") or ""
+    source_mode = get_setting(con, "zotero_source_mode") or os.environ.get("ZOTERO_SOURCE_MODE") or "my_publications"
+    return {
+        "api_key": api_key,
+        "library_type": library_type.strip("/") or "users",
+        "library_id": library_id,
+        "group_name": group_name,
+        "collection_key": collection_key,
+        "source_mode": source_mode,
+        "collection_name": get_setting(con, "zotero_collection_name"),
+    }
+
+
+def zotero_api_request(url: str, api_key: str) -> tuple[Any, dict[str, str]]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Zotero-API-Key": api_key,
+            "Zotero-API-Version": "3",
+            "User-Agent": "vitamine/0.1",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read().decode("utf-8")), {k: v for k, v in response.headers.items()}
+
+
+def zotero_key_info(api_key: str) -> dict[str, Any]:
+    current, _ = zotero_api_request("https://api.zotero.org/keys/current", api_key)
+    if not isinstance(current, dict):
+        raise HTTPException(status_code=400, detail="Zotero did not return key metadata.")
+    return current
+
+
+def zotero_current_user_id(api_key: str) -> str:
+    current = zotero_key_info(api_key)
+    user_id = current.get("userID") if isinstance(current, dict) else None
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Could not read Zotero user ID from this API key.")
+    return str(user_id)
+
+
+def zotero_group_names(api_key: str, user_id: str) -> dict[str, str]:
+    params = urllib.parse.urlencode({"format": "json", "limit": 100})
+    try:
+        groups, _ = zotero_api_request(f"https://api.zotero.org/users/{user_id}/groups?{params}", api_key)
+    except Exception:
+        return {}
+    return {
+        str((group.get("data") or {}).get("id")): str((group.get("data") or {}).get("name") or "")
+        for group in groups
+        if (group.get("data") or {}).get("id")
+    }
+
+
+def zotero_accessible_libraries(api_key: str) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    info = zotero_key_info(api_key)
+    user_id = str(info.get("userID") or "")
+    access = info.get("access") if isinstance(info.get("access"), dict) else {}
+    libraries: list[dict[str, str]] = []
+    user_access = access.get("user") if isinstance(access.get("user"), dict) else {}
+    if user_id and user_access.get("library"):
+        libraries.append(
+            {
+                "type": "users",
+                "id": user_id,
+                "name": f"{info.get('displayName') or info.get('username') or 'Personal'} library",
+                "kind": "Personal library",
             }
+        )
+    groups = access.get("groups") if isinstance(access.get("groups"), dict) else {}
+    group_names = zotero_group_names(api_key, user_id) if user_id and groups else {}
+    for group_id, permissions in groups.items():
+        if isinstance(permissions, dict) and not permissions.get("library"):
+            continue
+        libraries.append(
+            {
+                "type": "groups",
+                "id": str(group_id),
+                "name": group_names.get(str(group_id)) or f"Group {group_id}",
+                "kind": "Group library",
+            }
+        )
+    return info, libraries
+
+
+def choose_zotero_library(env: dict[str, str], libraries: list[dict[str, str]]) -> dict[str, str] | None:
+    if not libraries:
+        return None
+    for library in libraries:
+        if env.get("library_id") and library["type"] == env["library_type"] and library["id"] == env["library_id"]:
+            return library
+    if env.get("group_name"):
+        for library in libraries:
+            if library["type"] == "groups" and library["name"].casefold() == env["group_name"].casefold():
+                return library
+    preferred_type = "groups" if env["library_type"] in {"group", "groups"} else "users"
+    preferred = [library for library in libraries if library["type"] == preferred_type]
+    if len(preferred) == 1:
+        return preferred[0]
+    if len(libraries) == 1:
+        return libraries[0]
+    personal = [library for library in libraries if library["type"] == "users"]
+    return personal[0] if personal else None
+
+
+def zotero_resolved_library(env: dict[str, str]) -> tuple[str, str]:
+    library_type = env["library_type"]
+    library_id = env["library_id"]
+    if library_type in {"user", "users"}:
+        library_type = "users"
+    elif library_type in {"group", "groups"}:
+        library_type = "groups"
+    else:
+        raise HTTPException(status_code=400, detail="Zotero library type must be users or groups")
+    if not library_id:
+        _, libraries = zotero_accessible_libraries(env["api_key"])
+        chosen = choose_zotero_library({**env, "library_type": library_type}, libraries)
+        if chosen:
+            library_type = chosen["type"]
+            library_id = chosen["id"]
+    if not library_id and library_type == "users":
+        library_id = zotero_current_user_id(env["api_key"])
+    if not library_id:
+        raise HTTPException(status_code=400, detail="Choose a Zotero library before loading collections.")
+    return library_type, library_id
+
+
+def zotero_fetch_collections(api_key: str, library_type: str, library_id: str) -> list[dict[str, Any]]:
+    collections: list[dict[str, Any]] = []
+    start = 0
+    limit = 100
+    while True:
+        params = urllib.parse.urlencode({"format": "json", "limit": limit, "start": start, "sort": "title"})
+        batch, headers = zotero_api_request(
+            f"https://api.zotero.org/{library_type}/{library_id}/collections?{params}",
+            api_key,
+        )
+        collections.extend(batch)
+        total = int(headers.get("Total-Results", len(collections)))
+        start += limit
+        if start >= total or not batch:
+            break
+    return collections
+
+
+def journal_metric_count() -> int:
+    with connect() as con:
+        return int(
+            con.execute(
+                "SELECT COUNT(*) FROM journal_metrics WHERE venue != '' AND impact_factor IS NOT NULL"
+            ).fetchone()[0]
+        )
+
+
+def read_journal_metrics() -> dict[str, dict[str, str]]:
+    metrics = {}
+    with connect() as con:
+        rows = con.execute(
+            """
+            SELECT venue, impact_factor, impact_factor_year, metric_source
+            FROM journal_metrics
+            WHERE venue != '' AND impact_factor IS NOT NULL
+            """
+        ).fetchall()
+    for row in rows:
+        venue = str(row["venue"] or "").strip()
+        if not venue:
+            continue
+        metrics[venue.casefold()] = {
+            "venue": venue,
+            "impact_factor": str(row["impact_factor"]),
+            "impact_factor_year": str(row["impact_factor_year"] or "").strip(),
+            "metric_source": str(row["metric_source"] or "").strip() or "manual",
+        }
     return metrics
 
 
 def write_journal_metrics(rows: list[dict[str, Any]]) -> None:
-    metrics = read_journal_metrics()
-    for row in rows:
-        venue = str(row.get("venue") or "").strip()
-        if not venue:
-            continue
-        key = venue.casefold()
-        impact_factor = str(row.get("impact_factor") or "").strip()
-        if not impact_factor:
-            metrics.pop(key, None)
-            continue
-        metrics[key] = {
-            "venue": venue,
-            "impact_factor": impact_factor,
-            "impact_factor_year": str(row.get("impact_factor_year") or "").strip(),
-            "metric_source": str(row.get("metric_source") or "").strip() or "manual",
-        }
-    METRICS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    with METRICS_CSV.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["venue", "impact_factor", "impact_factor_year", "metric_source"])
-        writer.writeheader()
-        for row in sorted(metrics.values(), key=lambda item: item["venue"].casefold()):
-            writer.writerow(row)
+    with connect() as con:
+        for row in rows:
+            venue = str(row.get("venue") or "").strip()
+            if not venue:
+                continue
+            impact_factor = str(row.get("impact_factor") or "").strip()
+            if not impact_factor:
+                con.execute("DELETE FROM journal_metrics WHERE lower(venue) = lower(?)", (venue,))
+                continue
+            con.execute(
+                """
+                INSERT INTO journal_metrics
+                  (venue, impact_factor, impact_factor_year, metric_source, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(venue) DO UPDATE SET
+                  impact_factor=excluded.impact_factor,
+                  impact_factor_year=excluded.impact_factor_year,
+                  metric_source=excluded.metric_source,
+                  updated_at=excluded.updated_at
+                """,
+                (
+                    venue,
+                    float(impact_factor),
+                    str(row.get("impact_factor_year") or "").strip() or None,
+                    str(row.get("metric_source") or "").strip() or "manual",
+                ),
+            )
+        con.commit()
 
 
 def ensure_person_columns(con: sqlite3.Connection) -> None:
@@ -213,8 +509,41 @@ def ensure_person_columns(con: sqlite3.Connection) -> None:
     if not table:
         return
     existing = {row[1] for row in con.execute("PRAGMA table_info(person)").fetchall()}
-    if "orcid_id" not in existing:
-        con.execute("ALTER TABLE person ADD COLUMN orcid_id TEXT")
+    columns = {
+        "orcid_id": "TEXT",
+        "own_institution_name": "TEXT",
+        "own_institution_country": "TEXT",
+        "own_institution_country_code": "TEXT",
+        "own_institution_latitude": "REAL",
+        "own_institution_longitude": "REAL",
+    }
+    for column, definition in columns.items():
+        if column not in existing:
+            con.execute(f"ALTER TABLE person ADD COLUMN {column} {definition}")
+    con.execute(
+        """
+        UPDATE person
+        SET own_institution_name=COALESCE(NULLIF(own_institution_name, ''), ?),
+            own_institution_country=COALESCE(NULLIF(own_institution_country, ''), ?),
+            own_institution_country_code=COALESCE(NULLIF(own_institution_country_code, ''), ?),
+            own_institution_latitude=COALESCE(own_institution_latitude, ?),
+            own_institution_longitude=COALESCE(own_institution_longitude, ?)
+        WHERE id=1
+        """,
+        (
+            OWN_INSTITUTION["name"],
+            OWN_INSTITUTION["country"],
+            OWN_INSTITUTION["country_code"],
+            OWN_INSTITUTION["latitude"],
+            OWN_INSTITUTION["longitude"],
+        ),
+    )
+    con.execute(
+        """
+        INSERT OR IGNORE INTO person (id, full_name, display_name, raw_json)
+        VALUES (1, '', '', '{}')
+        """
+    )
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS person_identifiers (
@@ -262,6 +591,44 @@ def ensure_publication_columns(con: sqlite3.Connection) -> None:
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE publications ADD COLUMN {column} {definition}")
+
+
+def ensure_collaboration_tables(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS collaboration_institutions (
+          id INTEGER PRIMARY KEY,
+          publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+          openalex_work_id TEXT,
+          publication_title TEXT,
+          publication_year TEXT,
+          author_name TEXT,
+          author_position TEXT,
+          institution_id TEXT NOT NULL,
+          institution_name TEXT NOT NULL,
+          ror TEXT,
+          country_code TEXT,
+          country TEXT,
+          latitude REAL,
+          longitude REAL,
+          source TEXT NOT NULL DEFAULT 'openalex',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(publication_id, author_name, institution_id)
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_pub
+        ON collaboration_institutions(publication_id)
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_inst
+        ON collaboration_institutions(institution_id)
+        """
+    )
 
 
 def ensure_biosketch_tables(con: sqlite3.Connection) -> None:
@@ -337,7 +704,7 @@ def ensure_manual_document(con: sqlite3.Connection) -> int:
     con.execute(
         """
         INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
-        VALUES ('manual_cv_database', 'Manual CV database edits', 'data/example.sqlite', 'sqlite', datetime('now'), 'Entries created or edited in VitaMine.')
+        VALUES ('manual_cv_database', 'Manual CV database edits', 'data/example.vitamine', 'vitamine', datetime('now'), 'Entries created or edited in VitaMine.')
         ON CONFLICT(slug) DO UPDATE SET imported_at=datetime('now')
         """
     )
@@ -503,6 +870,79 @@ def metrics() -> dict[str, Any]:
     }
 
 
+@app.get("/api/collaboration-map")
+def collaboration_map() -> dict[str, Any]:
+    with connect() as con:
+        person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
+        rows = rows_dict(
+            con.execute(
+                """
+                SELECT
+                  ci.institution_id,
+                  ci.institution_name,
+                  ci.ror,
+                  ci.country_code,
+                  ci.country,
+                  ci.latitude,
+                  ci.longitude,
+                  COUNT(DISTINCT ci.publication_id) AS publication_count,
+                  COUNT(DISTINCT ci.author_name) AS author_count,
+                  GROUP_CONCAT(DISTINCT ci.author_name) AS authors,
+                  GROUP_CONCAT(DISTINCT ci.publication_year) AS years
+                FROM collaboration_institutions ci
+                JOIN publications p ON p.id = ci.publication_id
+                WHERE ci.latitude IS NOT NULL
+                  AND ci.longitude IS NOT NULL
+                  AND COALESCE(p.suppress_display, 0) = 0
+                GROUP BY ci.institution_id
+                ORDER BY publication_count DESC, author_count DESC, institution_name
+                LIMIT 250
+                """
+            ).fetchall()
+        )
+    own_institution = own_institution_from_person(person)
+    nodes = [{**own_institution, "own": True, "publication_count": 0, "author_count": 1, "authors": []}]
+    edges = []
+    country_counts: dict[str, int] = {}
+    publication_total = 0
+    for row in rows:
+        if is_own_institution(row["institution_name"]):
+            continue
+        count = int(row["publication_count"] or 0)
+        publication_total += count
+        country = row["country"] or row["country_code"] or "Unknown"
+        country_counts[country] = country_counts.get(country, 0) + count
+        node = {
+            "id": row["institution_id"],
+            "name": row["institution_name"],
+            "ror": row["ror"],
+            "country": row["country"],
+            "country_code": row["country_code"],
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "publication_count": count,
+            "author_count": int(row["author_count"] or 0),
+            "authors": sorted({author for author in str(row["authors"] or "").split(",") if author})[:20],
+            "years": sorted({year for year in str(row["years"] or "").split(",") if year}, reverse=True),
+            "own": False,
+        }
+        nodes.append(node)
+        edges.append({"source": own_institution["id"], "target": node["id"], "weight": count})
+    top_countries = [
+        {"country": country, "publication_count": count}
+        for country, count in sorted(country_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+    return {
+        "own": own_institution,
+        "nodes": nodes,
+        "edges": edges,
+        "top_countries": top_countries,
+        "institution_count": max(len(nodes) - 1, 0),
+        "edge_count": len(edges),
+        "publication_links": publication_total,
+    }
+
+
 @app.get("/api/journal-metrics")
 def journal_metrics(q: str | None = None, limit: int = 80) -> dict[str, Any]:
     clauses = ["COALESCE(suppress_display, 0) = 0", "venue IS NOT NULL", "venue != ''"]
@@ -570,6 +1010,201 @@ def get_person() -> dict[str, Any]:
     with connect() as con:
         person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
     return person or {}
+
+
+@app.get("/api/connections")
+def get_connections() -> dict[str, Any]:
+    with connect() as con:
+        person = con.execute("SELECT orcid_id FROM person WHERE id=1").fetchone()
+        identifier = con.execute(
+            """
+            SELECT identifier_value
+            FROM person_identifiers
+            WHERE person_id = 1 AND lower(platform) = 'orcid'
+            ORDER BY id
+            LIMIT 1
+            """
+        ).fetchone()
+        api_key = get_setting(con, "zotero_api_key")
+        library_type = get_setting(con, "zotero_library_type") or "users"
+        library_id = get_setting(con, "zotero_library_id")
+        return {
+            "orcid_id": (identifier["identifier_value"] if identifier else None) or (person["orcid_id"] if person else "") or "",
+            "zotero_api_key_set": bool(api_key),
+            "zotero_library_type": library_type,
+            "zotero_library_id": library_id,
+            "zotero_library_value": f"{library_type}:{library_id}" if library_id else "",
+            "zotero_group_name": get_setting(con, "zotero_group_name"),
+            "zotero_source_mode": get_setting(con, "zotero_source_mode") or "my_publications",
+            "zotero_collection_key": get_setting(con, "zotero_collection_key"),
+            "zotero_collection_name": get_setting(con, "zotero_collection_name"),
+        }
+
+
+@app.put("/api/connections")
+async def update_connections(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    orcid_id = str(payload.get("orcid_id") or "").strip()
+    api_key = str(payload.get("zotero_api_key") or "").strip()
+    library_value = str(payload.get("zotero_library_value") or "").strip()
+    library_type = str(payload.get("zotero_library_type") or "users").strip("/") or "users"
+    library_id = str(payload.get("zotero_library_id") or "").strip()
+    if ":" in library_value:
+        library_type, library_id = library_value.split(":", 1)
+        library_type = library_type.strip("/") or "users"
+        library_id = library_id.strip()
+    if library_type not in {"users", "groups"}:
+        raise HTTPException(status_code=400, detail="Zotero library type must be users or groups")
+    group_name = str(payload.get("zotero_group_name") or "").strip()
+    source_mode = str(payload.get("zotero_source_mode") or "my_publications").strip() or "my_publications"
+    if source_mode not in {"my_publications", "collection", "library"}:
+        raise HTTPException(status_code=400, detail="Choose My Publications, a collection, or the whole library.")
+    collection_key = str(payload.get("zotero_collection_key") or "").strip()
+    collection_name = str(payload.get("zotero_collection_name") or "").strip()
+    if source_mode == "collection" and not collection_key:
+        raise HTTPException(status_code=400, detail="Choose a Zotero collection.")
+    with connect() as con:
+        if orcid_id:
+            con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
+            con.execute(
+                """
+                INSERT INTO person_identifiers
+                  (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+                VALUES (1, 'ORCID', 'ORCID iD', ?, ?, 'manual', datetime('now'), 'Used for ORCID public-work sync.')
+                ON CONFLICT(person_id, platform, identifier_type, identifier_value) DO UPDATE SET
+                  url=excluded.url,
+                  verified_at=excluded.verified_at,
+                  notes=excluded.notes
+                """,
+                (orcid_id, f"https://orcid.org/{orcid_id}"),
+            )
+        set_setting(con, "zotero_library_type", library_type)
+        set_setting(con, "zotero_library_id", library_id)
+        set_setting(con, "zotero_group_name", group_name)
+        set_setting(con, "zotero_source_mode", source_mode)
+        set_setting(con, "zotero_collection_key", collection_key)
+        set_setting(con, "zotero_collection_name", collection_name)
+        if api_key:
+            set_setting(con, "zotero_api_key", api_key)
+        effective_key = api_key or get_setting(con, "zotero_api_key")
+        if effective_key and not library_id:
+            _, libraries = zotero_accessible_libraries(effective_key)
+            chosen = choose_zotero_library(
+                {
+                    "library_type": library_type,
+                    "library_id": library_id,
+                    "group_name": group_name,
+                },
+                libraries,
+            )
+            if chosen:
+                library_type = chosen["type"]
+                library_id = chosen["id"]
+                if chosen["type"] == "groups":
+                    group_name = chosen["name"]
+                set_setting(con, "zotero_library_type", library_type)
+                set_setting(con, "zotero_library_id", library_id)
+                set_setting(con, "zotero_group_name", group_name)
+        con.commit()
+    return {"ok": True}
+
+
+@app.get("/api/zotero/connect-url")
+def zotero_connect_url() -> dict[str, Any]:
+    params = urllib.parse.urlencode(
+        {
+            "name": "VitaMine",
+            "library_access": "1",
+            "notes_access": "0",
+            "write_access": "0",
+            "all_groups": "none",
+        }
+    )
+    return {
+        "url": f"https://www.zotero.org/settings/keys/new?{params}",
+        "oauth_available": bool(os.environ.get("ZOTERO_OAUTH_CLIENT_KEY") and os.environ.get("ZOTERO_OAUTH_CLIENT_SECRET")),
+    }
+
+
+@app.get("/api/zotero/collections")
+def zotero_collections() -> dict[str, Any]:
+    with connect() as con:
+        env = zotero_saved_env(con)
+    if not env["api_key"]:
+        raise HTTPException(status_code=400, detail="Save a Zotero API key before loading collections.")
+    library_type, library_id = zotero_resolved_library(env)
+    with connect() as con:
+        set_setting(con, "zotero_library_type", library_type)
+        set_setting(con, "zotero_library_id", library_id)
+        con.commit()
+    collections = zotero_fetch_collections(env["api_key"], library_type, library_id)
+    options = [
+        {
+            "mode": "my_publications",
+            "key": "",
+            "name": "My Publications",
+            "level": 0,
+            "path": "My Publications",
+        },
+        {
+            "mode": "library",
+            "key": "",
+            "name": "Whole library",
+            "level": 0,
+            "path": "Whole library",
+        },
+    ]
+    options.extend(
+        {
+            "mode": "collection",
+            "key": item.get("key") or (item.get("data") or {}).get("key") or "",
+            "name": (item.get("data") or {}).get("name") or "Untitled collection",
+            "level": 0,
+            "path": (item.get("data") or {}).get("name") or "Untitled collection",
+        }
+        for item in sorted(collections, key=lambda row: ((row.get("data") or {}).get("name") or "").casefold())
+    )
+    return {
+        "library_type": library_type,
+        "library_id": library_id,
+        "collections": options,
+    }
+
+
+@app.get("/api/zotero/status")
+def zotero_status() -> dict[str, Any]:
+    with connect() as con:
+        env = zotero_saved_env(con)
+    if not env["api_key"]:
+        return {"ok": False, "message": "No Zotero key saved.", "libraries": []}
+    info, libraries = zotero_accessible_libraries(env["api_key"])
+    chosen = choose_zotero_library(env, libraries)
+    if chosen:
+        collection_count = 0
+        try:
+            collection_count = len(zotero_fetch_collections(env["api_key"], chosen["type"], chosen["id"]))
+        except Exception:
+            collection_count = 0
+        with connect() as con:
+            set_setting(con, "zotero_library_type", chosen["type"])
+            set_setting(con, "zotero_library_id", chosen["id"])
+            if chosen["type"] == "groups":
+                set_setting(con, "zotero_group_name", chosen["name"])
+            con.commit()
+        return {
+            "ok": True,
+            "message": f"Connected to {chosen['name']}.",
+            "user": info.get("displayName") or info.get("username") or "",
+            "library": chosen,
+            "libraries": libraries,
+            "collection_count": collection_count,
+        }
+    return {
+        "ok": bool(libraries),
+        "message": "Choose which Zotero library to use." if libraries else "This Zotero key does not grant library access.",
+        "user": info.get("displayName") or info.get("username") or "",
+        "libraries": libraries,
+    }
 
 
 @app.get("/api/person/identifiers")
@@ -704,6 +1339,11 @@ async def update_person(request: Request) -> dict[str, Any]:
         "work_email",
         "place_of_birth",
         "era_commons",
+        "own_institution_name",
+        "own_institution_country",
+        "own_institution_country_code",
+        "own_institution_latitude",
+        "own_institution_longitude",
     ]
     values = {field: payload.get(field) for field in allowed}
     values["raw_json"] = json.dumps(values, ensure_ascii=False, indent=2)
@@ -1276,8 +1916,12 @@ async def suggest_export_profile_publications(profile: str, request: Request) ->
 def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
     pythonpath = os.pathsep.join(part for part in (str(ROOT), os.environ.get("PYTHONPATH", "")) if part)
     env = {**os.environ, "VITAMINE_DB": str(active_db_path()), "PYTHONPATH": pythonpath}
+    if getattr(sys, "frozen", False):
+        command = [sys.executable, "--vitamine-script", name, *args]
+    else:
+        command = [sys.executable, str(SCRIPTS / name), *args]
     return subprocess.run(
-        [sys.executable, str(SCRIPTS / name), *args],
+        command,
         cwd=ROOT,
         env=env,
         text=True,
@@ -1296,11 +1940,30 @@ def build_response(stdout: str, cache_key: str, extra: dict[str, Any] | None = N
         value = value.strip()
         if key in {"html", "markdown", "typst", "pdf", "docx"} and value:
             payload[key] = f"/{value}?v={cache_key}"
+            payload[f"{key}_path"] = value
         elif key == "warning" and value:
             payload["warning"] = value
     if extra:
         payload.update(extra)
     return payload
+
+
+@app.get("/api/export-settings")
+def export_settings() -> dict[str, Any]:
+    with connect() as con:
+        return {
+            "home_language_label": get_setting(con, "home_language_label") or "Deutsch",
+        }
+
+
+@app.put("/api/export-settings")
+async def update_export_settings(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    label = str(payload.get("home_language_label") or "").strip() or "Deutsch"
+    with connect() as con:
+        set_setting(con, "home_language_label", label[:40])
+        con.commit()
+    return {"ok": True, "home_language_label": label[:40]}
 
 
 @app.get("/api/database")
@@ -1320,7 +1983,7 @@ def use_example_database() -> dict[str, Any]:
     if not EXAMPLE_DB.exists():
         raise HTTPException(status_code=404, detail="Example database not found")
     db = set_active_db(EXAMPLE_DB)
-    return {"ok": True, "active": str(db), "active_name": db.name, "is_example": True}
+    return database_payload(db)
 
 
 @app.post("/api/database/create")
@@ -1335,7 +1998,95 @@ async def create_database(request: Request) -> dict[str, Any]:
     except FileExistsError:
         raise HTTPException(status_code=409, detail=f"Database already exists: {filename}") from None
     db = set_active_db(path)
-    return {"ok": True, "active": str(db), "active_name": db.name, "is_example": False}
+    return database_payload(db)
+
+
+@app.post("/api/database/use")
+async def use_database(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    raw_path = str(payload.get("path") or "").strip()
+    if not raw_path:
+        raise HTTPException(status_code=400, detail="Choose a database file.")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = (ROOT / path).resolve()
+    try:
+        validate_database(path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Database not found: {path}") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db = set_active_db(path)
+    return database_payload(db)
+
+
+@app.post("/api/database/choose")
+def choose_database() -> dict[str, Any]:
+    if not shutil.which("osascript"):
+        raise HTTPException(status_code=501, detail="Native file chooser is not available on this system.")
+    result = subprocess.run(
+        [
+            "osascript",
+            "-e",
+            'POSIX path of (choose file with prompt "Choose a VitaMine database")',
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = (result.stderr or result.stdout or "").strip()
+        if "User canceled" in message or result.returncode == 1:
+            return {"ok": False, "cancelled": True}
+        raise HTTPException(status_code=500, detail=message or "Could not open the file chooser.")
+    path = Path(result.stdout.strip()).expanduser()
+    try:
+        validate_database(path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Database not found: {path}") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db = set_active_db(path)
+    return database_payload(db)
+
+
+@app.post("/api/database/import")
+async def import_database(file: UploadFile = File(...)) -> dict[str, Any]:
+    filename = sanitize_database_name(file.filename or "workspace.vitamine")
+    if filename.endswith(".sqlite"):
+        filename = f"{Path(filename).stem}.vitamine"
+    path = DATA / filename
+    upload_path = unique_database_path(f".{Path(filename).stem}.upload{Path(filename).suffix}")
+    DATA.mkdir(parents=True, exist_ok=True)
+    try:
+        with upload_path.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle)
+        validate_database(upload_path)
+        if path.exists():
+            validate_database(path)
+            if filecmp.cmp(upload_path, path, shallow=False):
+                upload_path.unlink(missing_ok=True)
+            else:
+                upload_path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"A database named {path.name} already exists. "
+                        "It was not duplicated; load the existing database or choose a different filename."
+                    ),
+                )
+        else:
+            upload_path.replace(path)
+    except ValueError as exc:
+        upload_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        upload_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Could not import database: {exc}") from exc
+    finally:
+        await file.close()
+    db = set_active_db(path)
+    return database_payload(db)
 
 
 @app.post("/api/actions/sync-zotero")
@@ -1387,28 +2138,31 @@ def build_long_action(lang: str = "en") -> JSONResponse:
 
 
 @app.post("/api/actions/build-short")
-def build_short_action() -> JSONResponse:
+def build_short_action(lang: str = "en") -> JSONResponse:
+    lang = "de" if lang == "de" else "en"
     curated = run_script("curate_short_cv.py")
     if curated.returncode != 0:
         return JSONResponse({"ok": False, "stderr": curated.stderr[-4000:]}, status_code=500)
-    result = run_script("build_short_cv.py")
+    result = run_script("build_short_cv.py", "--lang", lang)
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse(build_response(curated.stdout + result.stdout, cache_key))
+    return JSONResponse(build_response(curated.stdout + result.stdout, cache_key, {"language": lang}))
 
 
 @app.post("/api/actions/build-ultrashort-tabular")
-def build_ultrashort_tabular_action() -> JSONResponse:
-    result = run_script("build_ultrashort_tabular_cv.py")
+def build_ultrashort_tabular_action(lang: str = "en") -> JSONResponse:
+    lang = "de" if lang == "de" else "en"
+    result = run_script("build_ultrashort_tabular_cv.py", "--lang", lang)
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse(build_response(f"docx: output/ultrashort_tabular_cv.docx\n{result.stdout}", cache_key))
+    return JSONResponse(build_response(result.stdout, cache_key, {"language": lang}))
 
 
 @app.post("/api/actions/build-biosketch")
-def build_biosketch_action() -> JSONResponse:
+def build_biosketch_action(lang: str = "en") -> JSONResponse:
+    lang = "de" if lang == "de" else "en"
     imported_stdout = ""
     with connect() as con:
         contribution_count = int(con.execute("SELECT COUNT(*) FROM biosketch_contributions").fetchone()[0])
@@ -1417,11 +2171,11 @@ def build_biosketch_action() -> JSONResponse:
         if imported.returncode != 0:
             return JSONResponse({"ok": False, "stderr": imported.stderr[-4000:]}, status_code=500)
         imported_stdout = imported.stdout
-    result = run_script("build_biosketch.py")
+    result = run_script("build_biosketch.py", "--lang", lang)
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse(build_response(imported_stdout + result.stdout, cache_key))
+    return JSONResponse(build_response(imported_stdout + result.stdout, cache_key, {"language": lang}))
 
 
 @app.post("/api/actions/build-harvard")
@@ -1438,5 +2192,5 @@ def output_file(filename: str) -> FileResponse:
 
 
 @app.get("/health")
-def health() -> dict[str, bool]:
-    return {"ok": active_db_path().exists()}
+def health() -> dict[str, Any]:
+    return {"ok": active_db_path().exists(), "app": "vitamine"}
