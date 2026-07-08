@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260708-tabular-build-fix">
+  <link rel="stylesheet" href="/static/styles.css?v=20260708-export-links">
 </head>
 <body>
   <header class="topbar">
@@ -101,7 +101,7 @@
             <p>One-page DOCX with a tightly curated publication list.</p>
             <div class="buttonRow">
               <button id="buildUltraDashboard" type="button">Build</button>
-              <a href="/output/ultrashort_tabular_cv.docx" target="_blank">View DOCX</a>
+              <a id="openUltraDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
             </div>
           </article>
           <article class="exportCard">
@@ -109,8 +109,8 @@
             <p>Compact PDF/HTML export with a separate selected-publications list.</p>
             <div class="buttonRow">
               <button id="buildShortDashboard" type="button">Build</button>
-              <a href="/output/short_cv.html" target="_blank">View HTML</a>
-              <a href="/output/short_cv.pdf" target="_blank">View PDF</a>
+              <a id="openShortDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
+              <a id="openShortDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
           </article>
           <article class="exportCard">
@@ -124,8 +124,8 @@
             </label>
             <div class="buttonRow">
               <button id="buildLongDashboard" type="button">Build</button>
-              <a id="openLongDashboardHtml" href="/output/long_cv.html" target="_blank">View HTML</a>
-              <a id="openLongDashboardPdf" href="/output/long_cv.pdf" target="_blank">View PDF</a>
+              <a id="openLongDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
+              <a id="openLongDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
           </article>
           <article class="exportCard">
@@ -133,8 +133,8 @@
             <p>Biosketch export with current contributions to science.</p>
             <div class="buttonRow">
               <button id="buildBiosketchDashboard" type="button">Build</button>
-              <a href="/output/biosketch.html" target="_blank">View HTML</a>
-              <a href="/output/biosketch.pdf" target="_blank">View PDF</a>
+              <a id="openBiosketchDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
+              <a id="openBiosketchDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
             </div>
           </article>
         </div>
@@ -319,6 +319,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260708-tabular-build-fix"></script>
+  <script src="/static/app.js?v=20260708-export-links"></script>
 </body>
 </html>

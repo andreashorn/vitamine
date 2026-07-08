@@ -90,6 +90,14 @@ button:disabled {
   opacity: 0.55;
 }
 
+a.disabledLink {
+  pointer-events: none;
+  cursor: default;
+  opacity: 0.45;
+  border-color: var(--line);
+  color: var(--muted);
+}
+
 .actions {
   display: flex;
   gap: 8px;

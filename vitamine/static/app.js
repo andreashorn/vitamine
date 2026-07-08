@@ -167,39 +167,22 @@ function actionLog(target, data) {
 }
 
 function refreshExportLinks(data) {
-  if (data.html || data.pdf) {
-    if (data.html && data.html.includes("long_cv")) {
-      const link = $("#openLongDashboardHtml");
-      if (link) link.href = data.html;
-    }
-    if (data.pdf && data.pdf.includes("long_cv")) {
-      const link = $("#openLongDashboardPdf");
-      if (link) link.href = data.pdf;
-    }
-    $$("a[href*='long_cv.html']").forEach((link) => {
-      if (data.html && data.html.includes("long_cv")) link.href = data.html;
-    });
-    $$("a[href*='long_cv.pdf']").forEach((link) => {
-      if (data.pdf && data.pdf.includes("long_cv")) link.href = data.pdf;
-    });
-    $$("a[href*='short_cv.html']").forEach((link) => {
-      if (data.html && data.html.includes("short_cv")) link.href = data.html;
-    });
-    $$("a[href*='short_cv.pdf']").forEach((link) => {
-      if (data.pdf && data.pdf.includes("short_cv")) link.href = data.pdf;
-    });
-    $$("a[href*='biosketch.html']").forEach((link) => {
-      if (data.html && data.html.includes("biosketch")) link.href = data.html;
-    });
-    $$("a[href*='biosketch.pdf']").forEach((link) => {
-      if (data.pdf && data.pdf.includes("biosketch")) link.href = data.pdf;
-    });
-  }
-  if (data.docx) {
-    $$("a[href*='ultrashort_tabular_cv.docx']").forEach((link) => {
-      link.href = data.docx;
-    });
-  }
+  if (data.html && data.html.includes("long_cv")) enableExportLink("#openLongDashboardHtml", data.html);
+  if (data.pdf && data.pdf.includes("long_cv")) enableExportLink("#openLongDashboardPdf", data.pdf);
+  if (data.html && data.html.includes("short_cv")) enableExportLink("#openShortDashboardHtml", data.html);
+  if (data.pdf && data.pdf.includes("short_cv")) enableExportLink("#openShortDashboardPdf", data.pdf);
+  if (data.html && data.html.includes("biosketch")) enableExportLink("#openBiosketchDashboardHtml", data.html);
+  if (data.pdf && data.pdf.includes("biosketch")) enableExportLink("#openBiosketchDashboardPdf", data.pdf);
+  if (data.docx) enableExportLink("#openUltraDashboardDocx", data.docx);
+}
+
+function enableExportLink(selector, href) {
+  const link = $(selector);
+  if (!link) return;
+  link.href = href;
+  link.classList.remove("disabledLink");
+  link.removeAttribute("aria-disabled");
+  link.removeAttribute("tabindex");
 }
 
 function openBuiltArtifact(data) {
