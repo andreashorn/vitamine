@@ -1274,7 +1274,8 @@ async def suggest_export_profile_publications(profile: str, request: Request) ->
 
 
 def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
-    env = {**os.environ, "VITAMINE_DB": str(active_db_path())}
+    pythonpath = os.pathsep.join(part for part in (str(ROOT), os.environ.get("PYTHONPATH", "")) if part)
+    env = {**os.environ, "VITAMINE_DB": str(active_db_path()), "PYTHONPATH": pythonpath}
     return subprocess.run(
         [sys.executable, str(SCRIPTS / name), *args],
         cwd=ROOT,

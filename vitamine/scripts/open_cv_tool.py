@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 HOST = "127.0.0.1"
 PORT = 8765
 URL = f"http://{HOST}:{PORT}"
-OPEN_URL = f"{URL}/?v=20260708-repo-db"
+OPEN_URL = f"{URL}/?v=20260708-tabular-build-fix"
 LOG = ROOT / "output" / "vitamine_server.log"
 RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "vitamine"
 VENV_DIR = RUNTIME_DIR / ".venv"

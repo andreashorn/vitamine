@@ -1075,8 +1075,8 @@ async function init() {
     actionLog("#syncOutput", data);
   };
   const buildUltra = async () => {
-    $("#exportOutput").textContent = "Building one-page CV...";
-    const data = await runAction("/api/actions/build-ultrashort-tabular", "One-page CV built", "Building one-page CV...");
+    $("#exportOutput").textContent = "Building tabular one page CV...";
+    const data = await runAction("/api/actions/build-ultrashort-tabular", "Tabular one page CV built", "Building tabular one page CV...");
     refreshExportLinks(data);
     actionLog("#exportOutput", data);
     openBuiltArtifact(data);
