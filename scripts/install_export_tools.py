@@ -23,12 +23,12 @@ DEFAULT_INSTALL_DIR = ROOT / "vendor" / "export-tools"
 DEFAULT_MODEL_DIR = ROOT / "vendor" / "models"
 GITHUB_API = "https://api.github.com/repos"
 TOOLS = {
+    "llama-server": "ggml-org/llama.cpp",
     "pandoc": "jgm/pandoc",
     "typst": "typst/typst",
 }
 BREW_TOOLS = {
     "pdftotext": "poppler",
-    "llama-server": "llama.cpp",
 }
 DEFAULT_MODEL = {
     "repo": "bartowski/Phi-3.5-mini-instruct-GGUF",
@@ -63,6 +63,9 @@ def asset_matches(name: str, tool: str, arch: str) -> bool:
     if tool == "typst":
         typst_arch = "aarch64" if arch == "arm64" else "x86_64"
         return lower == f"typst-{typst_arch}-apple-darwin.tar.xz"
+    if tool == "llama-server":
+        llama_arch = "arm64" if arch == "arm64" else "x64"
+        return lower.endswith(".tar.gz") and f"bin-macos-{llama_arch}" in lower
     return False
 
 
@@ -123,8 +126,28 @@ def install_tool(tool: str, install_dir: Path, arch: str, force: bool) -> Path:
         shutil.copy2(source, target)
         mode = target.stat().st_mode
         target.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        if tool == "llama-server":
+            collect_archive_dylibs(extract_dir, target, install_dir / "lib")
         print(f"{tool}: installed {target}")
         return target
+
+
+def collect_archive_dylibs(extract_dir: Path, binary: Path, lib_dir: Path) -> None:
+    if platform.system() != "Darwin":
+        return
+    lib_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for source in extract_dir.rglob("*.dylib"):
+        target = lib_dir / source.name
+        shutil.copy2(source, target, follow_symlinks=True)
+        mode = target.stat().st_mode
+        target.chmod(mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        run_install_name_tool("-id", f"@rpath/{source.name}", str(target))
+        run_install_name_tool("-add_rpath", "@loader_path", str(target))
+        copied += 1
+    run_install_name_tool("-add_rpath", "@executable_path/../lib", str(binary))
+    if copied:
+        print(f"{binary.name}: collected {copied} bundled dylib(s)")
 
 
 def ensure_brew_formula(formula: str) -> None:
@@ -153,6 +176,8 @@ def install_brew_tool(tool: str, install_dir: Path, force: bool) -> Path:
     mode = target.stat().st_mode
     target.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     collect_macos_dylibs(target, Path(source).resolve(), install_dir / "lib")
+    if tool == "llama-server":
+        collect_llama_backend_dylibs(Path(source).resolve(), install_dir / "lib")
     print(f"{tool}: installed {target} from Homebrew formula {formula}")
     return target
 
@@ -230,6 +255,32 @@ def collect_macos_dylibs(binary: Path, source_binary: Path, lib_dir: Path) -> No
                 run_install_name_tool("-add_rpath", "@loader_path", str(target_dep))
             if target_current:
                 run_install_name_tool("-change", dep, f"@rpath/{source_dep.name}", str(target_current))
+
+
+def collect_llama_backend_dylibs(source_binary: Path, lib_dir: Path) -> None:
+    if platform.system() != "Darwin":
+        return
+    roots = [
+        source_binary.parent.parent,
+        Path("/usr/local/opt/llama.cpp"),
+        Path("/opt/homebrew/opt/llama.cpp"),
+    ]
+    copied = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for source in root.rglob("libggml-*.dylib"):
+            target = lib_dir / source.name
+            if target.exists() and target.stat().st_size == source.stat().st_size:
+                continue
+            shutil.copy2(source, target, follow_symlinks=True)
+            mode = target.stat().st_mode
+            target.chmod(mode | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            run_install_name_tool("-id", f"@rpath/{source.name}", str(target))
+            run_install_name_tool("-add_rpath", "@loader_path", str(target))
+            copied += 1
+    if copied:
+        print(f"llama-server: collected {copied} backend dylib(s)")
 
 
 def huggingface_url(repo: str, filename: str) -> str:

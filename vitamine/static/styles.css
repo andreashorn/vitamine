@@ -376,12 +376,12 @@ textarea {
   gap: 8px;
 }
 
-.biosketchAchievements {
+.biosketchContributions {
   display: grid;
   gap: 10px;
 }
 
-.biosketchAchievement {
+.biosketchContribution {
   min-width: 0;
   display: grid;
   grid-template-columns: minmax(320px, 0.85fr) minmax(360px, 1fr);
@@ -395,16 +395,16 @@ textarea {
   padding: 8px;
 }
 
-.biosketchAchievement.selected {
+.biosketchContribution.selected {
   border-color: var(--accent);
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.biosketchAchievement.overLimit {
+.biosketchContribution.overLimit {
   border-color: var(--danger);
 }
 
-.biosketchAchievementHeader {
+.biosketchContributionHeader {
   grid-area: header;
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr);
@@ -412,7 +412,7 @@ textarea {
   align-items: center;
 }
 
-.biosketchAchievementHeader span {
+.biosketchContributionHeader span {
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
@@ -768,8 +768,9 @@ legend {
 .dropzone {
   display: grid;
   place-items: center;
-  gap: 4px;
-  min-height: 92px;
+  gap: 6px;
+  min-height: 190px;
+  padding: 16px 12px;
   border: 1px dashed #8aa5a0;
   background: #f7fbfa;
   color: var(--ink);
@@ -785,6 +786,13 @@ legend {
 .dropzone strong,
 .dropzone span {
   display: block;
+}
+
+.dropzoneIcon {
+  width: min(320px, 82vw);
+  max-width: 100%;
+  height: auto;
+  pointer-events: none;
 }
 
 .dropzone span,
@@ -861,6 +869,23 @@ legend {
   grid-template-columns: minmax(220px, 1fr) auto;
   gap: 10px;
   align-items: center;
+}
+
+.checkboxStack {
+  display: grid;
+  gap: 4px;
+}
+
+.checkboxStack.compact {
+  font-size: 12px;
+  grid-column: 1 / 2;
+}
+
+.checkboxStack label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
 }
 
 .mutedCard {
@@ -1362,11 +1387,11 @@ legend {
     position: static;
   }
 
-  .biosketchAchievement {
+  .biosketchContribution {
     display: block;
   }
 
-  .biosketchAchievementHeader {
+  .biosketchContributionHeader {
     margin-bottom: 6px;
   }
 

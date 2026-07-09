@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -106,7 +107,7 @@ ENTRY_FIELDS = [
 ]
 
 CV_IMPORT_SETTING_FIELDS = {
-    "provider": "none",
+    "provider": "bundled_llama",
     "ollama_url": "http://127.0.0.1:11434",
     "ollama_model": "llama3.1:8b",
     "api_base_url": "https://api.openai.com/v1",
@@ -114,6 +115,17 @@ CV_IMPORT_SETTING_FIELDS = {
     "bundled_llama_model_path": "",
     "bundled_llama_ctx_size": "4096",
 }
+
+LONG_CV_PUBLICATION_CATEGORIES = {
+    "peer_reviewed": "Peer-reviewed publications",
+    "patents": "Patents",
+    "books_chapters": "Books / book chapters",
+    "preprints": "Preprints",
+    "manuscripts_in_preparation": "Manuscripts in preparation",
+    "poster_presentations": "Poster presentations",
+}
+
+DEFAULT_LONG_CV_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
 
 
 app = FastAPI(title="VitaMine")
@@ -1460,7 +1472,7 @@ async def update_person(request: Request) -> dict[str, Any]:
 def get_narrative_report() -> dict[str, Any]:
     with connect() as con:
         report = row_dict(con.execute("SELECT * FROM narrative_reports WHERE id=1").fetchone())
-    return report or {"id": 1, "title": "Narrative Report", "body": "", "title_de": "Narrativer Bericht", "body_de": ""}
+    return report or {"id": 1, "title": "Narrative Report", "body": "", "title_de": "Freie Stellungname", "body_de": ""}
 
 
 @app.put("/api/narrative-report")
@@ -1656,6 +1668,178 @@ PUBLICATION_FIELDS = [
     "quality_note",
 ]
 
+DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s\"<>]+", re.IGNORECASE)
+PMID_RE = re.compile(r"\b(?:pmid|pubmed)\s*:?\s*(\d{5,10})\b", re.IGNORECASE)
+BARE_PMID_RE = re.compile(r"^\d{5,10}$")
+IDENTIFIER_USER_AGENT = "vitamine/0.1 (publication identifier import)"
+
+
+def clean_metadata_text(value: Any) -> str:
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    text = str(value or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_doi(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    text = re.sub(r"^https?://(dx\.)?doi\.org/", "", text)
+    text = re.sub(r"^doi:\s*", "", text)
+    return text.rstrip(".,;)")
+
+
+def year_from_date_parts(parts: Any) -> str:
+    try:
+        year = parts[0][0]
+    except (TypeError, IndexError):
+        return ""
+    return str(year) if year else ""
+
+
+def metadata_json(url: str) -> dict[str, Any] | None:
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": IDENTIFIER_USER_AGENT},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.status >= 400:
+                return None
+            return json.loads(response.read().decode("utf-8"))
+    except (TimeoutError, urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError):
+        return None
+
+
+def crossref_publication_metadata(doi: str) -> dict[str, Any]:
+    payload = metadata_json(f"https://api.crossref.org/works/{urllib.parse.quote(doi, safe='')}")
+    message = (payload or {}).get("message") or {}
+    if not message:
+        return {}
+    authors = []
+    for author in message.get("author") or []:
+        name = " ".join(part for part in [author.get("given"), author.get("family")] if part)
+        if name:
+            authors.append(name)
+    year = (
+        year_from_date_parts((message.get("published-print") or {}).get("date-parts"))
+        or year_from_date_parts((message.get("published-online") or {}).get("date-parts"))
+        or year_from_date_parts((message.get("published") or {}).get("date-parts"))
+        or year_from_date_parts((message.get("issued") or {}).get("date-parts"))
+    )
+    doi_value = normalize_doi(message.get("DOI") or doi)
+    values = {
+        "item_type": clean_metadata_text(message.get("type")) or "journal-article",
+        "category": "peer_reviewed",
+        "authors": ", ".join(authors),
+        "title": clean_metadata_text(message.get("title")),
+        "venue": clean_metadata_text(message.get("container-title")),
+        "year": year,
+        "doi": doi_value,
+        "pmid": pubmed_pmid_for_doi(doi_value) if doi_value else "",
+        "url": clean_metadata_text(message.get("URL")) or (f"https://doi.org/{doi_value}" if doi_value else ""),
+        "abstract": clean_metadata_text(message.get("abstract")),
+        "extra": "",
+        "confidence": "high",
+        "include_short": 0,
+        "include_ultrashort": 0,
+        "short_citation": "",
+        "suppress_display": 0,
+        "quality_note": "",
+    }
+    values["raw_citation"] = publication_raw_citation(values)
+    return values
+
+
+def pubmed_pmid_for_doi(doi: str) -> str:
+    term = urllib.parse.quote(f"{doi}[AID]")
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&retmode=json&tool=vitamine&term={term}"
+    payload = metadata_json(url)
+    ids = (((payload or {}).get("esearchresult") or {}).get("idlist") or [])
+    return str(ids[0]) if ids else ""
+
+
+def pubmed_publication_metadata(pmid: str) -> dict[str, Any]:
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&retmode=json&tool=vitamine&id={urllib.parse.quote(pmid)}"
+    payload = metadata_json(url)
+    summary = ((payload or {}).get("result") or {}).get(str(pmid)) or {}
+    if not summary:
+        return {}
+    authors = [author.get("name") for author in summary.get("authors") or [] if author.get("name")]
+    doi = ""
+    for article_id in summary.get("articleids") or []:
+        if str(article_id.get("idtype") or "").lower() == "doi":
+            doi = normalize_doi(article_id.get("value"))
+            break
+    pubdate = clean_metadata_text(summary.get("pubdate"))
+    year_match = re.search(r"\b(19|20)\d{2}\b", pubdate)
+    values = {
+        "item_type": "journal-article",
+        "category": "peer_reviewed",
+        "authors": ", ".join(authors),
+        "title": clean_metadata_text(summary.get("title")),
+        "venue": clean_metadata_text(summary.get("fulljournalname") or summary.get("source")),
+        "year": year_match.group(0) if year_match else "",
+        "doi": doi,
+        "pmid": str(pmid),
+        "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+        "abstract": "",
+        "extra": "",
+        "confidence": "high",
+        "include_short": 0,
+        "include_ultrashort": 0,
+        "short_citation": "",
+        "suppress_display": 0,
+        "quality_note": "",
+    }
+    values["raw_citation"] = publication_raw_citation(values)
+    return values
+
+
+def publication_raw_citation(values: dict[str, Any]) -> str:
+    citation = ". ".join(str(values.get(field) or "").strip() for field in ("authors", "title", "venue", "year") if str(values.get(field) or "").strip())
+    if values.get("doi"):
+        citation = f"{citation}. doi:{values['doi']}" if citation else f"doi:{values['doi']}"
+    elif values.get("pmid"):
+        citation = f"{citation}. PMID:{values['pmid']}" if citation else f"PMID:{values['pmid']}"
+    return citation
+
+
+def parse_publication_identifiers(text: str) -> list[dict[str, str]]:
+    identifiers: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in DOI_RE.finditer(text):
+        value = normalize_doi(match.group(0))
+        key = ("doi", value)
+        if value and key not in seen:
+            identifiers.append({"kind": "doi", "value": value})
+            seen.add(key)
+    for match in PMID_RE.finditer(text):
+        value = match.group(1)
+        key = ("pmid", value)
+        if key not in seen:
+            identifiers.append({"kind": "pmid", "value": value})
+            seen.add(key)
+    for line in text.splitlines():
+        value = line.strip()
+        if BARE_PMID_RE.fullmatch(value):
+            key = ("pmid", value)
+            if key not in seen:
+                identifiers.append({"kind": "pmid", "value": value})
+                seen.add(key)
+    return identifiers
+
+
+def existing_publication_for_identifier(con: sqlite3.Connection, doi: str = "", pmid: str = "") -> sqlite3.Row | None:
+    doi_key = normalize_doi(doi)
+    if doi_key:
+        for row in con.execute("SELECT id, title, doi, pmid FROM publications WHERE doi IS NOT NULL AND doi != '' ORDER BY id").fetchall():
+            if normalize_doi(row["doi"]) == doi_key:
+                return row
+    if pmid:
+        return con.execute("SELECT id, title, doi, pmid FROM publications WHERE pmid=? ORDER BY id LIMIT 1", (pmid,)).fetchone()
+    return None
+
 
 def normalize_publication(payload: dict[str, Any]) -> dict[str, Any]:
     title = str(payload.get("title") or "").strip()
@@ -1705,6 +1889,83 @@ async def create_publication(request: Request) -> dict[str, Any]:
         )
         con.commit()
     return {"ok": True, "id": cursor.lastrowid}
+
+
+@app.post("/api/publications/import-identifiers")
+async def import_publication_identifiers(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    identifiers = parse_publication_identifiers(str(payload.get("text") or ""))
+    if not identifiers:
+        raise HTTPException(status_code=400, detail="Paste at least one DOI or PubMed ID.")
+    results: list[dict[str, Any]] = []
+    imported = 0
+    skipped = 0
+    unresolved = 0
+    with connect() as con:
+        document_id = ensure_manual_document(con)
+        for identifier in identifiers:
+            kind = identifier["kind"]
+            value = identifier["value"]
+            existing = existing_publication_for_identifier(con, doi=value if kind == "doi" else "", pmid=value if kind == "pmid" else "")
+            if existing:
+                skipped += 1
+                results.append(
+                    {
+                        "identifier": value,
+                        "kind": kind,
+                        "status": "existing",
+                        "id": existing["id"],
+                        "title": existing["title"],
+                    }
+                )
+                continue
+            metadata = crossref_publication_metadata(value) if kind == "doi" else pubmed_publication_metadata(value)
+            if metadata.get("doi") or metadata.get("pmid"):
+                duplicate = existing_publication_for_identifier(con, doi=metadata.get("doi") or "", pmid=metadata.get("pmid") or "")
+                if duplicate:
+                    skipped += 1
+                    results.append(
+                        {
+                            "identifier": value,
+                            "kind": kind,
+                            "status": "existing",
+                            "id": duplicate["id"],
+                            "title": duplicate["title"],
+                        }
+                    )
+                    continue
+            if not metadata.get("title") and not metadata.get("raw_citation"):
+                unresolved += 1
+                results.append({"identifier": value, "kind": kind, "status": "unresolved", "title": ""})
+                continue
+            normalized = normalize_publication(metadata)
+            cursor = con.execute(
+                f"""
+                INSERT INTO publications (document_id, source, {', '.join(PUBLICATION_FIELDS)})
+                VALUES (?, 'identifier_import', {', '.join('?' for _ in PUBLICATION_FIELDS)})
+                """,
+                (document_id, *[normalized[field] for field in PUBLICATION_FIELDS]),
+            )
+            imported += 1
+            results.append(
+                {
+                    "identifier": value,
+                    "kind": kind,
+                    "status": "imported",
+                    "id": cursor.lastrowid,
+                    "title": normalized["title"],
+                }
+            )
+            time.sleep(0.05)
+        con.commit()
+    return {
+        "ok": True,
+        "requested": len(identifiers),
+        "imported": imported,
+        "skipped": skipped,
+        "unresolved": unresolved,
+        "results": results,
+    }
 
 
 @app.put("/api/publications/{publication_id}")
@@ -1919,7 +2180,7 @@ async def create_biosketch_contribution(request: Request) -> dict[str, Any]:
             (
                 document_id,
                 ordinal,
-                str(payload.get("title") or "New Achievement").strip() or "New Achievement",
+                str(payload.get("title") or "New Contributions to Science Item").strip() or "New Contributions to Science Item",
                 str(payload.get("narrative") or "").strip(),
             ),
         )
@@ -1933,7 +2194,7 @@ async def update_biosketch_contribution(contribution_id: int, request: Request) 
     title = str(payload.get("title") or "").strip()
     narrative = str(payload.get("narrative") or "").strip()
     if not title:
-        raise HTTPException(status_code=400, detail="Achievement title is required")
+        raise HTTPException(status_code=400, detail="Contributions to Science title is required")
     with connect() as con:
         cursor = con.execute(
             """
@@ -1944,7 +2205,7 @@ async def update_biosketch_contribution(contribution_id: int, request: Request) 
             (title, narrative, contribution_id),
         )
         if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Achievement not found")
+            raise HTTPException(status_code=404, detail="Contributions to Science item not found")
         con.commit()
     return {"ok": True}
 
@@ -1954,7 +2215,7 @@ def delete_biosketch_contribution(contribution_id: int) -> dict[str, Any]:
     with connect() as con:
         cursor = con.execute("DELETE FROM biosketch_contributions WHERE id=?", (contribution_id,))
         if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Achievement not found")
+            raise HTTPException(status_code=404, detail="Contributions to Science item not found")
         rows = con.execute("SELECT id FROM biosketch_contributions ORDER BY ordinal, id").fetchall()
         for index, row in enumerate(rows, 1):
             con.execute("UPDATE biosketch_contributions SET ordinal=? WHERE id=?", (index, row["id"]))
@@ -1977,7 +2238,7 @@ async def update_biosketch_contribution_publications(contribution_id: int, reque
     with connect() as con:
         contribution = con.execute("SELECT id FROM biosketch_contributions WHERE id=?", (contribution_id,)).fetchone()
         if not contribution:
-            raise HTTPException(status_code=404, detail="Achievement not found")
+            raise HTTPException(status_code=404, detail="Contributions to Science item not found")
         con.execute("DELETE FROM biosketch_contribution_publications WHERE contribution_id=?", (contribution_id,))
         citations = []
         for index, publication_id in enumerate(publication_ids):
@@ -2167,8 +2428,17 @@ def run_publication_source(source: str) -> subprocess.CompletedProcess[str]:
 @app.get("/api/export-settings")
 def export_settings() -> dict[str, Any]:
     with connect() as con:
+        selected = get_setting(con, "long_cv_publication_categories")
+        categories = [item for item in (selected or "").split(",") if item in LONG_CV_PUBLICATION_CATEGORIES]
+        if not categories:
+            categories = [key for key in LONG_CV_PUBLICATION_CATEGORIES if key in DEFAULT_LONG_CV_PUBLICATION_CATEGORIES]
         return {
             "home_language_label": get_setting(con, "home_language_label") or "Deutsch",
+            "long_cv_publication_categories": categories,
+            "long_cv_publication_category_options": [
+                {"key": key, "label": label, "default": key in DEFAULT_LONG_CV_PUBLICATION_CATEGORIES}
+                for key, label in LONG_CV_PUBLICATION_CATEGORIES.items()
+            ],
         }
 
 
@@ -2176,10 +2446,16 @@ def export_settings() -> dict[str, Any]:
 async def update_export_settings(request: Request) -> dict[str, Any]:
     payload = await request.json()
     label = str(payload.get("home_language_label") or "").strip() or "Deutsch"
+    requested_categories = payload.get("long_cv_publication_categories")
+    categories: list[str] = []
+    if isinstance(requested_categories, list):
+        categories = [str(item) for item in requested_categories if str(item) in LONG_CV_PUBLICATION_CATEGORIES]
     with connect() as con:
         set_setting(con, "home_language_label", label[:40])
+        if isinstance(requested_categories, list):
+            set_setting(con, "long_cv_publication_categories", ",".join(categories))
         con.commit()
-    return {"ok": True, "home_language_label": label[:40]}
+    return {"ok": True, "home_language_label": label[:40], "long_cv_publication_categories": categories}
 
 
 @app.get("/api/database")
@@ -2393,6 +2669,8 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
             "documents_imported": len(results),
             "entries_inserted": sum(int(result.get("entries_inserted") or 0) for result in results),
             "contributions_inserted": sum(int(result.get("contributions_inserted") or 0) for result in results),
+            "publications_inserted": sum(int(result.get("publications_inserted") or 0) for result in results),
+            "narratives_imported": sum(int(result.get("narrative_imported") or 0) for result in results),
             "person_fields": max([int(result.get("person_fields") or 0) for result in results] or [0]),
             "used_llm": any(bool(result.get("used_llm")) for result in results),
             "provider": results[0].get("provider") if results else "none",

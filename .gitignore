@@ -19,3 +19,4 @@ data/*.vitamine-shm
 data/*.vitamine-wal
 .env
 *.gguf
+/data/cv-imports

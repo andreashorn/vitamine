@@ -80,6 +80,11 @@ TEXT = {
         "scholarship": "Report of Scholarship",
         "peer_reviewed": "Peer-Reviewed Scholarship in print or other media:",
         "other_scholarship": "Other Scholarship",
+        "patents": "Patents",
+        "books_chapters": "Books / Book Chapters",
+        "preprints": "Preprints",
+        "manuscripts_in_preparation": "Manuscripts in Preparation",
+        "poster_presentations": "Poster Presentations",
         "no_sponsor": "No presentations below were sponsored by 3rd parties/outside entities.",
         "achievements": "Achievements",
         "ad_hoc_reviewer": "Ad hoc Reviewer",
@@ -108,6 +113,11 @@ TEXT = {
         "scholarship": "Publikationsbericht",
         "peer_reviewed": "Begutachtete wissenschaftliche Publikationen:",
         "other_scholarship": "Weitere wissenschaftliche Beiträge",
+        "patents": "Patente",
+        "books_chapters": "Bücher / Buchkapitel",
+        "preprints": "Preprints",
+        "manuscripts_in_preparation": "Manuskripte in Vorbereitung",
+        "poster_presentations": "Posterpräsentationen",
         "no_sponsor": "Die unten aufgeführten Vorträge wurden nicht durch Dritte/externe Einrichtungen gesponsert.",
         "achievements": "Erfolge",
         "ad_hoc_reviewer": "Ad-hoc-Gutachter",
@@ -132,6 +142,30 @@ THREE_COLUMN_SECTIONS = {
     "teaching",
 }
 
+PUBLICATION_CATEGORY_ORDER = [
+    ("peer_reviewed", "peer_reviewed"),
+    ("patents", "patents"),
+    ("books_chapters", "books_chapters"),
+    ("preprints", "preprints"),
+    ("manuscripts_in_preparation", "manuscripts_in_preparation"),
+    ("poster_presentations", "poster_presentations"),
+]
+
+DEFAULT_LONG_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
+
+PUBLICATION_CATEGORY_ALIASES = {
+    "patent": "patents",
+    "preprint": "preprints",
+    "book_chapter": "books_chapters",
+    "book_chapters": "books_chapters",
+    "poster": "poster_presentations",
+    "poster_presentation": "poster_presentations",
+    "posters": "poster_presentations",
+    "manuscript": "manuscripts_in_preparation",
+    "manuscripts": "manuscripts_in_preparation",
+    "manuscripts_under_review": "manuscripts_in_preparation",
+}
+
 
 def clean(value: str | None) -> str:
     return value or ""
@@ -147,6 +181,45 @@ def clean_cell(value: str | None) -> str:
 
 def tr(key: str) -> str:
     return TEXT.get(LANG, TEXT["en"])[key]
+
+
+def get_setting(con: sqlite3.Connection, key: str) -> str:
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return str(row["value"] or "") if row else ""
+
+
+def selected_publication_categories(con: sqlite3.Connection) -> list[str]:
+    selected = [item for item in get_setting(con, "long_cv_publication_categories").split(",") if item]
+    allowed = [category for category, _label in PUBLICATION_CATEGORY_ORDER]
+    selected = [category for category in selected if category in allowed]
+    if not selected:
+        selected = [category for category in allowed if category in DEFAULT_LONG_PUBLICATION_CATEGORIES]
+    return selected
+
+
+def publication_category_groups(con: sqlite3.Connection) -> list[tuple[str, list[sqlite3.Row]]]:
+    selected = set(selected_publication_categories(con))
+    rows = con.execute(
+        """
+        SELECT * FROM publications
+        WHERE COALESCE(suppress_display, 0) = 0
+        ORDER BY
+          CASE WHEN year IS NULL OR year = '' THEN 1 ELSE 0 END,
+          CAST(year AS INTEGER),
+          lower(title)
+        """
+    ).fetchall()
+    groups: list[tuple[str, list[sqlite3.Row]]] = []
+    for category, label_key in PUBLICATION_CATEGORY_ORDER:
+        if category not in selected:
+            continue
+        category_rows = [
+            row for row in rows
+            if PUBLICATION_CATEGORY_ALIASES.get(str(row["category"] or ""), str(row["category"] or "")) == category
+        ]
+        if category_rows:
+            groups.append((label_key, category_rows))
+    return groups
 
 
 def localized_section_title(section_key: str, english_title: str) -> str:
@@ -218,6 +291,15 @@ def typ_text(value: str | None, *, bold: bool = False, size: str | None = None) 
 def connect() -> sqlite3.Connection:
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS narrative_reports (
@@ -415,25 +497,15 @@ def markdown_publication_citation(row: sqlite3.Row) -> str:
 
 
 def publications_block(con: sqlite3.Connection) -> list[str]:
-    rows = con.execute(
-        """
-        SELECT * FROM publications
-        WHERE COALESCE(suppress_display, 0) = 0
-        ORDER BY
-          CASE WHEN year IS NULL OR year = '' THEN 1 ELSE 0 END,
-          CAST(year AS INTEGER),
-          lower(title)
-        """
-    ).fetchall()
-    out = [f"## {tr('scholarship')}", "", f"### {tr('peer_reviewed')}", ""]
-    peer_rows = [row for row in rows if row["category"] == "peer_reviewed"]
-    for index, row in enumerate(peer_rows, 1):
-        out.append(f"{index}. {markdown_publication_citation(row)}")
-    other_rows = [row for row in rows if row["category"] != "peer_reviewed"]
-    if other_rows:
-        out.extend(["", f"### {tr('other_scholarship')}", ""])
-        for index, row in enumerate(other_rows, 1):
+    groups = publication_category_groups(con)
+    if not groups:
+        return []
+    out = [f"## {tr('scholarship')}", ""]
+    for label_key, rows in groups:
+        out.extend([f"### {tr(label_key)}", ""])
+        for index, row in enumerate(rows, 1):
             out.append(f"{index}. {markdown_publication_citation(row)}")
+        out.append("")
     return out
 
 
@@ -836,31 +908,12 @@ def build_typst() -> str:
         else:
             lines.append(typ_grid(typ_entry_rows(rows, achievements_by_entry if section_key == "mentoring" else None)))
 
-    pub_rows = con.execute(
-        """
-        SELECT * FROM publications
-        WHERE COALESCE(suppress_display, 0) = 0
-        ORDER BY
-          CASE WHEN year IS NULL OR year = '' THEN 1 ELSE 0 END,
-          CAST(year AS INTEGER),
-          lower(title)
-        """
-    ).fetchall()
-    if pub_rows:
+    publication_groups = publication_category_groups(con)
+    if publication_groups:
         lines.append(typ_section(tr("scholarship")))
-        lines.append(typ_text(tr("peer_reviewed"), bold=True))
-        lines.append("#v(0.045in)")
-        for index, row in enumerate([row for row in pub_rows if row["category"] == "peer_reviewed"], 1):
-            lines.append(
-                "#grid(columns: (0.34in, 6.28in), gutter: 0.08in, row-gutter: 0pt,\n"
-                f"  [{typ_text(str(index) + '.')}],\n"
-                f"  [{typ_publication_citation(row)}]\n"
-                ")"
-            )
-        other_rows = [row for row in pub_rows if row["category"] != "peer_reviewed"]
-        if other_rows:
-            lines.append(typ_subheading(tr("other_scholarship")))
-            for index, row in enumerate(other_rows, 1):
+        for label_key, rows in publication_groups:
+            lines.append(typ_subheading(tr(label_key)))
+            for index, row in enumerate(rows, 1):
                 lines.append(
                     "#grid(columns: (0.34in, 6.28in), gutter: 0.08in, row-gutter: 0pt,\n"
                     f"  [{typ_text(str(index) + '.')}],\n"
@@ -1136,28 +1189,13 @@ def build_docx(path: Path, lang: str = "en") -> Path:
                 include_amount=section_key == "funding",
             )
 
-    publication_rows = con.execute(
-        """
-        SELECT * FROM publications
-        WHERE COALESCE(suppress_display, 0) = 0
-        ORDER BY
-          CASE WHEN year IS NULL OR year = '' THEN 1 ELSE 0 END,
-          CAST(year AS INTEGER),
-          lower(title)
-        """
-    ).fetchall()
-    peer_rows = [row for row in publication_rows if row["category"] == "peer_reviewed"]
-    other_rows = [row for row in publication_rows if row["category"] != "peer_reviewed"]
-    if peer_rows or other_rows:
+    publication_groups = publication_category_groups(con)
+    if publication_groups:
         add_section_heading(doc, f"{chr(marker_ord)}.", tr("scholarship"))
         marker_ord += 1
-        if peer_rows:
-            add_subheading(doc, tr("peer_reviewed"))
-            for index, row in enumerate(peer_rows, 1):
-                add_publication_docx(doc, index, row)
-        if other_rows:
-            add_subheading(doc, tr("other_scholarship"))
-            for index, row in enumerate(other_rows, 1):
+        for label_key, rows in publication_groups:
+            add_subheading(doc, tr(label_key))
+            for index, row in enumerate(rows, 1):
                 add_publication_docx(doc, index, row)
 
     report = con.execute("SELECT title, body, title_de, body_de FROM narrative_reports WHERE id=1").fetchone()

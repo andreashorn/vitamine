@@ -86,8 +86,10 @@ function setActionButtons(disabled) {
     "#buildShortDashboard",
     "#buildLongDashboard",
     "#buildBiosketchDashboard",
-    "#newBiosketchAchievement",
-    "#deleteBiosketchAchievement",
+    "#newBiosketchContribution",
+    "#deleteBiosketchContribution",
+    "#importPublicationIds",
+    "#resolvePublicationIdentifiers",
   ].forEach((selector) => {
     const button = $(selector);
     if (button) button.disabled = disabled;
@@ -180,7 +182,7 @@ async function loadCvImportSettings() {
   if (!$("#cvImportProvider")) return;
   const data = await api("/api/cv-import/settings");
   state.cvImport = data;
-  $("#cvImportProvider").value = data.provider || "none";
+  $("#cvImportProvider").value = data.provider || "bundled_llama";
   $("#cvImportOllamaUrl").value = data.ollama_url || "http://127.0.0.1:11434";
   $("#cvImportOllamaModel").value = data.ollama_model || "llama3.1:8b";
   $("#cvImportApiBaseUrl").value = data.api_base_url || "https://api.openai.com/v1";
@@ -226,6 +228,29 @@ async function importCvFiles(files) {
   if (!files.length) return;
   const form = new FormData();
   files.forEach((file) => form.append("files", file));
+  const startedAt = Date.now();
+  const fileList = files.map((file) => `- ${file.name}`).join("\n");
+  const progressText = () => {
+    const elapsed = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+    const phase = elapsed < 10
+      ? "Uploading and extracting text"
+      : elapsed < 45
+        ? "Running import parser"
+        : "Still working; local LLM imports can take a few minutes";
+    return [
+      `Importing ${files.length} CV document${files.length === 1 ? "" : "s"}...`,
+      "",
+      fileList,
+      "",
+      `${phase} (${elapsed}s elapsed)`,
+    ].join("\n");
+  };
+  const output = $("#cvImportOutput");
+  if (output) output.textContent = progressText();
+  const progressTimer = window.setInterval(() => {
+    const currentOutput = $("#cvImportOutput");
+    if (currentOutput) currentOutput.textContent = progressText();
+  }, 1000);
   setStatus(`Importing ${files.length} CV document${files.length === 1 ? "" : "s"}...`);
   setActionButtons(true);
   try {
@@ -233,19 +258,26 @@ async function importCvFiles(files) {
       method: "POST",
       body: form,
     });
+    window.clearInterval(progressTimer);
     const mode = data.used_llm ? "LLM" : "heuristic";
+    const publicationPart = data.publications_inserted ? `, ${data.publications_inserted} publications` : "";
+    const narrativePart = data.narratives_imported ? `, ${data.narratives_imported} narrative report${data.narratives_imported === 1 ? "" : "s"}` : "";
     const warningText = (data.warnings || []).length ? `; ${data.warnings.length} warning(s)` : "";
     if ($("#cvImportOutput")) $("#cvImportOutput").textContent = JSON.stringify(data, null, 2);
-    setStatus(`Imported ${data.entries_inserted || 0} entries and ${data.contributions_inserted || 0} contributions via ${mode}${warningText}`);
+    setStatus(`Imported ${data.entries_inserted || 0} entries, ${data.contributions_inserted || 0} Contributions to Science${publicationPart}${narrativePart} via ${mode}${warningText}`);
     await loadSummary();
     await loadMetrics();
     await loadEntries();
+    await loadPublications();
     await loadPerson();
+    await loadNarrativeReport();
     await loadBiosketch();
   } catch (error) {
+    window.clearInterval(progressTimer);
     if ($("#cvImportOutput")) $("#cvImportOutput").textContent = error.message;
     setStatus(error.message);
   } finally {
+    window.clearInterval(progressTimer);
     setActionButtons(false);
     if ($("#cvImportFileInput")) $("#cvImportFileInput").value = "";
   }
@@ -793,6 +825,22 @@ async function loadExportSettings() {
   const label = data.home_language_label || "Deutsch";
   $("#homeLanguageLabel").value = label;
   $("#homeLanguageOption").textContent = label;
+  renderLongPublicationCategories(data);
+}
+
+function renderLongPublicationCategories(settings = {}) {
+  const container = $("#longPublicationCategories");
+  if (!container) return;
+  const options = settings.long_cv_publication_category_options || [];
+  const selected = new Set(settings.long_cv_publication_categories || []);
+  container.innerHTML = options.map((option) => `<label>
+    <input type="checkbox" class="longPublicationCategory" value="${escapeHtml(option.key)}" ${selected.has(option.key) ? "checked" : ""}>
+    ${escapeHtml(option.label)}
+  </label>`).join("");
+}
+
+function selectedLongPublicationCategories() {
+  return $$(".longPublicationCategory:checked").map((input) => input.value);
 }
 
 async function saveExportSettings() {
@@ -801,7 +849,10 @@ async function saveExportSettings() {
   $("#homeLanguageOption").textContent = label;
   await api("/api/export-settings", {
     method: "PUT",
-    body: JSON.stringify({ home_language_label: label }),
+    body: JSON.stringify({
+      home_language_label: label,
+      long_cv_publication_categories: selectedLongPublicationCategories(),
+    }),
   });
   setStatus("Native / second CV language saved");
 }
@@ -1105,7 +1156,7 @@ async function loadNarrativeReport() {
   const report = await api("/api/narrative-report");
   $("#narrativeTitle").value = report.title || "Narrative Report";
   $("#narrativeBody").value = report.body || "";
-  $("#narrativeTitleDe").value = report.title_de || "Narrativer Bericht";
+  $("#narrativeTitleDe").value = report.title_de || "Freie Stellungname";
   $("#narrativeBodyDe").value = report.body_de || "";
 }
 
@@ -1187,6 +1238,64 @@ function closePublicationEditor() {
   const dialog = $("#publicationDialog");
   if (dialog.close) dialog.close();
   else dialog.removeAttribute("open");
+}
+
+function openPublicationIdentifierImport() {
+  const dialog = $("#publicationIdentifierDialog");
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute("open", "");
+  $("#publicationIdentifiers").focus();
+}
+
+function closePublicationIdentifierImport() {
+  const dialog = $("#publicationIdentifierDialog");
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+function identifierImportSummary(data) {
+  const lines = [
+    `Requested: ${data.requested || 0}`,
+    `Imported: ${data.imported || 0}`,
+    `Already present: ${data.skipped || 0}`,
+    `Unresolved: ${data.unresolved || 0}`,
+    "",
+  ];
+  (data.results || []).forEach((row) => {
+    const label = row.kind ? row.kind.toUpperCase() : "ID";
+    const title = row.title ? ` - ${row.title}` : "";
+    lines.push(`${row.status}: ${label} ${row.identifier}${title}`);
+  });
+  return lines.join("\n").trim();
+}
+
+async function importPublicationIdentifiers(event) {
+  event.preventDefault();
+  const text = $("#publicationIdentifiers").value.trim();
+  if (!text) {
+    setStatus("Paste at least one DOI or PubMed ID");
+    return;
+  }
+  setActionButtons(true);
+  $("#publicationIdentifierResults").textContent = "Resolving identifiers...";
+  try {
+    const data = await api("/api/publications/import-identifiers", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    });
+    $("#publicationIdentifierResults").textContent = identifierImportSummary(data);
+    setStatus(`Imported ${data.imported || 0} publication${data.imported === 1 ? "" : "s"} from identifiers`);
+    await loadPublications();
+    await loadSummary();
+    await loadExportProfile("ultrashort");
+    await loadExportProfile("short");
+    await loadBiosketch();
+  } catch (error) {
+    $("#publicationIdentifierResults").textContent = error.message;
+    setStatus(error.message);
+  } finally {
+    setActionButtons(false);
+  }
 }
 
 function editPublication(id) {
@@ -1518,7 +1627,7 @@ async function loadBiosketch() {
 }
 
 function renderBiosketchEditor() {
-  const container = $("#biosketchAchievements");
+  const container = $("#biosketchContributions");
   const count = $("#biosketchDropCount");
   if (!container || !count) return;
   const contributions = state.biosketch.contributions || [];
@@ -1529,26 +1638,26 @@ function renderBiosketchEditor() {
   const contributionOverLimit = contributions.length > contributionLimit;
   const productOverLimit = contributions.some((contribution) => (contribution.publications || []).length > productsPerContributionLimit);
   count.textContent = `${total} / ${limit}`;
-  count.title = `NIH legacy biosketch: up to ${contributionLimit} contributions, with up to ${productsPerContributionLimit} cited products each.`;
+  count.title = `NIH legacy biosketch: up to ${contributionLimit} Contributions to Science, with up to ${productsPerContributionLimit} cited products each.`;
   count.classList.toggle("dangerCount", total > limit || contributionOverLimit || productOverLimit);
   container.innerHTML = contributions.length
-    ? contributions.map((contribution) => biosketchAchievementMarkup(contribution)).join("")
-    : `<p class="emptyState">No achievements yet.</p>`;
+    ? contributions.map((contribution) => biosketchContributionMarkup(contribution)).join("")
+    : `<p class="emptyState">No Contributions to Science yet.</p>`;
   wireBiosketchEditor();
 }
 
-function biosketchAchievementMarkup(contribution) {
+function biosketchContributionMarkup(contribution) {
   const pubs = contribution.publications || [];
   const selected = state.selectedBiosketchContributionId === contribution.id ? " selected" : "";
   const perContributionLimit = state.biosketch.products_per_contribution_limit || 4;
   const overLimit = pubs.length > perContributionLimit ? " overLimit" : "";
   return `
-    <article class="biosketchAchievement${selected}${overLimit}" data-contribution-id="${contribution.id}">
-      <div class="biosketchAchievementHeader">
+    <article class="biosketchContribution${selected}${overLimit}" data-contribution-id="${contribution.id}">
+      <div class="biosketchContributionHeader">
         <span>${escapeHtml(String(contribution.ordinal || ""))}</span>
-        <input class="biosketchTitle" value="${escapeHtml(contribution.title || "")}" aria-label="Achievement title">
+        <input class="biosketchTitle" value="${escapeHtml(contribution.title || "")}" aria-label="Contributions to Science title">
       </div>
-      <textarea class="biosketchNarrative" rows="5" aria-label="Achievement text">${escapeHtml(contribution.narrative || "")}</textarea>
+      <textarea class="biosketchNarrative" rows="5" aria-label="Contributions to Science text">${escapeHtml(contribution.narrative || "")}</textarea>
       <div class="dropList biosketchDropList" data-contribution-id="${contribution.id}">
         ${pubs.length ? pubs.map((pub, index) => biosketchPublicationMarkup(pub, index, contribution.id)).join("") : `<p class="emptyState">Drop publications here.</p>`}
       </div>
@@ -1570,17 +1679,17 @@ function biosketchPublicationMarkup(pub, index, contributionId) {
 }
 
 function wireBiosketchEditor() {
-  $$(".biosketchAchievement").forEach((achievement) => {
-    const contributionId = Number(achievement.dataset.contributionId);
-    const title = achievement.querySelector(".biosketchTitle");
-    const narrative = achievement.querySelector(".biosketchNarrative");
-    achievement.addEventListener("click", () => {
+  $$(".biosketchContribution").forEach((contributionCard) => {
+    const contributionId = Number(contributionCard.dataset.contributionId);
+    const title = contributionCard.querySelector(".biosketchTitle");
+    const narrative = contributionCard.querySelector(".biosketchNarrative");
+    contributionCard.addEventListener("click", () => {
       if (state.selectedBiosketchContributionId === contributionId) return;
       state.selectedBiosketchContributionId = contributionId;
-      $$(".biosketchAchievement").forEach((item) => item.classList.remove("selected"));
-      achievement.classList.add("selected");
+      $$(".biosketchContribution").forEach((item) => item.classList.remove("selected"));
+      contributionCard.classList.add("selected");
     });
-    const saveText = debounce(() => saveBiosketchAchievementText(contributionId, title.value, narrative.value), 650);
+    const saveText = debounce(() => saveBiosketchContributionText(contributionId, title.value, narrative.value), 650);
     title.addEventListener("input", saveText);
     narrative.addEventListener("input", saveText);
   });
@@ -1640,13 +1749,13 @@ function biosketchPublicationIds(contributionId) {
   return (biosketchContribution(contributionId)?.publications || []).map((pub) => pub.id).filter(Boolean);
 }
 
-async function saveBiosketchAchievementText(contributionId, title, narrative) {
+async function saveBiosketchContributionText(contributionId, title, narrative) {
   if (!title.trim()) return;
   await api(`/api/biosketch/contributions/${contributionId}`, {
     method: "PUT",
     body: JSON.stringify({ title, narrative }),
   });
-  setStatus("Biosketch achievement saved");
+  setStatus("Biosketch Contributions to Science item saved");
 }
 
 async function saveBiosketchPublicationIds(contributionId, ids) {
@@ -1684,24 +1793,24 @@ async function removeBiosketchPublication(contributionId, publicationId) {
   await loadBiosketch();
 }
 
-async function createBiosketchAchievement() {
+async function createBiosketchContribution() {
   const data = await api("/api/biosketch/contributions", {
     method: "POST",
-    body: JSON.stringify({ title: "New Achievement", narrative: "" }),
+    body: JSON.stringify({ title: "New Contributions to Science Item", narrative: "" }),
   });
   state.selectedBiosketchContributionId = data.id;
-  setStatus("Biosketch achievement created");
+  setStatus("Biosketch Contributions to Science item created");
   await loadBiosketch();
 }
 
-async function deleteBiosketchAchievement() {
+async function deleteBiosketchContribution() {
   const contributions = state.biosketch.contributions || [];
   const contribution =
     contributions.find((item) => item.id === state.selectedBiosketchContributionId) || contributions[contributions.length - 1];
   if (!contribution) return;
   await api(`/api/biosketch/contributions/${contribution.id}`, { method: "DELETE" });
   state.selectedBiosketchContributionId = null;
-  setStatus("Biosketch achievement deleted");
+  setStatus("Biosketch Contributions to Science item deleted");
   await loadBiosketch();
 }
 
@@ -1856,8 +1965,8 @@ async function init() {
       setStatus(error.message);
     }
   });
-  $("#newBiosketchAchievement").addEventListener("click", createBiosketchAchievement);
-  $("#deleteBiosketchAchievement").addEventListener("click", deleteBiosketchAchievement);
+  $("#newBiosketchContribution").addEventListener("click", createBiosketchContribution);
+  $("#deleteBiosketchContribution").addEventListener("click", deleteBiosketchContribution);
   $$("#publicationsView th[data-sort]").forEach((header) => {
     header.addEventListener("click", () => sortPublicationsBy(header.dataset.sort));
   });
@@ -1865,6 +1974,12 @@ async function init() {
     clearPublicationForm();
     openPublicationEditor();
   });
+  $("#importPublicationIds").addEventListener("click", openPublicationIdentifierImport);
+  $("#closePublicationIdentifierImport").addEventListener("click", closePublicationIdentifierImport);
+  $("#publicationIdentifierDialog").addEventListener("click", (event) => {
+    if (event.target === $("#publicationIdentifierDialog")) closePublicationIdentifierImport();
+  });
+  $("#publicationIdentifierForm").addEventListener("submit", importPublicationIdentifiers);
   $("#closePublicationEditor").addEventListener("click", closePublicationEditor);
   $("#publicationDialog").addEventListener("click", (event) => {
     if (event.target === $("#publicationDialog")) closePublicationEditor();
@@ -1899,6 +2014,7 @@ async function init() {
   };
   const buildLong = async () => {
     const language = exportLanguage();
+    await saveExportSettings();
     $("#exportOutput").textContent = `Building long CV (${language})...`;
     const data = await runAction(`/api/actions/build-long?lang=${encodeURIComponent(language)}`, "Long CV built", "Building long CV...");
     refreshExportLinks("long", data);

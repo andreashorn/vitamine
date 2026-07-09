@@ -51,9 +51,10 @@
           <section class="panel">
             <div class="panelHeader">
               <h2>Import CV</h2>
-              <p>Drop a long CV, NIH biosketch, or both. Publications are skipped for Zotero sync.</p>
+              <p>Drop a long CV, NIH biosketch, or both. The bundled local LLM can extract entries, person details, publications, and narrative text.</p>
             </div>
             <div id="importCvDropzone" class="dropzone">
+              <img class="dropzoneIcon" src="/static/assets/dropzone.png" alt="" aria-hidden="true">
               <strong>Drop CV documents</strong>
               <span>DOCX, PDF, TXT, or Markdown</span>
             </div>
@@ -61,8 +62,8 @@
             <div class="grid two">
               <label>LLM provider
                 <select id="cvImportProvider">
-                  <option value="none">Heuristic only</option>
                   <option value="bundled_llama">Bundled Local LLM</option>
+                  <option value="none">Heuristic only</option>
                   <option value="ollama">Local Ollama</option>
                   <option value="openai">OpenAI API</option>
                   <option value="openai_compatible">Custom OpenAI-compatible API</option>
@@ -219,6 +220,7 @@
           <article class="exportCard">
             <h3>Long CV</h3>
             <p>Current long CV builder. This will become the Harvard-style export.</p>
+            <div id="longPublicationCategories" class="checkboxStack compact"></div>
             <div class="buttonRow">
               <button id="buildLongDashboard" type="button">Build</button>
               <a id="openLongDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
@@ -228,7 +230,7 @@
           </article>
           <article class="exportCard">
             <h3>NIH Biosketch</h3>
-            <p>Biosketch export with current contributions to science.</p>
+            <p>Biosketch export with current Contributions to Science.</p>
             <div class="buttonRow">
               <button id="buildBiosketchDashboard" type="button">Build</button>
               <a id="openBiosketchDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
@@ -353,6 +355,7 @@
       <div class="toolbar">
         <input id="pubSearch" type="search" placeholder="Search publications">
         <label class="inlineCheck"><input id="showSuppressedPubs" type="checkbox"> Show hidden/problem rows</label>
+        <button id="importPublicationIds" type="button" title="Import from DOI or PubMed IDs" aria-label="Import publications from DOI or PubMed IDs">Wand</button>
         <button id="newPublication" type="button">New Publication</button>
       </div>
       <div class="publicationWorkspace">
@@ -380,10 +383,10 @@
               <span id="biosketchDropCount">0 / 20</span>
             </div>
             <div class="buttonRow compactButtons">
-              <button id="newBiosketchAchievement" type="button">New Achievement</button>
-              <button id="deleteBiosketchAchievement" type="button">Delete Achievement</button>
+              <button id="newBiosketchContribution" type="button">New Contributions to Science Item</button>
+              <button id="deleteBiosketchContribution" type="button">Delete Contributions to Science Item</button>
             </div>
-            <div id="biosketchAchievements" class="biosketchAchievements"></div>
+            <div id="biosketchContributions" class="biosketchContributions"></div>
           </section>
         </div>
         <aside class="publicationSidebar">
@@ -434,6 +437,19 @@
             <button type="submit">Save</button>
             <button id="deletePublication" type="button">Delete</button>
           </div>
+        </form>
+      </dialog>
+      <dialog id="publicationIdentifierDialog" class="publicationDialog">
+        <form id="publicationIdentifierForm" class="editor publicationEditor">
+          <div class="dialogHeader">
+            <h2>Import Publications</h2>
+            <button id="closePublicationIdentifierImport" type="button" aria-label="Close publication import">Close</button>
+          </div>
+          <label>DOIs or PubMed IDs<textarea id="publicationIdentifiers" rows="9" placeholder="10.1000/example&#10;PMID: 12345678"></textarea></label>
+          <div class="formActions">
+            <button id="resolvePublicationIdentifiers" type="submit">Import</button>
+          </div>
+          <pre id="publicationIdentifierResults" class="logBox">No identifier import run in this session.</pre>
         </form>
       </dialog>
     </section>
