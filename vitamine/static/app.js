@@ -461,6 +461,26 @@ function defaultMapOrigin(zoom = MAP_ZOOM) {
   };
 }
 
+function mapOriginForNode(node, zoom = MAP_ZOOM) {
+  if (!Number.isFinite(Number(node?.longitude)) || !Number.isFinite(Number(node?.latitude))) {
+    return defaultMapOrigin(zoom);
+  }
+  const tile = lonLatToTile(node.longitude, node.latitude, zoom);
+  return clampMapOrigin({
+    x: tile.x * MAP_TILE_SIZE - MAP_WIDTH / 2,
+    y: tile.y * MAP_TILE_SIZE - MAP_HEIGHT / 2,
+  }, zoom);
+}
+
+function ownMapNode() {
+  const data = state.collaborationMap.data;
+  return data?.nodes?.find((node) => node.own) || data?.own || null;
+}
+
+function defaultCollaborationMapOrigin(zoom = MAP_ZOOM) {
+  return mapOriginForNode(ownMapNode(), zoom);
+}
+
 function clampMapOrigin(origin, zoom) {
   const world = mapWorldSize(zoom);
   return {
@@ -584,7 +604,7 @@ async function loadCollaborationMap() {
   state.collaborationMap.data = data;
   if (!state.collaborationMap.origin) {
     state.collaborationMap.zoom = MAP_ZOOM;
-    state.collaborationMap.origin = defaultMapOrigin(MAP_ZOOM);
+    state.collaborationMap.origin = defaultCollaborationMapOrigin(MAP_ZOOM);
   }
   renderCollaborationMap();
 }
@@ -675,7 +695,7 @@ function zoomCollaborationMap(direction, focal = { x: MAP_WIDTH / 2, y: MAP_HEIG
   const oldZoom = state.collaborationMap.zoom || MAP_ZOOM;
   const nextZoom = Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, oldZoom + direction));
   if (nextZoom === oldZoom) return;
-  const oldOrigin = state.collaborationMap.origin || defaultMapOrigin(oldZoom);
+  const oldOrigin = state.collaborationMap.origin || defaultCollaborationMapOrigin(oldZoom);
   const scale = mapWorldSize(nextZoom) / mapWorldSize(oldZoom);
   state.collaborationMap.zoom = nextZoom;
   state.collaborationMap.origin = clampMapOrigin(
@@ -690,7 +710,7 @@ function zoomCollaborationMap(direction, focal = { x: MAP_WIDTH / 2, y: MAP_HEIG
 
 function resetCollaborationMap() {
   state.collaborationMap.zoom = MAP_ZOOM;
-  state.collaborationMap.origin = defaultMapOrigin(MAP_ZOOM);
+  state.collaborationMap.origin = defaultCollaborationMapOrigin(MAP_ZOOM);
   renderCollaborationMap();
 }
 
@@ -716,7 +736,7 @@ function bindCollaborationMapControls(container) {
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      origin: { ...(state.collaborationMap.origin || defaultMapOrigin(state.collaborationMap.zoom || MAP_ZOOM)) },
+      origin: { ...(state.collaborationMap.origin || defaultCollaborationMapOrigin(state.collaborationMap.zoom || MAP_ZOOM)) },
     };
     container.classList.add("dragging");
   });

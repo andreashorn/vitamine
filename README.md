@@ -51,4 +51,24 @@ The build downloads `typst` and `pandoc` into `vendor/export-tools/` and bundles
 python3 scripts/install_export_tools.py --force
 ```
 
+The same tool cache can also bundle CV-import helpers:
+
+- `pdftotext` from Poppler for stronger PDF text extraction.
+- `llama-server` from llama.cpp for the bundled local LLM importer.
+- An optional GGUF model at `vendor/models/vitamine-import.gguf`.
+
+Build the normal app bundle with bundled PDF/runtime tools:
+
+```sh
+scripts/build_macos_app.sh
+```
+
+Build a larger self-contained local-LLM bundle by downloading the default GGUF model first:
+
+```sh
+VITAMINE_INCLUDE_LOCAL_LLM=1 scripts/build_macos_app.sh
+```
+
+The bundled local model is currently `bartowski/Phi-3.5-mini-instruct-GGUF` / `Phi-3.5-mini-instruct-Q4_K_M.gguf`, stored locally as `vendor/models/vitamine-import.gguf`.
+
 For public distribution, sign and notarize the app or DMG with an Apple Developer ID before attaching it to a GitHub Release.

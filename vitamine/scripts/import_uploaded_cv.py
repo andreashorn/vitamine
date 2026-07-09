@@ -144,7 +144,7 @@ def docx_to_text(path: Path) -> str:
 
 
 def pdf_to_text(path: Path) -> str:
-    pdftotext = shutil.which("pdftotext")
+    pdftotext = tool_path("pdftotext")
     if pdftotext:
         return subprocess.check_output([pdftotext, "-layout", str(path), "-"], text=True, errors="replace")
     try:
@@ -427,6 +427,7 @@ def call_bundled_llama(text: str, settings: dict[str, str]) -> dict[str, Any]:
     server = tool_path("llama-server")
     if not server:
         raise RuntimeError("Bundled llama-server was not found. Run scripts/install_export_tools.py --tool llama-server before packaging.")
+    server = str(cached_runtime_tool(Path(server)))
     configured_model = _text(settings.get("bundled_llama_model_path"))
     model = Path(configured_model).expanduser() if configured_model else bundled_model_path()
     if not model or not model.exists():
@@ -488,6 +489,35 @@ def cached_runtime_model(source: Path) -> Path:
         tmp = target.with_suffix(f"{target.suffix}.tmp")
         shutil.copy2(source, tmp)
         tmp.replace(target)
+        return target
+    except OSError:
+        return source
+
+
+def cached_runtime_tool(source: Path) -> Path:
+    cache_root = APP_SUPPORT / "runtime-tools"
+    bin_dir = cache_root / "bin"
+    lib_dir = cache_root / "lib"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target = bin_dir / source.name
+    try:
+        source_stat = source.stat()
+        target_stat = target.stat() if target.exists() else None
+        if not target_stat or target_stat.st_size != source_stat.st_size or int(target_stat.st_mtime) < int(source_stat.st_mtime):
+            tmp = target.with_suffix(f"{target.suffix}.tmp")
+            shutil.copy2(source, tmp)
+            tmp.chmod(tmp.stat().st_mode | 0o755)
+            tmp.replace(target)
+        source_lib = source.parent.parent / "lib"
+        if source_lib.exists():
+            lib_dir.mkdir(parents=True, exist_ok=True)
+            for item in source_lib.iterdir():
+                if item.is_file() and item.suffix == ".dylib":
+                    lib_target = lib_dir / item.name
+                    item_stat = item.stat()
+                    lib_stat = lib_target.stat() if lib_target.exists() else None
+                    if not lib_stat or lib_stat.st_size != item_stat.st_size or int(lib_stat.st_mtime) < int(item_stat.st_mtime):
+                        shutil.copy2(item, lib_target)
         return target
     except OSError:
         return source
