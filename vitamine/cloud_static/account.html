@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine — Academic CV manager</title>
-  <link rel="stylesheet" href="/assets/account.css?v=20260801-scroll-story">
-  <script src="/assets/account.js?v=20260801-scroll-story" defer></script>
+  <link rel="stylesheet" href="/assets/account.css?v=20260801-pinned-scenes">
+  <script src="/assets/account.js?v=20260801-pinned-scenes" defer></script>
 </head>
 <body id="top">
   <header class="site-header">
@@ -111,10 +111,24 @@
             <p class="feature-answer">Put your data in once. Export it in any format, in any language, as often as you need.</p>
           </div>
           <div class="feature-visual request-visual" aria-hidden="true">
-            <div class="request-card request-a"><span>Promotion</span><strong>Full mentoring record</strong><small>Include mentees’ successes</small></div>
-            <div class="request-card request-b"><span>Funding agency</span><strong>Structured biosketch</strong><small>Use the required headings</small></div>
-            <div class="request-card request-c"><span>Prix scientifique</span><strong>2 pages · Français</strong><small>10 publications maximum</small></div>
-            <div class="source-pill"><i></i> One VitaMine</div>
+            <svg class="researcher-scene" viewBox="0 0 620 470" role="presentation">
+              <path class="scene-wall" d="M20 376h580M84 376V152h214v224M112 184h158v112H112z"/>
+              <path class="scene-desk" d="M48 350h520v26H48zm46 26h22v78H94zm420 0h22v78h-22z"/>
+              <path class="scene-chair" d="M276 320h92v95h-92m46-95v134m-35 0h70"/>
+              <path class="scene-hair" d="M321 168c-43 0-68 34-60 81l16 33h91l16-52c7-38-22-62-63-62z"/>
+              <circle class="scene-face" cx="322" cy="219" r="43"/>
+              <path class="scene-body" d="M276 281q46-28 92 0l28 85H247z"/>
+              <path class="scene-arm" d="M278 297q-32 14-59 49m146-48q35 5 58 43"/>
+              <path class="scene-laptop" d="M199 289h137l-15 60H184zm-31 60h178"/>
+              <path class="scene-cup" d="M437 311h35v38h-35zm35 8h12q9 17-12 19"/>
+              <g class="paper-pile pile-left"><path d="M67 338h88v12H67zM74 326h82v12H74zM64 314h91v12H64z"/></g>
+              <g class="paper-pile pile-right"><path d="M474 339h78v11h-78zM468 328h85v11h-85zM479 317h72v11h-72zM470 306h80v11h-80z"/></g>
+              <path class="stress-line" d="M247 178l-17-17m14 41h-26m180-25 18-17m-15 42h27"/>
+            </svg>
+            <div class="request-card request-a" data-scroll-stage="1"><span>Promotion</span><strong>Full mentoring record</strong><small>Include mentees’ successes</small></div>
+            <div class="request-card request-b" data-scroll-stage="2"><span>Funding agency</span><strong>Structured biosketch</strong><small>Use the required headings</small></div>
+            <div class="request-card request-c" data-scroll-stage="3"><span>Prix scientifique</span><strong>2 pages · Français</strong><small>10 publications maximum</small></div>
+            <div class="source-pill" data-scroll-stage="4"><i></i> One VitaMine</div>
           </div>
         </article>
 
@@ -126,8 +140,9 @@
             <p class="feature-answer">Download the portable SQLite database whenever you want. Your data stays yours.</p>
           </div>
           <div class="feature-visual import-visual" aria-hidden="true">
-            <div class="import-document"><b>CURRICULUM VITAE</b><span></span><span></span><span></span><span></span><span></span></div>
-            <div class="import-flow"><i></i><i></i><i></i></div>
+            <div class="drop-zone"><span>Drop your existing CV here</span><small>.docx · .pdf</small></div>
+            <div class="import-document"><em>W</em><b>academic-cv.docx</b><span></span><span></span><span></span><span></span></div>
+            <div class="extract-stream"><i></i><i></i><i></i><i></i></div>
             <div class="database-cylinder"><span>V</span><strong>.vitamine</strong><small>portable SQLite</small></div>
             <div class="data-chip chip-a">47 publications</div>
             <div class="data-chip chip-b">12 positions</div>
@@ -144,7 +159,8 @@
           </div>
           <div class="feature-visual sync-visual" aria-hidden="true">
             <div class="sync-orbit orbit-one"></div><div class="sync-orbit orbit-two"></div>
-            <div class="sync-core"><span>V</span><small>Your CV</small></div>
+            <svg class="sync-lines" viewBox="0 0 520 520" role="presentation"><path data-sync-source="1" pathLength="1" d="M48 260Q145 218 260 260"/><path data-sync-source="2" pathLength="1" d="M260 45Q220 150 260 260"/><path data-sync-source="3" pathLength="1" d="M472 260Q375 218 260 260"/><path data-sync-source="4" pathLength="1" d="M260 475Q220 370 260 260"/></svg>
+            <div class="sync-core"><div class="cv-document-icon"><b>CV</b><i></i><i></i><i></i><i></i></div><small>Your living CV</small></div>
             <div class="sync-node node-orcid">iD</div>
             <div class="sync-node node-scholar">Scholar</div>
             <div class="sync-node node-zotero">Z</div>
@@ -176,12 +192,14 @@
             <p class="feature-answer">Host it with us for free, or embed selected content in your lab or personal website.</p>
           </div>
           <div class="feature-visual profile-visual" aria-hidden="true">
+            <div class="profile-source-document"><b>CURRICULUM VITAE</b><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="profile-transfer"><i></i><i></i><i></i></div>
             <div class="browser-frame">
               <div class="browser-bar"><i></i><span>vitamine.cloud/a-researcher</span></div>
               <div class="profile-preview">
                 <div class="portrait-placeholder">AR</div>
-                <div><small>Professor of Neuroscience</small><strong>Alex Researcher</strong><p>Studying how networks of the human brain shape movement, learning and recovery.</p></div>
-                <nav><b>52</b> Publications <b>18</b> Collaborators <b>9</b> Mentees</nav>
+                <div><small data-profile-row="1">Professor of Neuroscience</small><strong data-profile-row="2">Alex Researcher</strong><p data-profile-row="3">Studying how networks of the human brain shape movement, learning and recovery.</p></div>
+                <nav data-profile-row="4"><b>52</b> Publications <b>18</b> Collaborators <b>9</b> Mentees</nav>
               </div>
             </div>
             <div class="live-badge"><i></i> Synced</div>
@@ -196,9 +214,9 @@
             <p class="feature-answer">Clear, career-spanning insights—without maintaining another spreadsheet.</p>
           </div>
           <div class="feature-visual metrics-visual" aria-hidden="true">
-            <div class="metric-card metric-citations"><span>Citations</span><strong>4,218</strong><small>+18.4% this year</small></div>
-            <div class="metric-card metric-impact"><span>Research output</span><strong>82</strong><small>publications</small></div>
-            <div class="chart-card"><span>Citations over time</span><svg viewBox="0 0 600 220" preserveAspectRatio="none"><defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2aa083" stop-opacity=".36"/><stop offset="1" stop-color="#2aa083" stop-opacity="0"/></linearGradient></defs><path class="chart-area" d="M0 204 C70 195 80 176 130 180 S220 143 260 151 S350 110 390 118 S460 68 500 82 S560 28 600 20 L600 220 L0 220Z"/><path class="chart-line" d="M0 204 C70 195 80 176 130 180 S220 143 260 151 S350 110 390 118 S460 68 500 82 S560 28 600 20"/></svg></div>
+            <div class="metric-card metric-citations"><span>Citations</span><strong id="citationTicker">0</strong><small>+18.4% this year</small></div>
+            <div class="metric-card metric-impact"><span>Research output</span><strong id="publicationTicker">0</strong><small>publications</small></div>
+            <div class="chart-card"><span>Citations over time</span><svg viewBox="0 0 600 220" preserveAspectRatio="none"><defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2aa083" stop-opacity=".36"/><stop offset="1" stop-color="#2aa083" stop-opacity="0"/></linearGradient></defs><path class="chart-area" d="M0 204 C70 195 80 176 130 180 S220 143 260 151 S350 110 390 118 S460 68 500 82 S560 28 600 20 L600 220 L0 220Z"/><path class="chart-line" pathLength="1" d="M0 204 C70 195 80 176 130 180 S220 143 260 151 S350 110 390 118 S460 68 500 82 S560 28 600 20"/></svg></div>
           </div>
         </article>
 

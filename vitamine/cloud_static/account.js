@@ -497,7 +497,12 @@ function initializeFeatureStory() {
   const revealItems = [...document.querySelectorAll(".reveal-item")];
   const chapters = [...document.querySelectorAll(".feature-chapter")];
   const prompt = $("#typedExportPrompt");
+  const problemChapter = $(".feature-problem");
+  const importChapter = $(".feature-import");
+  const syncChapter = $(".feature-sync");
   const exportChapter = $(".feature-export");
+  const profileChapter = $(".feature-profile");
+  const metricsChapter = $(".feature-metrics");
   const networkChapter = $(".feature-network");
   const networkCount = $("#networkCount");
   const networkUnit = $("#networkUnit");
@@ -525,11 +530,103 @@ function initializeFeatureStory() {
     return Math.max(0, Math.min(1, (14 - bounds.top) / distance));
   }
 
+  function clampProgress(value) {
+    return Math.max(0, Math.min(1, value));
+  }
+
+  function stagedProgress(progress, start, duration = .24) {
+    return clampProgress((progress - start) / duration);
+  }
+
   function renderScrollSequences() {
     scrollFrame = null;
     if (reducedMotion) return;
+    const problemProgress = scrollProgress(problemChapter);
+    problemChapter?.querySelectorAll("[data-scroll-stage]").forEach((item) => {
+      const stage = Number(item.dataset.scrollStage);
+      const localProgress = stagedProgress(problemProgress, (stage - 1) * .2);
+      item.style.opacity = String(localProgress);
+      item.style.transform = `translateY(${(1 - localProgress) * 48}px) scale(${.94 + (.06 * localProgress)})`;
+    });
+    problemChapter?.querySelectorAll(".paper-pile").forEach((pile, index) => {
+      const pileProgress = stagedProgress(problemProgress, .12 + (index * .1), .55);
+      pile.style.transform = `scaleY(${.55 + (.45 * pileProgress)})`;
+      pile.style.transformOrigin = "bottom";
+    });
+    const stressLines = problemChapter?.querySelector(".stress-line");
+    if (stressLines) stressLines.style.opacity = String(stagedProgress(problemProgress, .35, .25));
+
+    const importProgress = scrollProgress(importChapter);
+    const importDocument = importChapter?.querySelector(".import-document");
+    if (importDocument) {
+      const dropProgress = stagedProgress(importProgress, 0, .38);
+      const dissolveProgress = stagedProgress(importProgress, .42, .2);
+      importDocument.style.opacity = String(Math.min(dropProgress * 2, 1) * (1 - dissolveProgress));
+      importDocument.style.transform = `translate(${dropProgress * 26}px, ${-150 + (dropProgress * 235)}px) scale(${1 - (.16 * dissolveProgress)})`;
+    }
+    importChapter?.querySelectorAll(".extract-stream i").forEach((dot, index) => {
+      const localProgress = stagedProgress(importProgress, .36 + (index * .055), .34);
+      dot.style.opacity = String(Math.sin(localProgress * Math.PI));
+      dot.style.transform = `translateX(${localProgress * 170}px) scale(${.7 + (.3 * localProgress)})`;
+    });
+    importChapter?.querySelectorAll(".data-chip").forEach((chip, index) => {
+      const localProgress = stagedProgress(importProgress, .58 + (index * .07), .18);
+      chip.style.opacity = String(localProgress);
+      chip.style.transform = `translateY(${(1 - localProgress) * 22}px)`;
+    });
+    const database = importChapter?.querySelector(".database-cylinder");
+    if (database) {
+      const databaseProgress = stagedProgress(importProgress, .48, .3);
+      database.style.transform = `scale(${.82 + (.18 * databaseProgress)})`;
+      database.style.boxShadow = `inset 0 0 60px rgba(130,212,184,.07), 0 0 ${20 + (databaseProgress * 70)}px rgba(68,171,137,.24)`;
+    }
+
+    const syncProgress = scrollProgress(syncChapter);
+    syncChapter?.querySelectorAll(".sync-lines [data-sync-source]").forEach((line) => {
+      const source = Number(line.dataset.syncSource);
+      const localProgress = stagedProgress(syncProgress, (source - 1) * .18, .3);
+      line.style.strokeDashoffset = String(1 - localProgress);
+    });
+    syncChapter?.querySelectorAll(".cv-document-icon i").forEach((line, index) => {
+      const localProgress = stagedProgress(syncProgress, .18 + (index * .16), .22);
+      line.style.transform = `scaleX(${localProgress})`;
+    });
+    syncChapter?.querySelectorAll(".sync-node").forEach((node, index) => {
+      const pulse = stagedProgress(syncProgress, index * .18, .18);
+      node.style.transform = `scale(${1 + (.1 * Math.sin(pulse * Math.PI))})`;
+    });
+
     const promptProgress = scrollProgress(exportChapter);
     if (prompt) prompt.textContent = promptText.slice(0, Math.floor(promptText.length * promptProgress));
+
+    const profileProgress = scrollProgress(profileChapter);
+    const sourceDocument = profileChapter?.querySelector(".profile-source-document");
+    if (sourceDocument) {
+      const sourceProgress = stagedProgress(profileProgress, 0, .38);
+      sourceDocument.style.opacity = String(1 - stagedProgress(profileProgress, .62, .22));
+      sourceDocument.style.transform = `translateX(${sourceProgress * 46}px) scale(${1 - (.12 * sourceProgress)})`;
+    }
+    profileChapter?.querySelectorAll(".profile-transfer i").forEach((dot, index) => {
+      const localProgress = stagedProgress(profileProgress, .2 + (index * .08), .38);
+      dot.style.opacity = String(Math.sin(localProgress * Math.PI));
+      dot.style.transform = `translateX(${localProgress * 125}px)`;
+    });
+    profileChapter?.querySelectorAll("[data-profile-row]").forEach((row) => {
+      const stage = Number(row.dataset.profileRow);
+      const localProgress = stagedProgress(profileProgress, .34 + ((stage - 1) * .13), .2);
+      row.style.opacity = String(localProgress);
+      row.style.transform = `translateY(${(1 - localProgress) * 8}px)`;
+    });
+
+    const metricsProgress = scrollProgress(metricsChapter);
+    const chartLine = metricsChapter?.querySelector(".chart-line");
+    const chartArea = metricsChapter?.querySelector(".chart-area");
+    if (chartLine) chartLine.style.strokeDashoffset = String(1 - metricsProgress);
+    if (chartArea) chartArea.style.opacity = String(stagedProgress(metricsProgress, .45, .45) * .75);
+    const citationTicker = $("#citationTicker");
+    const publicationTicker = $("#publicationTicker");
+    if (citationTicker) citationTicker.textContent = Math.round(4218 * metricsProgress).toLocaleString();
+    if (publicationTicker) publicationTicker.textContent = String(Math.round(82 * metricsProgress));
 
     const networkProgress = scrollProgress(networkChapter);
     document.querySelectorAll(".map-routes [data-network-stage]").forEach((route) => {
@@ -557,6 +654,15 @@ function initializeFeatureStory() {
   if (!("IntersectionObserver" in window) || reducedMotion) {
     revealItems.forEach((item) => item.classList.add("is-visible"));
     if (prompt) prompt.textContent = promptText;
+    document.querySelectorAll("[data-scroll-stage], .data-chip, [data-profile-row]").forEach((item) => { item.style.opacity = "1"; item.style.transform = "none"; });
+    const importDocument = $(".import-document");
+    if (importDocument) { importDocument.style.opacity = "1"; importDocument.style.transform = "none"; }
+    document.querySelectorAll(".sync-lines path, .chart-line").forEach((line) => { line.style.strokeDashoffset = "0"; });
+    document.querySelectorAll(".cv-document-icon i").forEach((line) => { line.style.transform = "scaleX(1)"; });
+    const chartArea = $(".chart-area");
+    if (chartArea) chartArea.style.opacity = ".75";
+    if ($("#citationTicker")) $("#citationTicker").textContent = "4,218";
+    if ($("#publicationTicker")) $("#publicationTicker").textContent = "82";
     document.querySelectorAll(".map-routes [data-network-stage]").forEach((route) => { route.style.strokeDashoffset = "0"; });
     document.querySelectorAll(".map-points [data-network-stage]").forEach((point) => { point.style.opacity = "1"; });
     if (networkCount) networkCount.textContent = "18";
