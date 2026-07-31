@@ -20,6 +20,7 @@ from vitamine.cloud_app import (
     register_workspace,
     workspace_worker_is_running,
 )
+from vitamine.cloud_crypto import is_encrypted_private_data
 from vitamine.scripts.manage_cloud import create_invitation
 
 
@@ -40,6 +41,7 @@ class CloudAppTests(unittest.TestCase):
                 "VITAMINE_CLOUD_PEPPER": "test-only-pepper",
                 "VITAMINE_SESSION_ROOT": str(Path(self.directory.name) / "sessions"),
                 "VITAMINE_JOB_ROOT": str(Path(self.directory.name) / "jobs"),
+                "VITAMINE_JOB_WORK_ROOT": str(Path(self.directory.name) / "job-work"),
                 "VITAMINE_DISABLE_JOB_RUNNER": "1",
                 "VITAMINE_DEPLOYMENT_CONFIG": str(
                     Path(__file__).resolve().parents[1] / "deploy" / "strato" / "vitamine-hosted.json"
@@ -226,6 +228,13 @@ class CloudAppTests(unittest.TestCase):
         self.assertTrue(onboarding.json()["llm_managed"])
         self.assertTrue(onboarding.json()["skip_llm_configuration"])
 
+        with sqlite3.connect(self.db_path) as con:
+            stored_blob = con.execute(
+                "SELECT sqlite_blob FROM account_databases WHERE id=?", (opened.json()["database_id"],)
+            ).fetchone()[0]
+            self.assertTrue(is_encrypted_private_data(stored_blob))
+            self.assertFalse(stored_blob.startswith(b"SQLite format 3"))
+
         self.assertEqual(self.client.delete("/gateway/workspace").status_code, 200)
 
     def test_cloud_cv_import_is_queued_and_survives_leaving_the_workspace(self):
@@ -242,6 +251,10 @@ class CloudAppTests(unittest.TestCase):
         self.assertTrue(queued.json()["background"])
         self.assertEqual(queued.json()["job"]["status"], "queued")
         job_id = queued.json()["job"]["id"]
+        stored_uploads = list((Path(self.directory.name) / "jobs" / job_id / "uploads").iterdir())
+        self.assertEqual(len(stored_uploads), 1)
+        self.assertTrue(is_encrypted_private_data(stored_uploads[0].read_bytes()))
+        self.assertNotIn(b"CURRICULUM VITAE", stored_uploads[0].read_bytes())
 
         blocked_edit = self.client.put("/api/person", json={"full_name": "Too Soon"})
         self.assertEqual(blocked_edit.status_code, 409, blocked_edit.text)

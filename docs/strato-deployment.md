@@ -34,8 +34,9 @@ no API keys, invite codes, cookies, or other credentials.
 - systemd unit: `vitamine-cloud.service`.
 - Installed source: `/srv/vitamine-cloud/current`.
 - Python environment: `/srv/vitamine-cloud/venv`.
-- Restart-safe temporary sessions: `/var/lib/vitamine-cloud/sessions`.
-- Persistent background-job scratch space: `/var/lib/vitamine-cloud/jobs`.
+- Runtime-only temporary sessions: `/run/vitamine-cloud/sessions`.
+- Encrypted persistent background-job inputs: `/var/lib/vitamine-cloud/jobs`.
+- Runtime-only decrypted job workspaces: `/run/vitamine-cloud/jobs`.
 - Authoritative hosted database: PostgreSQL database `vitamine`, owned by the
   login role `vitamine_app` and reachable only on the VPS loopback interface.
 - Legacy gateway database and cutover source:
@@ -48,9 +49,11 @@ An invite is redeemed once to create an email/password account and persistent
 HTTP-only device cookie. Each private gateway route checks that account and the
 ownership of the selected CV; the invite is not merely a landing-page gate.
 
-PostgreSQL owns accounts, credentials, CV ownership, exact `.vitamine`
-snapshots, revisions, normalized person/entry/publication projections, public
-profile snapshots, and workspace metadata. Passwords use salted scrypt hashes.
+PostgreSQL owns accounts, credentials, CV ownership, encrypted `.vitamine`
+snapshots, revisions, public-profile snapshots, and workspace metadata. Private
+CV snapshots use versioned AES-256-GCM application encryption; the earlier
+plaintext person/entry/publication projections are kept empty. Passwords use
+salted scrypt hashes.
 Opening a CV materializes its PostgreSQL snapshot as a temporary SQLite
 compatibility copy and starts an isolated Python/Uvicorn worker with the
 original VitaMine UI. Successful mutating requests are backed up through
@@ -226,10 +229,10 @@ sudo journalctl -u vitamine-cloud.service -n 100 --no-pager
 sudo ss -ltnp
 ```
 
-Workspace worker logs are under:
+Workspace worker logs are runtime-only under:
 
 ```text
-/var/lib/vitamine-cloud/sessions/<session-id>/worker.log
+/run/vitamine-cloud/sessions/<session-id>/worker.log
 ```
 
 Background-job files exist only while a job is queued or running:
@@ -238,9 +241,42 @@ Background-job files exist only while a job is queued or running:
 /var/lib/vitamine-cloud/jobs/<job-id>/
 ```
 
+Queued CV uploads in that directory are authenticated ciphertext. Decrypted
+job inputs, databases, and logs exist below `/run/vitamine-cloud/jobs/<job-id>/`
+only while processing. Active editor workspaces are likewise under `/run`.
+
 Uvicorn access-log entries appear only after a request completes. During a long
 CV import, also inspect the uploaded file, worker process, and outbound
 connection before concluding that the progress UI is stuck.
+
+## Private-data encryption key
+
+Production must set `VITAMINE_DATA_ENCRYPTION_KEY` in
+`/etc/vitamine-cloud.env` to a URL-safe base64 encoding of exactly 32 random
+bytes. Generate it without placing the value in shell history, keep a protected
+offline recovery copy, and never print it in logs or deployment notes. Losing
+all copies makes every private CV snapshot unrecoverable.
+
+The first deployment applies cloud migration 5, which encrypts existing CV
+snapshots transactionally and deletes the obsolete plaintext projections. Take
+and verify the required pre-migration PostgreSQL backup first. The backup made
+before this migration still contains plaintext private CVs and must retain its
+existing restricted permissions and retention policy.
+
+For rotation, configure the new key as `VITAMINE_DATA_ENCRYPTION_KEY`, retain
+the old key temporarily in comma-separated
+`VITAMINE_DATA_ENCRYPTION_PREVIOUS_KEYS`, restart successfully, and run:
+
+```sh
+sudo /bin/bash -c 'set -a; . /etc/vitamine-cloud.env; set +a; \
+  exec runuser -u vitamine-deploy -- /srv/vitamine-cloud/venv/bin/python \
+  -m vitamine.scripts.rotate_cloud_data_key'
+```
+
+Verify downloads and workspaces before removing the previous key. Database
+encryption does not make the service zero-knowledge: the application can
+decrypt data while serving the owner, account metadata remains readable, and
+explicitly published profiles remain public.
 
 ## Deployment pattern
 

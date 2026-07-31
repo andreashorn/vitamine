@@ -30,6 +30,7 @@ from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
+from .cloud_crypto import decrypt_private_data, encrypt_private_data, is_encrypted_private_data
 from .public_profiles import (
     PROFILE_BLOCK_KEYS,
     build_public_profile_snapshot,
@@ -77,7 +78,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 4
+CLOUD_SCHEMA_VERSION = 5
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -531,7 +532,7 @@ def cloud_database_url() -> str:
 
 def workspace_root() -> Path:
     return Path(
-        os.environ.get("VITAMINE_SESSION_ROOT", "/var/lib/vitamine-cloud/sessions")
+        os.environ.get("VITAMINE_SESSION_ROOT", "/run/vitamine-cloud/sessions")
     ).expanduser().resolve()
 
 
@@ -541,9 +542,41 @@ def job_root() -> Path:
     ).expanduser().resolve()
 
 
+def job_work_root() -> Path:
+    return Path(
+        os.environ.get("VITAMINE_JOB_WORK_ROOT", "/run/vitamine-cloud/jobs")
+    ).expanduser().resolve()
+
+
 def secret_hash(value: str) -> str:
     pepper = os.environ.get("VITAMINE_CLOUD_PEPPER", "")
     return hashlib.sha256(f"{pepper}\0{value}".encode("utf-8")).hexdigest()
+
+
+def database_encryption_context(member_id: str, database_id: str) -> str:
+    return f"vitamine-account-database-v1:{member_id}:{database_id}"
+
+
+def job_upload_encryption_context(member_id: str, job_id: str, stored_name: str) -> str:
+    return f"vitamine-job-upload-v1:{member_id}:{job_id}:{stored_name}"
+
+
+def encrypt_database_content(content: bytes, *, member_id: str, database_id: str) -> bytes:
+    return encrypt_private_data(content, context=database_encryption_context(member_id, database_id))
+
+
+def decrypt_database_content(
+    content: bytes | memoryview,
+    *,
+    member_id: str,
+    database_id: str,
+    allow_plaintext: bool = False,
+) -> bytes:
+    return decrypt_private_data(
+        content,
+        context=database_encryption_context(member_id, database_id),
+        allow_plaintext=allow_plaintext,
+    )
 
 
 def orcid_oauth_config() -> dict[str, str] | None:
@@ -824,6 +857,17 @@ def sqlite_column_names(con: GatewayConnection, table: str) -> set[str]:
     return {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+def cloud_table_exists(con: GatewayConnection, table: str) -> bool:
+    if con.backend == "postgres":
+        row = con.execute("SELECT to_regclass(?) AS name", (table,)).fetchone()
+        return bool(row and row["name"])
+    return bool(
+        con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+    )
+
+
 def migration_001_initial_cloud_schema(con: GatewayConnection) -> None:
     execute_sql_batch(con, POSTGRES_SCHEMA if con.backend == "postgres" else SCHEMA)
 
@@ -897,11 +941,43 @@ def migration_004_background_job_idempotency(con: GatewayConnection) -> None:
     )
 
 
+def migration_005_encrypt_private_cv_storage(con: GatewayConnection) -> None:
+    # Normalized private projections duplicated almost the entire CV in clear
+    # text and currently have no read consumers. Public profiles remain an
+    # explicit, deliberately unencrypted projection.
+    for table in ("hosted_cv_people", "hosted_cv_entries", "hosted_cv_publications"):
+        if cloud_table_exists(con, table):
+            con.execute(f"DELETE FROM {table}")
+    if not cloud_table_exists(con, "account_databases"):
+        return
+    rows = con.execute(
+        "SELECT id, member_id, sqlite_blob FROM account_databases"
+    ).fetchall()
+    for row in rows:
+        content = bytes(row["sqlite_blob"])
+        if is_encrypted_private_data(content):
+            # Authenticate existing ciphertext before declaring the migration
+            # complete; a missing/wrong key must stop startup safely.
+            decrypt_database_content(
+                content,
+                member_id=str(row["member_id"]),
+                database_id=str(row["id"]),
+            )
+            continue
+        encrypted = encrypt_database_content(
+            content,
+            member_id=str(row["member_id"]),
+            database_id=str(row["id"]),
+        )
+        con.execute("UPDATE account_databases SET sqlite_blob=? WHERE id=?", (encrypted, row["id"]))
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
     (3, migration_003_oauth_and_portraits),
     (4, migration_004_background_job_idempotency),
+    (5, migration_005_encrypt_private_cv_storage),
 )
 
 
@@ -1460,93 +1536,12 @@ def consistent_sqlite_snapshot(source_path: Path) -> Iterator[Path]:
         snapshot_path.unlink(missing_ok=True)
 
 
-def sync_hosted_projections(con: GatewayConnection, cv_id: str, snapshot_path: Path) -> None:
-    now = utc_now()
+def sync_hosted_projections(con: GatewayConnection, cv_id: str, _snapshot_path: Path) -> None:
+    # Private projections were retired when application-level encryption was
+    # introduced. Keeping them empty avoids a plaintext copy of the CV.
     con.execute("DELETE FROM hosted_cv_people WHERE cv_id=?", (cv_id,))
     con.execute("DELETE FROM hosted_cv_entries WHERE cv_id=?", (cv_id,))
     con.execute("DELETE FROM hosted_cv_publications WHERE cv_id=?", (cv_id,))
-    with sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True) as source:
-        source.row_factory = sqlite3.Row
-        person = source.execute("SELECT * FROM person WHERE id=1").fetchone()
-        if person:
-            keys = set(person.keys())
-            con.execute(
-                """
-                INSERT INTO hosted_cv_people
-                  (cv_id, full_name, display_name, position_title, work_email, orcid_id, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cv_id,
-                    person["full_name"] if "full_name" in keys else None,
-                    person["display_name"] if "display_name" in keys else None,
-                    person["position_title"] if "position_title" in keys else None,
-                    person["work_email"] if "work_email" in keys else None,
-                    person["orcid_id"] if "orcid_id" in keys else None,
-                    now,
-                ),
-            )
-        for entry in source.execute(
-            """
-            SELECT id, section_key, start_date, end_date, title, organization, role, description
-            FROM cv_entries
-            """
-        ):
-            con.execute(
-                """
-                INSERT INTO hosted_cv_entries
-                  (cv_id, source_id, section_key, start_date, end_date, title,
-                   organization, role, description)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cv_id,
-                    entry["id"],
-                    entry["section_key"],
-                    entry["start_date"],
-                    entry["end_date"],
-                    entry["title"],
-                    entry["organization"],
-                    entry["role"],
-                    entry["description"],
-                ),
-            )
-        publication_columns = {
-            row["name"] for row in source.execute("PRAGMA table_info(publications)").fetchall()
-        }
-        citation_count = (
-            "openalex_cited_by_count" if "openalex_cited_by_count" in publication_columns else "NULL"
-        )
-        suppressed = "suppress_display" if "suppress_display" in publication_columns else "0"
-        publication_query = f"""
-            SELECT id, category, authors, title, venue, year, doi, pmid, url,
-                   {citation_count} AS openalex_cited_by_count,
-                   {suppressed} AS suppress_display
-            FROM publications
-        """
-        for publication in source.execute(publication_query):
-            con.execute(
-                """
-                INSERT INTO hosted_cv_publications
-                  (cv_id, source_id, category, authors, title, venue, year, doi,
-                   pmid, url, cited_by_count, suppress_display)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cv_id,
-                    publication["id"],
-                    publication["category"],
-                    publication["authors"],
-                    publication["title"],
-                    publication["venue"],
-                    publication["year"],
-                    publication["doi"],
-                    publication["pmid"],
-                    publication["url"],
-                    publication["openalex_cited_by_count"],
-                    int(publication["suppress_display"] or 0),
-                ),
-            )
 
 
 def create_account_database_from_path(
@@ -1562,6 +1557,9 @@ def create_account_database_from_path(
         with consistent_sqlite_snapshot(source_path) as snapshot_path:
             content = snapshot_path.read_bytes()
             checksum = hashlib.sha256(content).hexdigest()
+            encrypted_content = encrypt_database_content(
+                content, member_id=member_id, database_id=database_id
+            )
             now = utc_now()
             with connect() as con:
                 con.execute(
@@ -1576,7 +1574,7 @@ def create_account_database_from_path(
                         member_id,
                         safe_database_name(name),
                         Path(filename).stem[:160] + ".vitamine",
-                        content,
+                        encrypted_content,
                         checksum,
                         len(content),
                         now,
@@ -1599,6 +1597,9 @@ def persist_database_snapshot(
         with consistent_sqlite_snapshot(source_path) as snapshot_path:
             content = snapshot_path.read_bytes()
             checksum = hashlib.sha256(content).hexdigest()
+            encrypted_content = encrypt_database_content(
+                content, member_id=member_id, database_id=database_id
+            )
             now = utc_now()
             with connect() as con:
                 database = con.execute(
@@ -1626,7 +1627,7 @@ def persist_database_snapshot(
                     WHERE id=? AND member_id=? AND deleted_at IS NULL
                     """,
                     (
-                        content,
+                        encrypted_content,
                         checksum,
                         revision,
                         len(content),
@@ -1670,7 +1671,13 @@ def materialize_account_database(database: Any, workspace_id: str) -> tuple[Path
     session_dir.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     session_dir.mkdir(mode=0o700)
     db_path = session_dir / "workspace.vitamine"
-    db_path.write_bytes(bytes(database["sqlite_blob"]))
+    db_path.write_bytes(
+        decrypt_database_content(
+            database["sqlite_blob"],
+            member_id=str(database["member_id"]),
+            database_id=str(database["id"]),
+        )
+    )
     db_path.chmod(0o600)
     validate_workspace_database(db_path)
     output_path = session_dir / "output"
@@ -1997,14 +2004,21 @@ def execute_background_job(job: Any) -> None:
     except ValueError as exc:
         raise RuntimeError("Unsafe background-job path.") from exc
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    database_path = directory / "workspace.vitamine"
-    result_path = directory / "result.json"
-    progress_path = directory / "progress.json"
-    log_path = directory / "worker.log"
+    work_directory = (job_work_root() / str(job["id"])).resolve()
+    try:
+        work_directory.relative_to(job_work_root())
+    except ValueError as exc:
+        raise RuntimeError("Unsafe background-job work path.") from exc
+    shutil.rmtree(work_directory, ignore_errors=True)
+    work_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    database_path = work_directory / "workspace.vitamine"
+    result_path = work_directory / "result.json"
+    progress_path = work_directory / "progress.json"
+    log_path = work_directory / "worker.log"
     with connect() as con:
         database = con.execute(
             """
-            SELECT sqlite_blob, revision FROM account_databases
+            SELECT id, member_id, sqlite_blob, revision FROM account_databases
             WHERE id=? AND member_id=? AND deleted_at IS NULL
             """,
             (job["database_id"], job["member_id"]),
@@ -2013,19 +2027,45 @@ def execute_background_job(job: Any) -> None:
         raise RuntimeError("The saved VitaMine database no longer exists.")
     if int(database["revision"]) != int(job["base_revision"]):
         raise RuntimeError("The CV changed before its background job could start.")
-    database_path.write_bytes(bytes(database["sqlite_blob"]))
+    database_path.write_bytes(
+        decrypt_database_content(
+            database["sqlite_blob"],
+            member_id=str(database["member_id"]),
+            database_id=str(database["id"]),
+        )
+    )
     database_path.chmod(0o600)
     validate_workspace_database(database_path)
-    payload_path = directory / "payload.json"
-    if not payload_path.exists():
-        payload_path.write_text(str(job["payload_json"] or "{}"), encoding="utf-8")
-        payload_path.chmod(0o600)
+    payload = parsed_json_object(job["payload_json"])
+    payload_path = work_directory / "payload.json"
+    payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    payload_path.chmod(0o600)
+    if str(job["kind"]) == "cv_import":
+        runtime_uploads = work_directory / "uploads"
+        runtime_uploads.mkdir(mode=0o700)
+        for item in payload.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            stored_name = Path(str(item.get("stored_name") or "")).name
+            encrypted_name = Path(str(item.get("encrypted_name") or f"{stored_name}.enc")).name
+            if not stored_name:
+                raise RuntimeError("A queued CV upload has an invalid filename.")
+            encrypted_path = directory / "uploads" / encrypted_name
+            if not encrypted_path.is_file():
+                raise RuntimeError("A queued CV upload is unavailable.")
+            content = decrypt_private_data(
+                encrypted_path.read_bytes(),
+                context=job_upload_encryption_context(str(job["member_id"]), str(job["id"]), stored_name),
+            )
+            destination = runtime_uploads / stored_name
+            destination.write_bytes(content)
+            destination.chmod(0o600)
     env = {
         **os.environ,
         "VITAMINE_DB": str(database_path),
-        "VITAMINE_DATA": str(directory / "data"),
-        "VITAMINE_OUTPUT": str(directory / "output"),
-        "VITAMINE_PREFERENCES": str(directory / "preferences.json"),
+        "VITAMINE_DATA": str(work_directory / "data"),
+        "VITAMINE_OUTPUT": str(work_directory / "output"),
+        "VITAMINE_PREFERENCES": str(work_directory / "preferences.json"),
         "VITAMINE_CLOUD_WORKER": "1",
     }
     command = [
@@ -2107,6 +2147,7 @@ def execute_background_job(job: Any) -> None:
             ),
         )
     shutil.rmtree(directory, ignore_errors=True)
+    shutil.rmtree(work_directory, ignore_errors=True)
 
 
 def fail_background_job(job_id: str, error: Exception) -> None:
@@ -2132,6 +2173,7 @@ def fail_background_job(job_id: str, error: Exception) -> None:
                     job_id,
                 ),
             )
+        shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
         return
     now = utc_now()
     with connect() as con:
@@ -2152,6 +2194,7 @@ def fail_background_job(job_id: str, error: Exception) -> None:
             ),
         )
     shutil.rmtree(job_root() / job_id, ignore_errors=True)
+    shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
 
 
 def background_job_loop() -> None:
@@ -2167,6 +2210,8 @@ def background_job_loop() -> None:
 
 
 def recover_background_jobs() -> None:
+    shutil.rmtree(job_work_root(), ignore_errors=True)
+    job_work_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     now = utc_now()
     with connect() as con:
         con.execute(
@@ -2901,14 +2946,19 @@ def download_workspace(
     with connect() as con:
         database = con.execute(
             """
-            SELECT sqlite_blob FROM account_databases
+            SELECT id, member_id, sqlite_blob FROM account_databases
             WHERE id=? AND member_id=? AND deleted_at IS NULL
             """,
             (row["database_id"], row["member_id"]),
         ).fetchone()
     if database is None:
         raise HTTPException(status_code=404, detail="The saved VitaMine database no longer exists.")
-    return database_download_response(database["sqlite_blob"], filename)
+    content = decrypt_database_content(
+        database["sqlite_blob"],
+        member_id=str(database["member_id"]),
+        database_id=str(database["id"]),
+    )
+    return database_download_response(content, filename)
 
 
 @app.delete("/gateway/workspace")
@@ -2957,27 +3007,34 @@ async def queue_cv_import_job(
             original_name = Path(file.filename or f"uploaded-cv-{index}").name
             safe_name = cloud_cv_import_name(original_name)
             stored_name = f"{index}-{safe_name}"
-            destination = uploads / stored_name
+            encrypted_name = f"{stored_name}.enc"
+            destination = uploads / encrypted_name
             file_digest = hashlib.sha256()
             file_bytes = 0
-            with destination.open("wb") as handle:
-                while True:
-                    chunk = file.file.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    file_digest.update(chunk)
-                    file_bytes += len(chunk)
-                    total_bytes += len(chunk)
-                    if total_bytes > MAX_JOB_UPLOAD_BYTES:
-                        raise HTTPException(
-                            status_code=413,
-                            detail="The selected CV documents exceed the 50 MB upload limit.",
-                        )
-                    handle.write(chunk)
+            upload_content = bytearray()
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                file_digest.update(chunk)
+                file_bytes += len(chunk)
+                total_bytes += len(chunk)
+                if total_bytes > MAX_JOB_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="The selected CV documents exceed the 50 MB upload limit.",
+                    )
+                upload_content.extend(chunk)
+            encrypted_upload = encrypt_private_data(
+                bytes(upload_content),
+                context=job_upload_encryption_context(str(workspace["member_id"]), job_id, stored_name),
+            )
+            destination.write_bytes(encrypted_upload)
             destination.chmod(0o600)
             payload_files.append(
                 {
                     "stored_name": stored_name,
+                    "encrypted_name": encrypted_name,
                     "original_name": original_name,
                     "size_bytes": file_bytes,
                     "sha256": file_digest.hexdigest(),
@@ -3179,7 +3236,10 @@ def download_account_database(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="That saved database could not be found.")
-    return database_download_response(row["sqlite_blob"], row["filename"])
+    content = decrypt_database_content(
+        row["sqlite_blob"], member_id=str(row["member_id"]), database_id=str(row["id"])
+    )
+    return database_download_response(content, row["filename"])
 
 
 @app.delete("/api/account/databases/{database_id}")
@@ -3536,7 +3596,12 @@ def built_profile_for_database(
     blocks: Any = None,
 ) -> dict[str, Any]:
     database = owned_profile_database(member_id, database_id)
-    with materialized_database_blob(database["sqlite_blob"]) as database_path:
+    content = decrypt_database_content(
+        database["sqlite_blob"],
+        member_id=str(database["member_id"]),
+        database_id=str(database["id"]),
+    )
+    with materialized_database_blob(content) as database_path:
         return build_public_profile_snapshot(
             database_path,
             database_id=database_id,

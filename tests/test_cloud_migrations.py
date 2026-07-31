@@ -11,6 +11,7 @@ from vitamine.cloud_app import (
     initialize_database,
     run_cloud_migrations,
 )
+from vitamine.cloud_crypto import is_encrypted_private_data
 
 
 class CloudMigrationTests(unittest.TestCase):
@@ -22,6 +23,7 @@ class CloudMigrationTests(unittest.TestCase):
             {
                 "VITAMINE_CLOUD_DB": str(self.database),
                 "VITAMINE_DATABASE_URL": "",
+                "VITAMINE_CLOUD_PEPPER": "migration-test-pepper",
             },
         )
         self.environment.start()
@@ -197,6 +199,36 @@ class CloudMigrationTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(existing, ("job-1", "enrich_cv"))
         self.assertIsNotNone(index)
+
+    def test_version_four_store_encrypts_cv_blob_and_removes_private_projections(self):
+        initialize_database()
+        workspace = Path(self.directory.name) / "workspace.vitamine"
+        with sqlite3.connect(workspace) as con:
+            con.execute("CREATE TABLE private_data (value TEXT)")
+            con.execute("INSERT INTO private_data VALUES ('secret curriculum vitae')")
+        plaintext = workspace.read_bytes()
+        with sqlite3.connect(self.database) as con:
+            con.execute("UPDATE cloud_schema_metadata SET version=4 WHERE singleton=1")
+            con.execute(
+                """
+                INSERT INTO account_databases
+                  (id, member_id, name, filename, sqlite_blob, checksum, revision,
+                   size_bytes, created_at, updated_at)
+                VALUES ('cv-1', 'member-1', 'CV', 'cv.vitamine', ?, 'checksum', 1, ?, 'now', 'now')
+                """,
+                (plaintext, len(plaintext)),
+            )
+            con.execute(
+                "INSERT INTO hosted_cv_people(cv_id, full_name, updated_at) VALUES ('cv-1', 'Private Name', 'now')"
+            )
+            con.commit()
+        initialize_database()
+        with sqlite3.connect(self.database) as con:
+            blob = con.execute("SELECT sqlite_blob FROM account_databases WHERE id='cv-1'").fetchone()[0]
+            people = con.execute("SELECT COUNT(*) FROM hosted_cv_people").fetchone()[0]
+        self.assertTrue(is_encrypted_private_data(blob))
+        self.assertNotIn(b"secret curriculum vitae", blob)
+        self.assertEqual(people, 0)
 
     def test_repeated_migration_is_a_noop(self):
         initialize_database()

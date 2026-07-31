@@ -10,8 +10,9 @@ Group=vitamine-deploy
 WorkingDirectory=/srv/vitamine-cloud/current
 EnvironmentFile=/etc/vitamine-cloud.env
 Environment=VITAMINE_DEPLOYMENT_CONFIG=/srv/vitamine-cloud/current/deploy/strato/vitamine-hosted.json
-Environment=VITAMINE_SESSION_ROOT=/var/lib/vitamine-cloud/sessions
+Environment=VITAMINE_SESSION_ROOT=/run/vitamine-cloud/sessions
 Environment=VITAMINE_JOB_ROOT=/var/lib/vitamine-cloud/jobs
+Environment=VITAMINE_JOB_WORK_ROOT=/run/vitamine-cloud/jobs
 ExecStart=/srv/vitamine-cloud/venv/bin/uvicorn vitamine.cloud_app:app --host 127.0.0.1 --port 8766
 Restart=on-failure
 RestartSec=5

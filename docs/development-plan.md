@@ -338,8 +338,9 @@ Evidence: pending
   a collection of user SQLite files as the hosted database.
 - [x] Preserve `.vitamine` as a portable SQLite-based import, export, backup,
   and future desktop-app format.
-- [x] Store account ownership, sessions, CV snapshots, normalized projections,
-  public profiles, and workspace metadata centrally.
+- [x] Store account ownership, encrypted CV snapshots, public profiles, and
+  workspace metadata centrally. Plaintext hosted CV projections were retired
+  when application-level encryption was introduced.
 - [x] Isolate active workspaces, outputs, and background jobs by authenticated
   CV owner rather than relying on the local edition's global active database.
 - [x] Keep the local and hosted editions in one codebase, with deployment
@@ -384,8 +385,9 @@ Evidence: pending
   whitelist.
 - [x] Normalize uploaded portraits and store a bounded PNG representation.
 - [x] Encrypt stored ORCID OAuth credentials with a server-side secret.
-- [ ] Partial — private CV data is protected by host, database, and application
-  access controls, but is not independently application-encrypted at rest.
+- [x] Encrypt private CV snapshots and queued uploads at the application layer
+  with versioned authenticated encryption. Keep active decrypted workspaces and
+  job files in runtime-only storage; public profiles remain intentionally public.
 - [ ] Account deletion with complete, verifiable erasure of CVs, portraits,
   sessions, public snapshots, and queued artifacts.
 - [ ] A complete account-data export, if anything outside the `.vitamine` CV
