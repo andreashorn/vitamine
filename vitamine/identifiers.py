@@ -109,6 +109,9 @@ def normalize_identifier(identifier: dict[str, Any]) -> dict[str, Any]:
     value = str(row.get("identifier_value") or "").strip()
     if not value:
         value = identifier_value_from_url(platform, url)
+    if platform == "Google Scholar" and value:
+        url = f"https://scholar.google.com/citations?{urllib.parse.urlencode({'user': value})}"
+        row["url"] = url
     row["platform"] = platform
     row["identifier_value"] = value or None
     if not str(row.get("identifier_type") or "").strip():

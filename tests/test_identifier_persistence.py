@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 
 from vitamine.app import consolidate_person_identifiers, persist_discovered_identifiers
-from vitamine.identifiers import identifier_value_from_url
+from vitamine.identifiers import identifier_value_from_url, normalize_identifier
 
 
 class IdentifierPersistenceTests(unittest.TestCase):
@@ -93,6 +93,16 @@ class IdentifierPersistenceTests(unittest.TestCase):
             "Andreas-Horn",
         )
         self.assertEqual(identifier_value_from_url("Lab Website", "https://example.org/about"), "")
+
+    def test_google_scholar_regional_url_is_stored_on_main_domain(self):
+        row = normalize_identifier(
+            {
+                "platform": "Google Scholar",
+                "url": "http://scholar.google.co.uk/citations?hl=en&user=q_4u0aoAAAAJ&view_op=list_works",
+            }
+        )
+        self.assertEqual(row["identifier_value"], "q_4u0aoAAAAJ")
+        self.assertEqual(row["url"], "https://scholar.google.com/citations?user=q_4u0aoAAAAJ")
 
 
 if __name__ == "__main__":
