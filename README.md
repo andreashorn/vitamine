@@ -43,6 +43,19 @@ can create PDF or HTML copies from Word when needed.
 
 The dashboard includes a collaboration map populated by OpenAlex institution locations collected during DOI metadata enrichment. It uses OpenStreetMap tiles when online and keeps a simple built-in map fallback for offline use.
 
+## Testing
+
+Install the project and run the same complete test suite used by continuous
+integration:
+
+```sh
+python3 -m pip install --editable .
+python3 -m unittest discover -s tests
+```
+
+GitHub Actions runs this suite with Python 3.11 for every pull request and every
+push to `main`. The workflow requires no repository secrets.
+
 ## Build a macOS app
 
 ```sh

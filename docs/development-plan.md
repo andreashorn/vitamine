@@ -58,7 +58,7 @@ external service, changes production data, or cannot pass its validation, the
 agent must leave it unchecked and stop for review. Completing a task here does
 not automatically award a `🌐` marker or complete a broader roadmap item.
 
-### AUTO-001 [ ] - Add continuous integration for the test suite
+### AUTO-001 [x] - Add continuous integration for the test suite
 
 Risk: low
 
@@ -89,7 +89,9 @@ Stop conditions:
 - The workflow would require a production credential or repository secret.
 - Existing tests fail for reasons not caused and resolved by this task.
 
-Evidence: pending
+Evidence: `.github/workflows/ci.yml`, `tests/test_ci_workflow.py`, and the
+README testing instructions; validated with the complete unit-test suite,
+PyYAML parsing, pinned official action revisions, and `git diff --check`.
 
 ### AUTO-002 [ ] - Add a privacy-safe repository audit and run it in CI
 
