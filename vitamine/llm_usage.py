@@ -8,11 +8,58 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
 
 SAFE_MODEL_RE = re.compile(r"[^A-Za-z0-9._:/-]+")
+PRICING_VERSION = "openai-standard-2026-07-31"
+PREMIUM_MARKUP_BASIS_POINTS = 20_000
+MICRO_USD_PER_USD = 1_000_000
+MODEL_PRICES_PER_MILLION = {
+    "gpt-4.1": (Decimal("2.00"), Decimal("0.50"), Decimal("8.00")),
+    "gpt-4.1-mini": (Decimal("0.40"), Decimal("0.10"), Decimal("1.60")),
+    "gpt-4.1-nano": (Decimal("0.10"), Decimal("0.025"), Decimal("0.40")),
+    "gpt-4o": (Decimal("2.50"), Decimal("1.25"), Decimal("10.00")),
+    "gpt-4o-mini": (Decimal("0.15"), Decimal("0.075"), Decimal("0.60")),
+}
+
+
+def canonical_priced_model(model: str) -> str | None:
+    value = str(model or "").lower()
+    for candidate in sorted(MODEL_PRICES_PER_MILLION, key=len, reverse=True):
+        if value == candidate or value.startswith(candidate + "-"):
+            return candidate
+    return None
+
+
+def usage_costs(event: dict[str, Any]) -> dict[str, Any]:
+    priced_model = canonical_priced_model(str(event.get("model") or ""))
+    if not priced_model:
+        return {"priced_model": None, "pricing_version": PRICING_VERSION, "wholesale_cost_microusd": None,
+                "charged_cost_microusd": None, "markup_basis_points": PREMIUM_MARKUP_BASIS_POINTS}
+    input_rate, cached_rate, output_rate = MODEL_PRICES_PER_MILLION[priced_model]
+    input_tokens = int(event.get("input_tokens") or 0)
+    cached_tokens = min(input_tokens, int(event.get("cached_input_tokens") or 0))
+    output_tokens = int(event.get("output_tokens") or 0)
+    wholesale = (
+        Decimal(input_tokens - cached_tokens) * input_rate
+        + Decimal(cached_tokens) * cached_rate
+        + Decimal(output_tokens) * output_rate
+    ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    wholesale_microusd = int(wholesale)
+    charged_microusd = int(
+        (Decimal(wholesale_microusd) * Decimal(PREMIUM_MARKUP_BASIS_POINTS) / Decimal(10_000))
+        .quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    return {
+        "priced_model": priced_model,
+        "pricing_version": PRICING_VERSION,
+        "wholesale_cost_microusd": wholesale_microusd,
+        "charged_cost_microusd": charged_microusd,
+        "markup_basis_points": PREMIUM_MARKUP_BASIS_POINTS,
+    }
 
 
 def _count(value: Any) -> int | None:

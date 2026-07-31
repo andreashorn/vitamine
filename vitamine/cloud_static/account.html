@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine — Academic CV manager</title>
-  <link rel="stylesheet" href="/assets/account.css?v=20260730-institutional-ui">
-  <script src="/assets/account.js?v=20260730-institutional-ui" defer></script>
+  <link rel="stylesheet" href="/assets/account.css?v=20260731-premium-account">
+  <script src="/assets/account.js?v=20260731-premium-account" defer></script>
 </head>
 <body>
   <header class="site-header">
@@ -130,6 +130,36 @@
           <a id="viewProfileLink" class="secondary-button" href="#" hidden>Manage profile</a>
         </aside>
       </div>
+
+      <section class="premium-account" aria-labelledby="premiumAccountTitle">
+        <div class="premium-account-heading">
+          <div>
+            <p class="eyebrow">Usage balance</p>
+            <h2 id="premiumAccountTitle">Premium Features Account</h2>
+            <p>Premium features are charged from this balance. During early access, they continue working even when it becomes negative.</p>
+          </div>
+          <div class="premium-balance">
+            <span>Current balance</span>
+            <strong id="premiumBalance">$—</strong>
+          </div>
+        </div>
+        <div class="premium-metrics">
+          <div><span>Early-access credit</span><strong id="premiumCredit">$—</strong></div>
+          <div><span>Premium usage</span><strong id="premiumCharged">$—</strong></div>
+          <div><span>Underlying API cost</span><strong id="premiumWholesale">$—</strong></div>
+        </div>
+        <div class="premium-history">
+          <div>
+            <h3>Last 30 days</h3>
+            <div id="premiumChart" class="premium-chart" role="img" aria-label="Premium feature spending over the last 30 days"></div>
+          </div>
+          <div>
+            <h3>Recent usage</h3>
+            <div id="premiumRecent" class="premium-recent"></div>
+          </div>
+        </div>
+        <p class="premium-note">The account debit is currently 2× the underlying OpenAI API cost. Top-ups and payment enforcement are not enabled yet.</p>
+      </section>
     </section>
   </main>
 

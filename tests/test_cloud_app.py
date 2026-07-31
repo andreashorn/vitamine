@@ -84,6 +84,16 @@ class CloudAppTests(unittest.TestCase):
         self.register(email=email, token=token)
         return token
 
+    def test_new_account_receives_non_enforcing_premium_credit(self):
+        self.create_account()
+        response = self.client.get("/api/account/premium-account")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["balance_microusd"], 3_000_000)
+        self.assertEqual(payload["credited_microusd"], 3_000_000)
+        self.assertEqual(payload["charged_microusd"], 0)
+        self.assertFalse(payload["enforcement_enabled"])
+
     def test_workspace_worker_liveness_rejects_a_reused_pid(self):
         row = {"pid": 987654, "port": 58153}
         with (
@@ -744,7 +754,7 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertEqual(page.headers["vary"], "Cookie")
         self.assertIn('autocomplete="username"', page.text)
-        self.assertIn("20260730-institutional-ui", page.text)
+        self.assertIn("20260731-premium-account", page.text)
         self.assertIn('class="library-workspace"', page.text)
         self.assertIn('class="cv-library-panel"', page.text)
         script = self.client.get("/assets/account.js")

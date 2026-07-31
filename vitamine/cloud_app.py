@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from pydantic import BaseModel, Field
 
 from .cloud_crypto import decrypt_private_data, encrypt_private_data, is_encrypted_private_data
+from .llm_usage import usage_costs
 from .public_profiles import (
     PROFILE_BLOCK_KEYS,
     build_public_profile_snapshot,
@@ -78,7 +79,8 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 7
+CLOUD_SCHEMA_VERSION = 8
+INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -205,11 +207,28 @@ CREATE TABLE IF NOT EXISTS llm_usage_events (
     cached_input_tokens INTEGER,
     output_tokens INTEGER,
     reasoning_tokens INTEGER,
+    priced_model TEXT,
+    pricing_version TEXT,
+    wholesale_cost_microusd INTEGER,
+    charged_cost_microusd INTEGER,
+    markup_basis_points INTEGER,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_usage_member_created
 ON llm_usage_events(member_id, created_at);
+
+CREATE TABLE IF NOT EXISTS premium_account_transactions (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    amount_microusd INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_premium_transactions_member_created
+ON premium_account_transactions(member_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hosted_cv_people (
     cv_id TEXT PRIMARY KEY REFERENCES account_databases(id) ON DELETE CASCADE,
@@ -403,11 +422,28 @@ CREATE TABLE IF NOT EXISTS llm_usage_events (
     cached_input_tokens BIGINT,
     output_tokens BIGINT,
     reasoning_tokens BIGINT,
+    priced_model TEXT,
+    pricing_version TEXT,
+    wholesale_cost_microusd BIGINT,
+    charged_cost_microusd BIGINT,
+    markup_basis_points INTEGER,
     created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_llm_usage_member_created
 ON llm_usage_events(member_id, created_at);
+
+CREATE TABLE IF NOT EXISTS premium_account_transactions (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    amount_microusd BIGINT NOT NULL,
+    kind TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_premium_transactions_member_created
+ON premium_account_transactions(member_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hosted_cv_people (
     cv_id TEXT PRIMARY KEY REFERENCES account_databases(id) ON DELETE CASCADE,
@@ -1085,6 +1121,71 @@ def migration_007_llm_usage_ledger(con: GatewayConnection) -> None:
     )
 
 
+def migration_008_premium_account_costs(con: GatewayConnection) -> None:
+    definitions = {
+        "priced_model": "TEXT",
+        "pricing_version": "TEXT",
+        "wholesale_cost_microusd": "BIGINT" if con.backend == "postgres" else "INTEGER",
+        "charged_cost_microusd": "BIGINT" if con.backend == "postgres" else "INTEGER",
+        "markup_basis_points": "INTEGER",
+    }
+    if con.backend == "postgres":
+        for name, definition in definitions.items():
+            con.execute(f"ALTER TABLE llm_usage_events ADD COLUMN IF NOT EXISTS {name} {definition}")
+    else:
+        columns = sqlite_column_names(con, "llm_usage_events")
+        for name, definition in definitions.items():
+            if name not in columns:
+                con.execute(f"ALTER TABLE llm_usage_events ADD COLUMN {name} {definition}")
+    for row in con.execute(
+        """
+        SELECT id, model, input_tokens, cached_input_tokens, output_tokens, reasoning_tokens
+        FROM llm_usage_events WHERE pricing_version IS NULL
+        """
+    ).fetchall():
+        costs = usage_costs(dict(row))
+        con.execute(
+            """
+            UPDATE llm_usage_events
+            SET priced_model=?, pricing_version=?, wholesale_cost_microusd=?,
+                charged_cost_microusd=?, markup_basis_points=?
+            WHERE id=?
+            """,
+            (
+                costs["priced_model"], costs["pricing_version"], costs["wholesale_cost_microusd"],
+                costs["charged_cost_microusd"], costs["markup_basis_points"], row["id"],
+            ),
+        )
+    amount_type = "BIGINT" if con.backend == "postgres" else "INTEGER"
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS premium_account_transactions (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            amount_microusd {amount_type} NOT NULL,
+            kind TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_premium_transactions_member_created "
+        "ON premium_account_transactions(member_id, created_at)"
+    )
+    if cloud_table_exists(con, "members"):
+        con.execute(
+            """
+            INSERT INTO premium_account_transactions(id, member_id, amount_microusd, kind, note, created_at)
+            SELECT 'initial-credit:' || id, id, ?, 'promotional_credit', 'Early-access credit', ?
+            FROM members
+            WHERE 1=1
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (INITIAL_PREMIUM_CREDIT_MICROUSD, utc_now()),
+        )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1093,6 +1194,7 @@ CLOUD_MIGRATIONS = (
     (5, migration_005_encrypt_private_cv_storage),
     (6, migration_006_background_job_support_ids),
     (7, migration_007_llm_usage_ledger),
+    (8, migration_008_premium_account_costs),
 )
 
 
@@ -2139,17 +2241,24 @@ def ingest_llm_usage_events(job: Any, path: Path) -> int:
                 for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"):
                     value = event.get(key)
                     counts.append(int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None)
+                costs = usage_costs({**event, **dict(zip(
+                    ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"), counts
+                ))})
                 cursor = con.execute(
                     """
                     INSERT INTO llm_usage_events
                       (id, event_key, member_id, database_id, job_id, operation, provider, model,
-                       input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                       input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
+                       priced_model, pricing_version, wholesale_cost_microusd, charged_cost_microusd,
+                       markup_basis_points, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(event_key) DO NOTHING
                     """,
                     (
                         secrets.token_urlsafe(18), event_key, job["member_id"], job["database_id"], job_id,
-                        operation, provider, model, *counts,
+                        operation, provider, model, *counts, costs["priced_model"], costs["pricing_version"],
+                        costs["wholesale_cost_microusd"], costs["charged_cost_microusd"],
+                        costs["markup_basis_points"],
                         str(event.get("occurred_at") or utc_now())[:40],
                     ),
                 )
@@ -3390,6 +3499,63 @@ def list_account_databases(
     }
 
 
+@app.get("/api/account/premium-account")
+def premium_account_summary(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    with connect() as con:
+        credit_row = con.execute(
+            "SELECT COALESCE(SUM(amount_microusd), 0) AS total FROM premium_account_transactions WHERE member_id=?",
+            (member["id"],),
+        ).fetchone()
+        usage_row = con.execute(
+            """
+            SELECT COALESCE(SUM(charged_cost_microusd), 0) AS charged,
+                   COALESCE(SUM(wholesale_cost_microusd), 0) AS wholesale,
+                   SUM(CASE WHEN charged_cost_microusd IS NULL THEN 1 ELSE 0 END) AS unpriced
+            FROM llm_usage_events WHERE member_id=?
+            """,
+            (member["id"],),
+        ).fetchone()
+        daily = [dict(row) for row in con.execute(
+                """
+                SELECT substr(created_at, 1, 10) AS day,
+                       COALESCE(SUM(charged_cost_microusd), 0) AS charged_microusd,
+                       COALESCE(SUM(wholesale_cost_microusd), 0) AS wholesale_microusd
+                FROM llm_usage_events
+                WHERE member_id=? AND created_at>=?
+                GROUP BY substr(created_at, 1, 10)
+                ORDER BY day
+                """,
+                (member["id"], (datetime.now(timezone.utc) - timedelta(days=29)).isoformat()),
+            ).fetchall()]
+        recent = [dict(row) for row in con.execute(
+                """
+                SELECT operation, model, charged_cost_microusd, wholesale_cost_microusd, created_at
+                FROM llm_usage_events WHERE member_id=?
+                ORDER BY created_at DESC LIMIT 12
+                """,
+                (member["id"],),
+            ).fetchall()]
+    credited = int(credit_row["total"] or 0)
+    charged = int(usage_row["charged"] or 0)
+    return {
+        "currency": "USD",
+        "balance_microusd": credited - charged,
+        "credited_microusd": credited,
+        "charged_microusd": charged,
+        "wholesale_cost_microusd": int(usage_row["wholesale"] or 0),
+        "unpriced_responses": int(usage_row["unpriced"] or 0),
+        "markup_factor": 2,
+        "pricing_source": "https://developers.openai.com/api/docs/pricing",
+        "daily": daily,
+        "recent": recent,
+        "enforcement_enabled": False,
+    }
+
+
 @app.patch("/api/account/databases/{database_id}")
 def rename_account_database(
     database_id: str,
@@ -3615,6 +3781,14 @@ async def redeem_invitation(request: Request) -> JSONResponse:
         con.execute(
             "INSERT INTO members (id, invitation_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
             (member_id, invitation["id"], now, now),
+        )
+        con.execute(
+            """
+            INSERT INTO premium_account_transactions
+              (id, member_id, amount_microusd, kind, note, created_at)
+            VALUES (?, ?, ?, 'promotional_credit', 'Early-access credit', ?)
+            """,
+            (f"initial-credit:{member_id}", member_id, INITIAL_PREMIUM_CREDIT_MICROUSD, now),
         )
         token = issue_device_credential(con, member_id)
         con.execute(

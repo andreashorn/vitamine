@@ -456,8 +456,30 @@ sudo /bin/bash -c 'set -a; . /etc/vitamine-cloud.env; set +a; \
   -m vitamine.scripts.manage_cloud llm-usage --days 30'
 ```
 
+Summarize credit, underlying cost, account debit, and balance for every opaque
+account ID with the same environment wrapper and
+`-m vitamine.scripts.manage_cloud premium-accounts`.
+
 Token counts are operational measurements only. VitaMine does not assign
-prices, bill users, or enforce quotas from this table.
+payment transactions or enforce quotas from this table during the pilot.
+
+Schema migration 8 adds the unencrypted central Premium Features Account
+ledger. Each existing and new account receives a $3.00 early-access credit.
+Usage events snapshot the applicable standard OpenAI token prices, the
+underlying API cost, and a 2× account debit. The initial pricing version is
+`openai-standard-2026-07-31`; its source is the official
+[OpenAI API pricing page](https://developers.openai.com/api/docs/pricing).
+Cached input is priced separately, while reasoning tokens are already included
+in the provider's output-token count and are not charged twice. Unknown models
+remain visibly unpriced rather than receiving a guessed charge.
+
+These accounting tables are deliberately not application-encrypted: they
+contain opaque account/CV/job identifiers, model names, token counts, prices,
+and timestamps, but no prompts, CV text, model output, filename, or credential.
+The account library shows the user their balance, cumulative debit, underlying
+API cost, recent operations, and a 30-day spending chart. Negative balances do
+not prevent imports, enrichment, or other premium features until payment and
+enforcement are designed explicitly.
 
 ## Public profiles
 

@@ -426,9 +426,12 @@ Evidence: pending
   closed browser and recover after a service restart.
 - [x] Bound the current exposure through invite-only access and the API
   account's own spending limit.
+- [x] Measure managed-LLM token usage and versioned API cost per account, with
+  a visible non-enforcing Premium Features Account balance for the pilot.
 - [ ] Tell users clearly when their uploaded CV content is sent to OpenAI and
   obtain the appropriate consent.
-- [ ] Per-account and per-job quotas, rate limits, and token/cost accounting.
+- [ ] Enforce per-account and per-job quotas or balance limits; accounting and
+  negative pilot balances are implemented, but do not yet block usage.
 - [ ] An operator view for unusually expensive, repeated, failed, or stuck
   jobs.
 - [ ] Robust job idempotency and cancellation so retries cannot silently repeat

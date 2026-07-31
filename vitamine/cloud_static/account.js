@@ -31,6 +31,12 @@ const elements = {
   profileSlug: $("#profileSlug"),
   profileSetupMessage: $("#profileSetupMessage"),
   closeProfileSetup: $("#closeProfileSetup"),
+  premiumBalance: $("#premiumBalance"),
+  premiumCredit: $("#premiumCredit"),
+  premiumCharged: $("#premiumCharged"),
+  premiumWholesale: $("#premiumWholesale"),
+  premiumChart: $("#premiumChart"),
+  premiumRecent: $("#premiumRecent"),
 };
 let libraryPollTimer = null;
 let libraryPayload = null;
@@ -114,6 +120,62 @@ function formatDate(value) {
   return Number.isNaN(date.getTime())
     ? value
     : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
+}
+
+function formatUsd(microusd, minimumFractionDigits = 2) {
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits,
+    maximumFractionDigits: Math.max(minimumFractionDigits, 4),
+  }).format(Number(microusd || 0) / 1_000_000);
+}
+
+function premiumOperationLabel(value) {
+  const text = String(value || "Premium feature");
+  if (text === "cv_import") return "CV import";
+  if (text === "enrich_cv") return "CV enrichment";
+  if (text.includes("prompt-export")) return "Prompt-guided export";
+  return text.startsWith("workspace:") ? "Premium workspace feature" : text.replaceAll("_", " ");
+}
+
+function renderPremiumAccount(payload) {
+  elements.premiumBalance.textContent = formatUsd(payload.balance_microusd);
+  elements.premiumBalance.classList.toggle("negative", Number(payload.balance_microusd) < 0);
+  elements.premiumCredit.textContent = formatUsd(payload.credited_microusd);
+  elements.premiumCharged.textContent = formatUsd(payload.charged_microusd, 4);
+  elements.premiumWholesale.textContent = formatUsd(payload.wholesale_cost_microusd, 4);
+  const daily = payload.daily || [];
+  const maximum = Math.max(1, ...daily.map((row) => Number(row.charged_microusd || 0)));
+  elements.premiumChart.replaceChildren(...daily.map((row) => {
+    const column = document.createElement("div");
+    column.className = "premium-chart-column";
+    column.style.setProperty("--spend-height", `${Math.max(3, Math.round((Number(row.charged_microusd || 0) / maximum) * 100))}%`);
+    column.title = `${formatDate(row.day)}: ${formatUsd(row.charged_microusd, 4)}`;
+    column.setAttribute("aria-label", column.title);
+    return column;
+  }));
+  if (!daily.length) {
+    const empty = document.createElement("p");
+    empty.className = "premium-empty";
+    empty.textContent = "No measured premium usage yet.";
+    elements.premiumChart.replaceChildren(empty);
+  }
+  elements.premiumRecent.replaceChildren(...(payload.recent || []).map((row) => {
+    const item = document.createElement("div");
+    const label = document.createElement("span");
+    label.textContent = premiumOperationLabel(row.operation);
+    const amount = document.createElement("strong");
+    amount.textContent = row.charged_cost_microusd == null ? "Pending price" : formatUsd(row.charged_cost_microusd, 4);
+    item.append(label, amount);
+    return item;
+  }));
+  if (!(payload.recent || []).length) {
+    const empty = document.createElement("p");
+    empty.className = "premium-empty";
+    empty.textContent = "Your first premium operation will appear here.";
+    elements.premiumRecent.replaceChildren(empty);
+  }
 }
 
 function suggestedProfileSlug(value) {
@@ -232,9 +294,10 @@ function databaseCard(database, job = null) {
 
 async function loadLibrary() {
   window.clearTimeout(libraryPollTimer);
-  const [payload, jobsPayload] = await Promise.all([
+  const [payload, jobsPayload, premiumPayload] = await Promise.all([
     api("/api/account/databases"),
     api("/api/cloud/jobs"),
+    api("/api/account/premium-account"),
   ]);
   const jobs = new Map((jobsPayload.jobs || []).map((job) => [job.database_id, job]));
   libraryPayload = payload;
@@ -242,6 +305,7 @@ async function loadLibrary() {
   elements.libraryView.hidden = false;
   elements.accountNav.hidden = false;
   elements.accountIdentity.textContent = payload.account.display_name || payload.account.email;
+  renderPremiumAccount(premiumPayload);
   elements.profileStatus.hidden = false;
   if (payload.profile) {
     elements.profileStatusTitle.textContent = `vitamine.cloud/${payload.profile.slug}`;

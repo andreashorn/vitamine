@@ -76,6 +76,36 @@ class CloudMigrationTests(unittest.TestCase):
         self.assertIn("llm_usage_events", tables)
         self.assertIn("orcid_oauth_connections", tables)
 
+    def test_version_seven_usage_is_priced_and_existing_member_is_credited(self):
+        self.seed_version(7)
+        with sqlite3.connect(self.database) as con:
+            con.executescript(
+                """
+                CREATE TABLE members (id TEXT PRIMARY KEY);
+                CREATE TABLE account_databases (id TEXT PRIMARY KEY);
+                CREATE TABLE background_jobs (id TEXT PRIMARY KEY);
+                CREATE TABLE llm_usage_events (
+                    id TEXT PRIMARY KEY, event_key TEXT UNIQUE, member_id TEXT, database_id TEXT,
+                    job_id TEXT, operation TEXT, provider TEXT, model TEXT, input_tokens INTEGER,
+                    cached_input_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
+                    created_at TEXT
+                );
+                INSERT INTO members VALUES ('member-1');
+                INSERT INTO llm_usage_events VALUES
+                  ('usage-1', 'event-1', 'member-1', 'cv-1', NULL, 'cv_import', 'openai',
+                   'gpt-4.1-mini', 100, 40, 20, 0, '2026-07-31T00:00:00+00:00');
+                """
+            )
+            con.commit()
+        initialize_database()
+        with sqlite3.connect(self.database) as con:
+            con.row_factory = sqlite3.Row
+            usage = con.execute("SELECT * FROM llm_usage_events WHERE id='usage-1'").fetchone()
+            credit = con.execute("SELECT amount_microusd FROM premium_account_transactions").fetchone()
+        self.assertEqual(usage["wholesale_cost_microusd"], 60)
+        self.assertEqual(usage["charged_cost_microusd"], 120)
+        self.assertEqual(credit["amount_microusd"], 3_000_000)
+
     def test_version_one_store_upgrades_without_losing_member_data(self):
         self.seed_version(1)
         with sqlite3.connect(self.database) as con:

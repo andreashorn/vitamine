@@ -6,9 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vitamine.cloud_app import connect, ingest_llm_usage_events, initialize_database
-from vitamine.llm_usage import usage_event
+from vitamine.llm_usage import usage_costs, usage_event
 from vitamine.scripts.import_uploaded_cv import parse_json_response
-from vitamine.scripts.manage_cloud import llm_usage_totals
+from vitamine.scripts.manage_cloud import llm_usage_totals, premium_account_totals
 
 
 class LlmUsageTests(unittest.TestCase):
@@ -73,6 +73,9 @@ class LlmUsageTests(unittest.TestCase):
         partial = usage_event({"id": "response-3", "model": "model", "usage": {"input_tokens": 7}})
         self.assertEqual(partial["input_tokens"], 7)
         self.assertIsNone(partial["output_tokens"])
+        costs = usage_costs({"model": "gpt-4.1-mini-2025-04-14", "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20})
+        self.assertEqual(costs["wholesale_cost_microusd"], 60)
+        self.assertEqual(costs["charged_cost_microusd"], 120)
 
     def test_response_capture_and_ingestion_are_idempotent(self):
         usage_path = self.root / "usage.jsonl"
@@ -92,9 +95,15 @@ class LlmUsageTests(unittest.TestCase):
             row = con.execute("SELECT * FROM llm_usage_events").fetchone()
             self.assertEqual(row["input_tokens"], 12)
             self.assertEqual(row["output_tokens"], 3)
+            self.assertEqual(row["wholesale_cost_microusd"], 10)
+            self.assertEqual(row["charged_cost_microusd"], 20)
         totals = llm_usage_totals(30)
         self.assertEqual(totals[0]["responses"], 1)
         self.assertEqual(totals[0]["input_tokens"], 12)
+        self.assertEqual(totals[0]["charged_cost_microusd"], 20)
+        accounts = premium_account_totals()
+        self.assertEqual(accounts[0]["charged_microusd"], 20)
+        self.assertEqual(accounts[0]["balance_microusd"], -20)
 
 
 if __name__ == "__main__":
