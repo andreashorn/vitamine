@@ -22,6 +22,7 @@ from docx import Document
 
 from vitamine.paths import APP_SUPPORT, ROOT, bundled_model_path, tool_path
 from vitamine.metadata_text import decode_metadata_text
+from vitamine.profile_resolver import resolve_profiles
 from vitamine.scripts.import_background_docs import (
     PUBLICATION_SECTIONS,
     clean_markup,
@@ -2255,6 +2256,65 @@ def stage_import_candidates(
     return counts
 
 
+def store_profile_candidates(
+    con: sqlite3.Connection,
+    document_id: int,
+    candidates: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Persist verified profiles and stage plausible alternatives for review."""
+    counts = {"accepted": 0, "staged": 0}
+    for candidate in candidates:
+        evidence = candidate.get("evidence") if isinstance(candidate.get("evidence"), dict) else {}
+        evidence_text = ", ".join(
+            part
+            for part in (
+                f"{int(evidence.get('cv_link_occurrences') or 0)} CV link(s)" if evidence.get("cv_link_occurrences") else "",
+                f"{int(evidence.get('shared_publications') or 0)} shared publication(s)" if evidence.get("shared_publications") else "",
+                "institution matched" if evidence.get("institution_match") else "",
+                "ORCID matched" if evidence.get("orcid_match") else "",
+            )
+            if part
+        )
+        payload = {
+            "platform": _text(candidate.get("platform")),
+            "identifier_type": _text(candidate.get("identifier_type")),
+            "identifier_value": _text(candidate.get("identifier_value")),
+            "url": _text(candidate.get("url")),
+            "source": _text(candidate.get("source")) or "profile resolver",
+            "notes": (
+                f"Identity evidence: {evidence_text}."
+                + (f" {candidate['ambiguity']}" if candidate.get("ambiguity") else "")
+                if evidence_text else "Discovered during CV import."
+            ),
+        }
+        if not all(payload[key] for key in ("platform", "identifier_type", "identifier_value", "url")):
+            continue
+        if candidate.get("auto_accept"):
+            existing = con.execute(
+                "SELECT id FROM person_identifiers WHERE person_id=1 AND lower(platform)=lower(?) LIMIT 1",
+                (payload["platform"],),
+            ).fetchone()
+            if existing:
+                continue
+            con.execute(
+                """
+                INSERT INTO person_identifiers
+                  (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+                VALUES (1, ?, ?, ?, ?, ?, datetime('now'), ?)
+                """,
+                tuple(payload[key] for key in ("platform", "identifier_type", "identifier_value", "url", "source", "notes")),
+            )
+            counts["accepted"] += 1
+        else:
+            stage_import_candidate(
+                con, document_id, payload["source"], "identifier", payload,
+                payload["platform"], f"{payload['identifier_type']} · {payload['identifier_value']}",
+                f"{payload['url']}\n{payload['notes']}", str(candidate.get("confidence") or "medium"),
+            )
+            counts["staged"] += 1
+    return counts
+
+
 def insert_contributions(con: sqlite3.Connection, document_id: int, contributions: list[dict[str, Any]]) -> int:
     count = 0
     seen: set[tuple[str, str]] = set()
@@ -2360,6 +2420,13 @@ def import_cv_file(con: sqlite3.Connection, path: Path, original_filename: str, 
     if not fallback_publications and contributions:
         fallback_publications = contribution_publications(contributions)
     all_publications = [*llm_publications, *fallback_publications]
+    profile_candidates, profile_warnings = resolve_profiles(
+        text,
+        person,
+        all_publications,
+        search_web=str(settings.get("profile_search_enabled") or "").lower() in {"1", "true", "yes"},
+    )
+    profile_counts = store_profile_candidates(con, document_id, profile_candidates)
 
     if review_mode:
         staged = stage_import_candidates(
@@ -2377,6 +2444,7 @@ def import_cv_file(con: sqlite3.Connection, path: Path, original_filename: str, 
         contributions_inserted = 0
         narrative_imported = 0
         fallback_publications_inserted = staged["publications"] if fallback_publications and not llm_publications else 0
+        staged["identifiers"] = profile_counts["staged"]
     else:
         insert_person(con, person)
         inserted = insert_entries(con, document_id, entries)
@@ -2392,6 +2460,7 @@ def import_cv_file(con: sqlite3.Connection, path: Path, original_filename: str, 
 
     warnings: list[str] = []
     debug_warnings: list[str] = []
+    warnings.extend(profile_warnings)
     if llm_warning:
         warnings.append(f"LLM extraction failed ({llm_warning}); VitaMine imported safely parsed CV fields instead.")
     if not llm_entries and settings.get("provider") != "none":
@@ -2427,7 +2496,9 @@ def import_cv_file(con: sqlite3.Connection, path: Path, original_filename: str, 
         "provider": settings.get("provider") or "none",
         "used_llm": bool(llm_entries or llm_contributions or llm_publications or llm_report_has_body) and not llm_warning,
         "review_mode": review_mode,
-        "candidates_staged": sum(staged[key] for key in ("entries", "publications", "contributions", "person", "narrative")) if review_mode else 0,
+        "candidates_staged": sum(staged[key] for key in ("entries", "publications", "contributions", "person", "narrative", "identifiers")) if review_mode else 0,
         "staged": staged if review_mode else {},
+        "profile_identifiers_added": profile_counts["accepted"],
+        "profile_identifiers_staged": profile_counts["staged"],
         "warnings": warnings,
     }

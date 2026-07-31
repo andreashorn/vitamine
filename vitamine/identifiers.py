@@ -21,6 +21,7 @@ HOST_PLATFORMS = {
     "bsky.app": "Bluesky",
     "scholar.google.com": "Google Scholar",
     "scholar.google.de": "Google Scholar",
+    "scholar.google.co.uk": "Google Scholar",
     "researchgate.net": "ResearchGate",
     "www.researchgate.net": "ResearchGate",
     "loop.frontiersin.org": "Loop",
@@ -33,6 +34,10 @@ HOST_PLATFORMS = {
     "semanticscholar.org": "Semantic Scholar",
     "scholargps.com": "ScholarGPS",
     "www.scholargps.com": "ScholarGPS",
+    "openalex.org": "OpenAlex",
+    "www.openalex.org": "OpenAlex",
+    "dblp.org": "DBLP",
+    "dblp.dagstuhl.de": "DBLP",
 }
 
 
@@ -88,6 +93,12 @@ def identifier_value_from_url(platform: str, url: str) -> str:
         for candidate in reversed(parts):
             if re.fullmatch(r"[A-Z]-?\d{4}-\d{4}", candidate, flags=re.I):
                 return candidate.upper()
+    if canonical == "OpenAlex" and parts:
+        candidate = parts[-1]
+        if re.fullmatch(r"A\d+", candidate, flags=re.I):
+            return candidate.upper()
+    if canonical == "DBLP" and len(parts) >= 2 and parts[0].casefold() == "pid":
+        return "/".join(parts[1:])
     return ""
 
 

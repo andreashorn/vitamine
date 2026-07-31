@@ -1476,6 +1476,29 @@ def accept_person_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tu
     return "accepted", 1
 
 
+def accept_identifier_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    values = identifier_payload(item["payload"])
+    existing = con.execute(
+        "SELECT id FROM person_identifiers WHERE person_id=1 AND lower(platform)=lower(?) LIMIT 1",
+        (values["platform"],),
+    ).fetchone()
+    if existing:
+        return "duplicate", int(existing["id"])
+    cursor = con.execute(
+        """
+        INSERT INTO person_identifiers
+          (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+        VALUES (1, ?, ?, ?, ?, ?, datetime('now'), ?)
+        """,
+        (
+            values["platform"], values["identifier_type"], values["identifier_value"], values["url"],
+            values["source"] or item.get("source") or "profile resolver", values["notes"],
+        ),
+    )
+    sync_person_orcid_from_identifiers(con)
+    return "accepted", int(cursor.lastrowid)
+
+
 def accept_narrative_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
     payload = item["payload"]
     title = str(payload.get("title") or "Narrative Report").strip() or "Narrative Report"
@@ -1532,6 +1555,7 @@ def accept_inbox_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tup
         "entry": accept_entry_candidate,
         "publication": accept_publication_candidate,
         "person": accept_person_candidate,
+        "identifier": accept_identifier_candidate,
         "narrative_report": accept_narrative_candidate,
         "contribution": accept_contribution_candidate,
     }
@@ -2720,7 +2744,7 @@ def list_import_inbox(
 ) -> dict[str, Any]:
     if status not in {"pending", "accepted", "rejected", "skipped", "all"}:
         raise HTTPException(status_code=400, detail="Unsupported inbox status")
-    if target_type not in {"all", "entry", "publication", "person", "narrative_report", "contribution"}:
+    if target_type not in {"all", "entry", "publication", "person", "identifier", "narrative_report", "contribution"}:
         raise HTTPException(status_code=400, detail="Unsupported inbox type")
     clauses = []
     params: list[Any] = []
@@ -2792,6 +2816,8 @@ async def accept_import_inbox(request: Request) -> dict[str, Any]:
                 elif item["target_type"] == "person":
                     person_accepted = True
                     orcid_accepted = orcid_accepted or bool(clean_orcid_id(item["payload"].get("orcid_id")))
+                elif item["target_type"] == "identifier":
+                    orcid_accepted = orcid_accepted or str(item["payload"].get("platform") or "").casefold() == "orcid"
                 mark_inbox_item(con, int(item["id"]), "accepted", f"Imported as {item['target_type']} {target_id}.")
             elif status == "duplicate":
                 duplicates += 1
@@ -3024,6 +3050,8 @@ def accept_high_confidence_import_inbox() -> dict[str, Any]:
                 elif item["target_type"] == "person":
                     person_accepted = True
                     orcid_accepted = orcid_accepted or bool(clean_orcid_id(item["payload"].get("orcid_id")))
+                elif item["target_type"] == "identifier":
+                    orcid_accepted = orcid_accepted or str(item["payload"].get("platform") or "").casefold() == "orcid"
                 mark_inbox_item(con, int(item["id"]), "accepted", f"Imported as {item['target_type']} {target_id}.")
             elif status == "duplicate":
                 duplicates += 1
@@ -5677,6 +5705,7 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
         with connect() as con:
             settings = cv_import_settings(con, include_secret=True)
             settings["review_mode"] = "inbox"
+            settings["profile_search_enabled"] = ai_web_discovery_enabled(con)
             for index, file in enumerate(files, start=1):
                 filename = cv_import_upload_name(file.filename or f"uploaded-cv-{index}")
                 upload_path = upload_dir / f"{timestamp}-{index}-{filename}"
@@ -5715,6 +5744,7 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
                 "publications": sum(int((result.get("staged") or {}).get("publications") or 0) for result in results),
                 "contributions": sum(int((result.get("staged") or {}).get("contributions") or 0) for result in results),
                 "person": sum(int((result.get("staged") or {}).get("person") or 0) for result in results),
+                "identifiers": sum(int((result.get("staged") or {}).get("identifiers") or 0) for result in results),
                 "narrative": sum(int((result.get("staged") or {}).get("narrative") or 0) for result in results),
                 "remembered_rejections": sum(int((result.get("staged") or {}).get("remembered_rejections") or 0) for result in results),
             },

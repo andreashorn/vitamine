@@ -40,6 +40,7 @@ def run_cv_import(payload: dict[str, Any], job_directory: Path, progress_path: P
     with worker_app.connect() as con:
         settings = worker_app.cv_import_settings(con, include_secret=True)
         settings["review_mode"] = "inbox"
+        settings["profile_search_enabled"] = worker_app.ai_web_discovery_enabled(con)
         for index, item in enumerate(files, start=1):
             stored_name = Path(str(item.get("stored_name") or "")).name
             original_name = Path(str(item.get("original_name") or stored_name)).name
@@ -79,6 +80,7 @@ def run_cv_import(payload: dict[str, Any], job_directory: Path, progress_path: P
                 "publications",
                 "contributions",
                 "person",
+                "identifiers",
                 "narrative",
                 "remembered_rejections",
             )

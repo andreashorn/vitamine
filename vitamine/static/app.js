@@ -431,6 +431,7 @@ function inboxTypeLabel(type) {
     entry: "Entry",
     publication: "Publication",
     person: "Person",
+    identifier: "Identifier",
     narrative_report: "Narrative",
     contribution: "Contribution",
   }[type] || type || "Candidate";
