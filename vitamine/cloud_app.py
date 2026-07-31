@@ -78,7 +78,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 6
+CLOUD_SCHEMA_VERSION = 7
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -191,6 +191,25 @@ ON background_jobs(member_id, status, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_background_jobs_database
 ON background_jobs(database_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS llm_usage_events (
+    id TEXT PRIMARY KEY,
+    event_key TEXT NOT NULL UNIQUE,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES background_jobs(id) ON DELETE SET NULL,
+    operation TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER,
+    cached_input_tokens INTEGER,
+    output_tokens INTEGER,
+    reasoning_tokens INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_member_created
+ON llm_usage_events(member_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hosted_cv_people (
     cv_id TEXT PRIMARY KEY REFERENCES account_databases(id) ON DELETE CASCADE,
@@ -370,6 +389,25 @@ ON background_jobs(member_id, status, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_background_jobs_database
 ON background_jobs(database_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS llm_usage_events (
+    id TEXT PRIMARY KEY,
+    event_key TEXT NOT NULL UNIQUE,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES background_jobs(id) ON DELETE SET NULL,
+    operation TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens BIGINT,
+    cached_input_tokens BIGINT,
+    output_tokens BIGINT,
+    reasoning_tokens BIGINT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_member_created
+ON llm_usage_events(member_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hosted_cv_people (
     cv_id TEXT PRIMARY KEY REFERENCES account_databases(id) ON DELETE CASCADE,
@@ -1022,6 +1060,31 @@ def migration_006_background_job_support_ids(con: GatewayConnection) -> None:
     )
 
 
+def migration_007_llm_usage_ledger(con: GatewayConnection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS llm_usage_events (
+            id TEXT PRIMARY KEY,
+            event_key TEXT NOT NULL UNIQUE,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+            job_id TEXT REFERENCES background_jobs(id) ON DELETE SET NULL,
+            operation TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            input_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            output_tokens INTEGER,
+            reasoning_tokens INTEGER,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_llm_usage_member_created ON llm_usage_events(member_id, created_at)"
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1029,6 +1092,7 @@ CLOUD_MIGRATIONS = (
     (4, migration_004_background_job_idempotency),
     (5, migration_005_encrypt_private_cv_storage),
     (6, migration_006_background_job_support_ids),
+    (7, migration_007_llm_usage_ledger),
 )
 
 
@@ -1488,6 +1552,7 @@ def start_workspace_worker(row: sqlite3.Row) -> int:
         "VITAMINE_OUTPUT": row["output_path"],
         "VITAMINE_PREFERENCES": str(session_dir / "preferences.json"),
         "VITAMINE_CLOUD_WORKER": "1",
+        "VITAMINE_LLM_USAGE_PATH": str(session_dir / "llm-usage.jsonl"),
     }
     with log_path.open("ab") as log:
         process = subprocess.Popen(
@@ -2049,6 +2114,51 @@ def compact_job_result(result: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def ingest_llm_usage_events(job: Any, path: Path) -> int:
+    if not path.is_file():
+        return 0
+    staged_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
+    try:
+        path.replace(staged_path)
+    except FileNotFoundError:
+        return 0
+    keys = set(job.keys())
+    job_id = job["id"] if "id" in keys else None
+    operation = str(job["kind"] if "kind" in keys else "unknown")[:100]
+    inserted = 0
+    try:
+        with connect() as con:
+            for line in staged_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                event = parsed_json_object(line)
+                event_key = str(event.get("event_key") or "")[:100]
+                provider = str(event.get("provider") or "")[:40]
+                model = str(event.get("model") or "unknown")[:120]
+                if not event_key or provider != "openai" or not re.fullmatch(r"[A-Za-z0-9._:/-]+", model):
+                    continue
+                counts = []
+                for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"):
+                    value = event.get(key)
+                    counts.append(int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None)
+                cursor = con.execute(
+                    """
+                    INSERT INTO llm_usage_events
+                      (id, event_key, member_id, database_id, job_id, operation, provider, model,
+                       input_tokens, cached_input_tokens, output_tokens, reasoning_tokens, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(event_key) DO NOTHING
+                    """,
+                    (
+                        secrets.token_urlsafe(18), event_key, job["member_id"], job["database_id"], job_id,
+                        operation, provider, model, *counts,
+                        str(event.get("occurred_at") or utc_now())[:40],
+                    ),
+                )
+                inserted += max(0, cursor.rowcount)
+        return inserted
+    finally:
+        staged_path.unlink(missing_ok=True)
+
+
 def execute_background_job(job: Any) -> None:
     directory = (job_root() / str(job["id"])).resolve()
     try:
@@ -2066,6 +2176,7 @@ def execute_background_job(job: Any) -> None:
     database_path = work_directory / "workspace.vitamine"
     result_path = work_directory / "result.json"
     progress_path = work_directory / "progress.json"
+    usage_path = work_directory / "llm-usage.jsonl"
     log_path = work_directory / "worker.log"
     with connect() as con:
         database = con.execute(
@@ -2119,6 +2230,7 @@ def execute_background_job(job: Any) -> None:
         "VITAMINE_OUTPUT": str(work_directory / "output"),
         "VITAMINE_PREFERENCES": str(work_directory / "preferences.json"),
         "VITAMINE_CLOUD_WORKER": "1",
+        "VITAMINE_LLM_USAGE_PATH": str(usage_path),
     }
     command = [
         sys.executable,
@@ -2162,6 +2274,7 @@ def execute_background_job(job: Any) -> None:
                         update_background_job_progress(str(job["id"]), progress)
                     last_progress = raw_progress
         returncode = int(process.returncode or 0)
+    ingest_llm_usage_events(job, usage_path)
     result = parsed_json_object(result_path.read_text(encoding="utf-8", errors="replace")) if result_path.exists() else {}
     if returncode != 0 or not result.get("ok"):
         message = str(result.get("error") or "The background process failed.")[-4000:]
@@ -2548,6 +2661,15 @@ async def proxy_to_workspace(request: Request, worker_path: str) -> Response:
             upstream = await client.request(request.method, url, headers=headers, content=body)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail="The private VitaMine workspace is unavailable.") from exc
+    if row["database_id"]:
+        ingest_llm_usage_events(
+            {
+                "member_id": row["member_id"],
+                "database_id": row["database_id"],
+                "kind": f"workspace:{worker_path.lstrip('/') or 'root'}",
+            },
+            Path(row["db_path"]).parent / "llm-usage.jsonl",
+        )
     mapping_completed = False
     if (
         request.method == "GET"

@@ -49,6 +49,28 @@ def revoke_invitation(invitation_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def llm_usage_totals(days: int = 30) -> list[dict]:
+    initialize_database()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with connect() as con:
+        rows = con.execute(
+            """
+            SELECT member_id, operation, model, substr(created_at, 1, 10) AS day,
+                   COUNT(*) AS responses,
+                   SUM(COALESCE(input_tokens, 0)) AS input_tokens,
+                   SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens,
+                   SUM(COALESCE(output_tokens, 0)) AS output_tokens,
+                   SUM(COALESCE(reasoning_tokens, 0)) AS reasoning_tokens
+            FROM llm_usage_events
+            WHERE created_at >= ?
+            GROUP BY member_id, operation, model, substr(created_at, 1, 10)
+            ORDER BY day DESC, member_id, operation, model
+            """,
+            (cutoff,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -62,6 +84,9 @@ def main() -> int:
 
     revoke = subparsers.add_parser("revoke-invite")
     revoke.add_argument("invitation_id", type=int)
+
+    usage = subparsers.add_parser("llm-usage")
+    usage.add_argument("--days", type=int, default=30)
 
     args = parser.parse_args()
     if args.command == "create-invite":
@@ -82,6 +107,21 @@ def main() -> int:
         if not revoke_invitation(args.invitation_id):
             parser.error("Invitation was not found or was already revoked.")
         print(f"Revoked invitation {args.invitation_id}.")
+        return 0
+    if args.command == "llm-usage":
+        if args.days < 1:
+            parser.error("--days must be at least 1")
+        print("day\tmember_id\toperation\tmodel\tresponses\tinput\tcached_input\toutput\treasoning")
+        for row in llm_usage_totals(args.days):
+            print(
+                "\t".join(
+                    str(row[key])
+                    for key in (
+                        "day", "member_id", "operation", "model", "responses", "input_tokens",
+                        "cached_input_tokens", "output_tokens", "reasoning_tokens",
+                    )
+                )
+            )
         return 0
     return 2
 

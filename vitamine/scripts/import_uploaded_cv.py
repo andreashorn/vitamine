@@ -22,6 +22,7 @@ from docx import Document
 
 from vitamine.paths import APP_SUPPORT, ROOT, bundled_model_path, tool_path
 from vitamine.metadata_text import decode_metadata_text
+from vitamine.llm_usage import record_usage
 from vitamine.profile_resolver import resolve_profiles
 from vitamine.scripts.import_background_docs import (
     PUBLICATION_SECTIONS,
@@ -967,6 +968,8 @@ CV text:
 
 def parse_json_response(data: bytes) -> dict[str, Any]:
     payload = json.loads(data.decode("utf-8"))
+    if isinstance(payload, dict):
+        record_usage(payload)
     content = ""
     if "message" in payload:
         content = payload.get("message", {}).get("content", "")

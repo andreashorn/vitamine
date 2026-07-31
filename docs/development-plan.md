@@ -262,7 +262,7 @@ request and job correlation, representative secret/CV redaction, preservation
 of expected HTTP errors, additive migration from schema 5, the complete unit
 test suite, repository audit, and `git diff --check`.
 
-### AUTO-006 [ ] - Record privacy-minimal LLM usage metadata
+### AUTO-006 [x] - Record privacy-minimal LLM usage metadata
 
 Risk: medium
 
@@ -299,7 +299,13 @@ Stop conditions:
 - A call path cannot expose provider usage without logging prompt or response
   content.
 
-Evidence: pending
+Evidence: schema migration 7 and the `llm_usage_events` ledger in
+`vitamine/cloud_app.py`, provider-response extraction in
+`vitamine/llm_usage.py`, background-worker capture in
+`vitamine/scripts/import_uploaded_cv.py`, the `manage_cloud llm-usage` operator
+report, and `tests/test_llm_usage.py`; validated for complete, partial, absent,
+and repeated provider usage, private-field exclusion, historical migration,
+the complete unit-test suite, repository audit, and `git diff --check`.
 
 ### AUTO-007 [ ] - Lock in browser security-header and CSRF regressions
 

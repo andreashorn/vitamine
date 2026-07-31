@@ -73,6 +73,7 @@ class CloudMigrationTests(unittest.TestCase):
                 )
             }
         self.assertIn("background_jobs", tables)
+        self.assertIn("llm_usage_events", tables)
         self.assertIn("orcid_oauth_connections", tables)
 
     def test_version_one_store_upgrades_without_losing_member_data(self):

@@ -445,6 +445,20 @@ CV imports can still spend several minutes waiting on OpenAI. Current progress
 is phase-based rather than per-LLM-chunk; the durable job remains visible after
 the browser closes.
 
+Managed background jobs record only provider-reported token counts and
+structural accounting fields in `llm_usage_events`. Prompts, CV text, model
+outputs, filenames, and credentials are not copied into this ledger. Report
+daily totals by opaque account ID, operation, and model with:
+
+```sh
+sudo /bin/bash -c 'set -a; . /etc/vitamine-cloud.env; set +a; \
+  exec runuser -u vitamine-deploy -- /srv/vitamine-cloud/venv/bin/python \
+  -m vitamine.scripts.manage_cloud llm-usage --days 30'
+```
+
+Token counts are operational measurements only. VitaMine does not assign
+prices, bill users, or enforce quotas from this table.
+
 ## Public profiles
 
 `vitamine.cloud` is the canonical origin for the application and public
