@@ -324,7 +324,16 @@ volume and is outside this application-encryption boundary.
 
 Run relevant tests locally first. Preserve the dirty worktree and deploy only
 the intended files. Copy source into the matching paths below
-`/srv/vitamine-cloud/current`; do not flatten nested directories.
+`/srv/vitamine-cloud/current`; do not flatten nested directories. Install files
+as `vitamine-deploy:vitamine-deploy` with readable modes rather than preserving
+numeric ownership from a development machine. Workspace workers run as that
+account and otherwise may fail while reading application or static files.
+
+The evidence-based researcher-profile resolver spans `vitamine/app.py`,
+`vitamine/cloud_job_runner.py`, `vitamine/identifiers.py`,
+`vitamine/profile_resolver.py`, and `vitamine/scripts/import_uploaded_cv.py`.
+Deploy that set together when profile discovery changes; verify the installed
+resolver module exists before testing Enrich CV.
 
 ### Cloud schema migration procedure
 
