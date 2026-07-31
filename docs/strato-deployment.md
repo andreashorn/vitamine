@@ -377,8 +377,10 @@ PYTHONPATH=/srv/vitamine-cloud/current \
   --source /var/lib/vitamine-cloud/vitamine-cloud.sqlite
 ```
 
-The account cutover rollback files are under
-`/var/backups/vitamine-cloud/2026-07-29-accounts-cutover`.
+The plaintext-era PostgreSQL dumps and the account-cutover rollback archive
+were deliberately deleted on 2026-07-31 after the encrypted migration and its
+post-migration backup were verified. Do not expect
+`/var/backups/vitamine-cloud/2026-07-29-accounts-cutover` to exist.
 
 Avoid restarting during an active job when practical. Jobs recover
 automatically, but an interrupted LLM request may be repeated and incur a
