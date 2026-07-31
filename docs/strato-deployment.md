@@ -452,7 +452,9 @@ daily totals by opaque account ID, operation, and model with:
 
 ```sh
 sudo /bin/bash -c 'set -a; . /etc/vitamine-cloud.env; set +a; \
-  exec runuser -u vitamine-deploy -- /srv/vitamine-cloud/venv/bin/python \
+  cd /srv/vitamine-cloud/current; \
+  exec runuser -u vitamine-deploy -- env PYTHONPATH=/srv/vitamine-cloud/current \
+  /srv/vitamine-cloud/venv/bin/python \
   -m vitamine.scripts.manage_cloud llm-usage --days 30'
 ```
 
