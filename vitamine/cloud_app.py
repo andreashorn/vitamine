@@ -67,6 +67,7 @@ LOGIN_WINDOW_MINUTES = 15
 LOGIN_MAX_FAILURES = 10
 ORCID_OAUTH_STATE_MAX_AGE = 10 * 60
 ORCID_PATTERN = re.compile(r"^\d{4}-\d{4}-\d{4}-[\dX]{4}$", re.I)
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 WORKER_PROCESSES: dict[int, subprocess.Popen] = {}
 DATABASE_LOCKS: dict[str, threading.Lock] = {}
 DATABASE_LOCKS_GUARD = threading.Lock()
@@ -76,7 +77,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 3
+CLOUD_SCHEMA_VERSION = 4
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -170,6 +171,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
     base_revision INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
+    idempotency_key TEXT,
+    request_fingerprint TEXT,
     progress_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT,
     error_message TEXT,
@@ -346,6 +349,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
     base_revision INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
+    idempotency_key TEXT,
+    request_fingerprint TEXT,
     progress_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT,
     error_message TEXT,
@@ -873,10 +878,30 @@ def migration_003_oauth_and_portraits(con: GatewayConnection) -> None:
                 con.execute(f"ALTER TABLE public_profiles ADD COLUMN {name} {definition}")
 
 
+def migration_004_background_job_idempotency(con: GatewayConnection) -> None:
+    if con.backend == "postgres":
+        con.execute("ALTER TABLE background_jobs ADD COLUMN IF NOT EXISTS idempotency_key TEXT")
+        con.execute("ALTER TABLE background_jobs ADD COLUMN IF NOT EXISTS request_fingerprint TEXT")
+    else:
+        job_columns = sqlite_column_names(con, "background_jobs")
+        if "idempotency_key" not in job_columns:
+            con.execute("ALTER TABLE background_jobs ADD COLUMN idempotency_key TEXT")
+        if "request_fingerprint" not in job_columns:
+            con.execute("ALTER TABLE background_jobs ADD COLUMN request_fingerprint TEXT")
+    con.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_idempotency
+        ON background_jobs(member_id, database_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+        """
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
     (3, migration_003_oauth_and_portraits),
+    (4, migration_004_background_job_idempotency),
 )
 
 
@@ -1697,16 +1722,82 @@ def workspace_has_active_job(row: Any) -> bool:
     return bool(database_id and active_background_job(database_id))
 
 
+def normalize_idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    key = value.strip()
+    if not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+        raise HTTPException(
+            status_code=400,
+            detail="Idempotency-Key must contain 8–200 letters, numbers, dots, colons, underscores, or hyphens.",
+        )
+    return key
+
+
+def background_job_fingerprint(kind: str, payload: dict[str, Any]) -> str:
+    material = json.dumps(
+        {"kind": kind, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
+def matching_idempotent_job(
+    con: GatewayConnection,
+    *,
+    member_id: str,
+    database_id: str,
+    idempotency_key: str,
+    kind: str,
+    request_fingerprint: str,
+) -> Any | None:
+    row = con.execute(
+        """
+        SELECT * FROM background_jobs
+        WHERE member_id=? AND database_id=? AND idempotency_key=?
+        """,
+        (member_id, database_id, idempotency_key),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["kind"] != kind or not hmac.compare_digest(
+        str(row["request_fingerprint"] or ""), request_fingerprint
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="This Idempotency-Key was already used for a different background request.",
+        )
+    return row
+
+
 def create_background_job(
     *,
     workspace: Any,
     kind: str,
     payload: dict[str, Any],
     job_id: str,
-) -> dict[str, Any]:
+    idempotency_key: str | None = None,
+) -> tuple[dict[str, Any], bool]:
     database_id = str(workspace["database_id"] or "")
+    member_id = str(workspace["member_id"])
     if not database_id:
         raise HTTPException(status_code=409, detail="Save this CV to your account before starting a background job.")
+    idempotency_key = normalize_idempotency_key(idempotency_key)
+    request_fingerprint = background_job_fingerprint(kind, payload) if idempotency_key else None
+    if idempotency_key and request_fingerprint:
+        with connect() as con:
+            replay = matching_idempotent_job(
+                con,
+                member_id=member_id,
+                database_id=database_id,
+                idempotency_key=idempotency_key,
+                kind=kind,
+                request_fingerprint=request_fingerprint,
+            )
+        if replay is not None:
+            return background_job_payload(replay), False
     if active_background_job(database_id):
         raise HTTPException(
             status_code=409,
@@ -1720,10 +1811,21 @@ def create_background_job(
             SELECT revision FROM account_databases
             WHERE id=? AND member_id=? AND deleted_at IS NULL
             """,
-            (database_id, workspace["member_id"]),
+            (database_id, member_id),
         ).fetchone()
         if database is None:
             raise HTTPException(status_code=404, detail="The saved VitaMine database no longer exists.")
+        if idempotency_key and request_fingerprint:
+            replay = matching_idempotent_job(
+                con,
+                member_id=member_id,
+                database_id=database_id,
+                idempotency_key=idempotency_key,
+                kind=kind,
+                request_fingerprint=request_fingerprint,
+            )
+            if replay is not None:
+                return background_job_payload(replay), False
         existing = con.execute(
             """
             SELECT id FROM background_jobs
@@ -1742,27 +1844,55 @@ def create_background_job(
             "message": "Waiting for the VitaMine worker",
             "percent": 0,
         }
-        con.execute(
-            """
-            INSERT INTO background_jobs
-              (id, member_id, database_id, kind, status, base_revision, payload_json,
-               progress_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                workspace["member_id"],
-                database_id,
-                kind,
-                int(database["revision"]),
-                json.dumps(payload, ensure_ascii=False),
-                json.dumps(progress),
-                now,
-                now,
-            ),
+        parameters = (
+            job_id,
+            member_id,
+            database_id,
+            kind,
+            int(database["revision"]),
+            json.dumps(payload, ensure_ascii=False),
+            idempotency_key,
+            request_fingerprint,
+            json.dumps(progress),
+            now,
+            now,
         )
+        if idempotency_key:
+            cursor = con.execute(
+                """
+                INSERT INTO background_jobs
+                  (id, member_id, database_id, kind, status, base_revision, payload_json,
+                   idempotency_key, request_fingerprint, progress_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (member_id, database_id, idempotency_key)
+                WHERE idempotency_key IS NOT NULL DO NOTHING
+                """,
+                parameters,
+            )
+            if cursor.rowcount == 0:
+                replay = matching_idempotent_job(
+                    con,
+                    member_id=member_id,
+                    database_id=database_id,
+                    idempotency_key=idempotency_key,
+                    kind=kind,
+                    request_fingerprint=str(request_fingerprint),
+                )
+                if replay is None:
+                    raise RuntimeError("The idempotent background request could not be recovered.")
+                return background_job_payload(replay), False
+        else:
+            con.execute(
+                """
+                INSERT INTO background_jobs
+                  (id, member_id, database_id, kind, status, base_revision, payload_json,
+                   idempotency_key, request_fingerprint, progress_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                parameters,
+            )
         row = con.execute("SELECT * FROM background_jobs WHERE id=?", (job_id,)).fetchone()
-    return background_job_payload(row)
+    return background_job_payload(row), True
 
 
 def claim_next_background_job() -> Any | None:
@@ -2810,6 +2940,7 @@ async def queue_cv_import_job(
     request: Request,
     files: list[UploadFile] = File(...),
     authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
     workspace = workspace_for_request(request, authorization)
     if not files:
@@ -2820,18 +2951,22 @@ async def queue_cv_import_job(
     try:
         directory.relative_to(job_root())
         uploads.mkdir(parents=True, mode=0o700)
-        payload_files: list[dict[str, str]] = []
+        payload_files: list[dict[str, Any]] = []
         total_bytes = 0
         for index, file in enumerate(files, start=1):
             original_name = Path(file.filename or f"uploaded-cv-{index}").name
             safe_name = cloud_cv_import_name(original_name)
             stored_name = f"{index}-{safe_name}"
             destination = uploads / stored_name
+            file_digest = hashlib.sha256()
+            file_bytes = 0
             with destination.open("wb") as handle:
                 while True:
                     chunk = file.file.read(1024 * 1024)
                     if not chunk:
                         break
+                    file_digest.update(chunk)
+                    file_bytes += len(chunk)
                     total_bytes += len(chunk)
                     if total_bytes > MAX_JOB_UPLOAD_BYTES:
                         raise HTTPException(
@@ -2841,14 +2976,22 @@ async def queue_cv_import_job(
                     handle.write(chunk)
             destination.chmod(0o600)
             payload_files.append(
-                {"stored_name": stored_name, "original_name": original_name}
+                {
+                    "stored_name": stored_name,
+                    "original_name": original_name,
+                    "size_bytes": file_bytes,
+                    "sha256": file_digest.hexdigest(),
+                }
             )
-        job = create_background_job(
+        job, created = create_background_job(
             workspace=workspace,
             kind="cv_import",
             payload={"files": payload_files},
             job_id=job_id,
+            idempotency_key=idempotency_key,
         )
+        if not created:
+            shutil.rmtree(directory, ignore_errors=True)
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise
@@ -2856,8 +2999,8 @@ async def queue_cv_import_job(
         for file in files:
             await file.close()
     return JSONResponse(
-        {"ok": True, "background": True, "job": job},
-        status_code=202,
+        {"ok": True, "background": True, "idempotent_replay": not created, "job": job},
+        status_code=202 if created else 200,
     )
 
 
@@ -2865,18 +3008,20 @@ async def queue_cv_import_job(
 def queue_enrichment_job(
     request: Request,
     authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
     workspace = workspace_for_request(request, authorization)
     job_id = secrets.token_urlsafe(18)
-    job = create_background_job(
+    job, created = create_background_job(
         workspace=workspace,
         kind="enrich_cv",
         payload={},
         job_id=job_id,
+        idempotency_key=idempotency_key,
     )
     return JSONResponse(
-        {"ok": True, "background": True, "job": job},
-        status_code=202,
+        {"ok": True, "background": True, "idempotent_replay": not created, "job": job},
+        status_code=202 if created else 200,
     )
 
 

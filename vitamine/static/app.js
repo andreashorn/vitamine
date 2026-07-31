@@ -158,10 +158,13 @@ function startProcessing(label, detail = "") {
 }
 
 async function api(path, options = {}) {
-  const headers = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
+  const defaultHeaders = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
   const response = await fetch(path, {
-    headers,
     ...options,
+    headers: {
+      ...defaultHeaders,
+      ...(options.headers || {}),
+    },
   });
   const data = await response.json();
   if (!response.ok) {
@@ -173,6 +176,31 @@ async function api(path, options = {}) {
 }
 
 const delay = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+function createIdempotencyKey() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return `vitamine-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function submitCloudJob(path, options = {}) {
+  const idempotencyKey = createIdempotencyKey();
+  const request = {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      "Idempotency-Key": idempotencyKey,
+    },
+  };
+  try {
+    return await api(path, request);
+  } catch (error) {
+    if (error.status) throw error;
+    await delay(300);
+    return api(path, request);
+  }
+}
 
 function accountInitials(account = {}) {
   const source = String(account.display_name || account.email || "VitaMine").trim();
@@ -1368,7 +1396,8 @@ async function importCvFiles(files) {
     const uploadPath = state.cloud.enabled && state.cloud.workspace?.background_jobs
       ? "/api/cloud/jobs/cv-import"
       : "/api/cv-import/upload";
-    let data = await api(uploadPath, {
+    const submit = uploadPath.startsWith("/api/cloud/jobs/") ? submitCloudJob : api;
+    let data = await submit(uploadPath, {
       method: "POST",
       body: form,
     });
@@ -3818,11 +3847,12 @@ function impactFactor(pub) {
   return escapeHtml(`${pub.impact_factor}${year}`);
 }
 
-async function runAction(path, doneText, workingText = "Working...") {
+async function runAction(path, doneText, workingText = "Working...", options = {}) {
   const stopProcessing = startProcessing(workingText);
   setActionButtons(true);
   try {
-    let data = await api(path, { method: "POST" });
+    const submit = options.idempotent ? submitCloudJob : api;
+    let data = await submit(path, { method: "POST" });
     if (data.background && data.job?.id) {
       state.cloud.activeJob = data.job;
       setCloudJobControls(true);
@@ -4089,7 +4119,12 @@ async function init() {
     const enrichPath = state.cloud.enabled && state.cloud.workspace?.background_jobs
       ? "/api/cloud/jobs/enrich-cv"
       : "/api/actions/enrich-cv";
-    const data = await runAction(enrichPath, "CV enrichment complete", "Enriching CV from databases and online sources...");
+    const data = await runAction(
+      enrichPath,
+      "CV enrichment complete",
+      "Enriching CV from databases and online sources...",
+      { idempotent: enrichPath.startsWith("/api/cloud/jobs/") },
+    );
     setStatus(enrichmentSummaryText(data));
     actionLog("#syncOutput", data);
     await loadImportInbox();

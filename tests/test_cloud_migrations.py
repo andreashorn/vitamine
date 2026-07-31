@@ -160,6 +160,44 @@ class CloudMigrationTests(unittest.TestCase):
             ).fetchone()
         self.assertIsNotNone(exists)
 
+    def test_version_three_store_receives_background_job_idempotency_schema(self):
+        self.seed_version(3)
+        with sqlite3.connect(self.database) as con:
+            con.execute(
+                """
+                CREATE TABLE background_jobs (
+                    id TEXT PRIMARY KEY,
+                    member_id TEXT NOT NULL,
+                    database_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO background_jobs(id, member_id, database_id, kind)
+                VALUES ('job-1', 'member-1', 'database-1', 'enrich_cv')
+                """
+            )
+            con.commit()
+        initialize_database()
+        self.assertEqual(self.schema_version(), CLOUD_SCHEMA_VERSION)
+        self.assertIn("idempotency_key", self.table_columns("background_jobs"))
+        self.assertIn("request_fingerprint", self.table_columns("background_jobs"))
+        with sqlite3.connect(self.database) as con:
+            existing = con.execute(
+                "SELECT id, kind FROM background_jobs WHERE id='job-1'"
+            ).fetchone()
+            index = con.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type='index' AND name='idx_background_jobs_idempotency'
+                """
+            ).fetchone()
+        self.assertEqual(existing, ("job-1", "enrich_cv"))
+        self.assertIsNotNone(index)
+
     def test_repeated_migration_is_a_noop(self):
         initialize_database()
         with connect() as con:

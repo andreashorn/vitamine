@@ -177,7 +177,7 @@ rejection, the SQLite compatibility path, the full unit-test suite, repository
 audit, and `git diff --check`. The disposable PostgreSQL test remains
 explicitly skipped unless `VITAMINE_TEST_POSTGRES_URL` is supplied.
 
-### AUTO-004 [ ] - Make background-job submission idempotent
+### AUTO-004 [x] - Make background-job submission idempotent
 
 Risk: medium
 
@@ -210,7 +210,14 @@ Stop conditions:
   retry policy beyond duplicate prevention.
 - The change would affect a running production job or require a live migration.
 
-Evidence: pending
+Evidence: schema migration 4 and the keyed job creation path in
+`vitamine/cloud_app.py`, the single-retry browser submission helper in
+`vitamine/static/app.js`, and regression coverage in `tests/test_cloud_app.py`
+and `tests/test_cloud_migrations.py`; validated for identical enrichment and
+import replay, changed-payload and changed-operation conflicts, account
+isolation, legacy unkeyed behavior, browser key reuse, additive migration from
+schema 3, the complete unit-test suite, repository audit, and
+`git diff --check`.
 
 ### AUTO-005 [ ] - Add privacy-safe error identifiers and structured logging
 

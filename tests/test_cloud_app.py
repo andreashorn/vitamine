@@ -271,6 +271,112 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
         self.assertIn("already has a background process", duplicate.json()["detail"])
 
+    def test_cloud_enrichment_retry_reuses_the_idempotent_job(self):
+        self.create_account()
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        headers = {"Idempotency-Key": "enrich-retry-0001"}
+
+        # Treat the first response as lost and submit the same logical request again.
+        first = self.client.post("/api/cloud/jobs/enrich-cv", headers=headers)
+        retried = self.client.post("/api/cloud/jobs/enrich-cv", headers=headers)
+
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertFalse(first.json()["idempotent_replay"])
+        self.assertTrue(retried.json()["idempotent_replay"])
+        self.assertEqual(first.json()["job"]["id"], retried.json()["job"]["id"])
+        with sqlite3.connect(self.db_path) as con:
+            count = con.execute("SELECT COUNT(*) FROM background_jobs").fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_cv_import_idempotency_rejects_changed_payload_or_operation(self):
+        self.create_account()
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        headers = {"Idempotency-Key": "import-conflict-0001"}
+        original = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            headers=headers,
+            files={"files": ("cv.txt", b"Original CV", "text/plain")},
+        )
+        retried = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            headers=headers,
+            files={"files": ("cv.txt", b"Original CV", "text/plain")},
+        )
+        changed = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            headers=headers,
+            files={"files": ("cv.txt", b"Changed CV", "text/plain")},
+        )
+        changed_operation = self.client.post("/api/cloud/jobs/enrich-cv", headers=headers)
+
+        self.assertEqual(original.status_code, 202, original.text)
+        self.assertEqual(retried.status_code, 200, retried.text)
+        self.assertTrue(retried.json()["idempotent_replay"])
+        self.assertEqual(original.json()["job"]["id"], retried.json()["job"]["id"])
+        self.assertEqual(changed.status_code, 409, changed.text)
+        self.assertEqual(changed_operation.status_code, 409, changed_operation.text)
+        self.assertIn("different background request", changed.json()["detail"])
+        self.assertIn("different background request", changed_operation.json()["detail"])
+        with sqlite3.connect(self.db_path) as con:
+            count = con.execute("SELECT COUNT(*) FROM background_jobs").fetchone()[0]
+        self.assertEqual(count, 1)
+        job_directories = [
+            path
+            for path in (Path(self.directory.name) / "jobs").iterdir()
+            if path.is_dir()
+        ]
+        self.assertEqual(len(job_directories), 1)
+
+    def test_idempotency_keys_are_isolated_between_accounts(self):
+        self.create_account(email="first@example.org")
+        first_workspace = self.client.post("/gateway/workspace/new")
+        self.assertEqual(first_workspace.status_code, 200, first_workspace.text)
+        headers = {"Idempotency-Key": "shared-across-owners-0001"}
+        first = self.client.post("/api/cloud/jobs/enrich-cv", headers=headers)
+        self.assertEqual(first.status_code, 202, first.text)
+
+        second_client = TestClient(app)
+        try:
+            code = create_invitation("Second account", max_uses=1, expires_days=1)
+            redeemed = second_client.post("/api/invitations/redeem", json={"code": code})
+            self.assertEqual(redeemed.status_code, 200, redeemed.text)
+            registered = second_client.post(
+                "/api/account/register",
+                json={
+                    "email": "second@example.org",
+                    "password": "correct-horse-battery-staple",
+                    "display_name": "Second Researcher",
+                },
+            )
+            self.assertEqual(registered.status_code, 200, registered.text)
+            second_workspace = second_client.post("/gateway/workspace/new")
+            self.assertEqual(second_workspace.status_code, 200, second_workspace.text)
+            second = second_client.post("/api/cloud/jobs/enrich-cv", headers=headers)
+        finally:
+            second_client.close()
+
+        self.assertEqual(second.status_code, 202, second.text)
+        self.assertNotEqual(first.json()["job"]["id"], second.json()["job"]["id"])
+        with sqlite3.connect(self.db_path) as con:
+            owners = con.execute(
+                "SELECT COUNT(DISTINCT member_id) FROM background_jobs WHERE idempotency_key=?",
+                (headers["Idempotency-Key"],),
+            ).fetchone()[0]
+        self.assertEqual(owners, 2)
+
+    def test_invalid_idempotency_key_is_rejected(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        response = self.client.post(
+            "/api/cloud/jobs/enrich-cv",
+            headers={"Idempotency-Key": "short"},
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("Idempotency-Key", response.json()["detail"])
+
     def test_queued_cv_import_executes_and_refreshes_the_open_workspace(self):
         self.create_account()
         opened = self.client.post("/gateway/workspace/new")
@@ -353,6 +459,10 @@ class CloudAppTests(unittest.TestCase):
             '$("#cloudMyCvs").addEventListener("click", returnToWorkspaceHome)',
             script.text,
         )
+        self.assertIn("function createIdempotencyKey()", script.text)
+        self.assertIn("async function submitCloudJob(path, options = {})", script.text)
+        self.assertIn('"Idempotency-Key": idempotencyKey', script.text)
+        self.assertIn("return api(path, request);", script.text)
         self.assertIn('id="addIdentifier"', page.text)
         self.assertIn('id="identifierDialog"', page.text)
         self.assertNotIn('id="newIdentifier"', page.text)

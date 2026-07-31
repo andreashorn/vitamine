@@ -76,6 +76,14 @@ these jobs. Queued/running jobs are requeued after a service restart; an
 interrupted LLM step may restart from the beginning. The browser polls
 authenticated job-status routes and restores progress after reopening.
 
+Import and enrichment submissions use a fresh browser-generated
+`Idempotency-Key` for each intentional operation. If the browser loses the
+response, its single automatic transport retry reuses that key. The gateway
+stores a hash of the canonical request metadata and returns the original job
+for an identical owner/CV/request; conflicting reuse receives HTTP 409. Keys
+are scoped to both the authenticated account and CV. Legacy clients without a
+key retain the existing one-active-job-per-CV behavior.
+
 Institution geocoding is a separate lightweight worker task. It runs
 opportunistically after a saved institution, accepted imported person field,
 or ORCID link/refresh. Existing complete coordinates are treated as manual
