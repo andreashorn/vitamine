@@ -51,7 +51,21 @@ class DevelopmentBatchRunnerTests(unittest.TestCase):
         self.fake_bin = temporary_root / "fake-bin"
         self.fake_bin.mkdir()
         fake_codex = self.fake_bin / "codex"
-        fake_codex.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        fake_codex.write_text(
+            """#!/usr/bin/env bash
+seen_exec=0
+for argument in "$@"; do
+  if [[ "$argument" == "exec" ]]; then
+    seen_exec=1
+  elif ((seen_exec)) && [[ "$argument" == "--ask-for-approval" ]]; then
+    echo "approval option appeared after exec" >&2
+    exit 64
+  fi
+done
+exit 0
+""",
+            encoding="utf-8",
+        )
         fake_codex.chmod(0o755)
 
     def tearDown(self) -> None:

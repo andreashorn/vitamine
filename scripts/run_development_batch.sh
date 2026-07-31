@@ -171,11 +171,12 @@ and clean worktree.
 PROMPT
 
   echo "Starting $task_id on $before_branch"
-  if ! "$codex_binary" exec \
+  if ! "$codex_binary" \
+    --ask-for-approval never \
+    exec \
     --ephemeral \
     --ignore-user-config \
     --sandbox workspace-write \
-    --ask-for-approval never \
     --cd "$repo_root" \
     --output-last-message "$result_path" \
     "$prompt"; then
