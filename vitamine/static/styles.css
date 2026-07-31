@@ -337,6 +337,40 @@ a.disabledLink {
   justify-content: flex-end;
 }
 
+.topbarEnrichButton {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  border-color: #0b645e;
+  border-radius: 8px;
+  padding: 9px 15px;
+  background: var(--accent);
+  box-shadow: 0 3px 9px rgb(15 118 110 / 20%);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.topbarEnrichButton:hover {
+  border-color: #084f4a;
+  background: #0b645e;
+}
+
+.topbarEnrichButton:focus-visible {
+  outline: 3px solid rgb(15 118 110 / 24%);
+  outline-offset: 2px;
+}
+
+.topbarEnrichIcon {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .cloudAccountMenu {
   position: relative;
 }
@@ -3098,6 +3132,10 @@ label.invalid input {
   .globalActivity {
     flex-basis: auto;
     width: 100%;
+  }
+
+  .actions {
+    align-self: flex-end;
   }
 
   .promptExportIntro {

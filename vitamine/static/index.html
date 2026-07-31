@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260731-citation-layout">
+  <link rel="stylesheet" href="/static/styles.css?v=20260731-topbar-enrich">
 </head>
 <body>
   <header class="topbar">
@@ -27,6 +27,13 @@
       </details>
     </div>
     <div class="actions">
+      <button id="enrichCvDashboard" class="topbarEnrichButton" type="button" title="Find and review information from trusted research databases and online profiles">
+        <svg class="topbarEnrichIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="m12 3 1.35 4.15L17.5 8.5l-4.15 1.35L12 14l-1.35-4.15L6.5 8.5l4.15-1.35L12 3Z"></path>
+          <path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"></path>
+        </svg>
+        <span>Enrich CV</span>
+      </button>
       <div id="cloudAccountMenu" class="cloudAccountMenu" hidden>
         <button id="cloudAccountMenuButton" class="cloudAccountMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">
           <span id="cloudAccountInitials" aria-hidden="true">VM</span>
@@ -238,7 +245,6 @@
               </div>
             </form>
             <div class="buttonRow">
-              <button id="enrichCvDashboard" type="button">Enrich CV from databases / online sources</button>
               <button id="syncZoteroDashboard" type="button">Pull from Zotero</button>
             </div>
             <div class="enrichmentSettings">
@@ -780,6 +786,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260731-idempotent-jobs"></script>
+  <script src="/static/app.js?v=20260731-topbar-enrich"></script>
 </body>
 </html>
