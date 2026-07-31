@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import re
 import secrets
@@ -75,6 +76,8 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
+CLOUD_SCHEMA_VERSION = 3
+LOGGER = logging.getLogger("vitamine.cloud")
 
 
 SCHEMA = """
@@ -804,14 +807,37 @@ def connect() -> Iterator[GatewayConnection]:
         raw.close()
 
 
-def initialize_database() -> None:
-    with connect() as con:
-        con.executescript(POSTGRES_SCHEMA if con.backend == "postgres" else SCHEMA)
-        if con.backend == "postgres":
-            con.execute("ALTER TABLE public_profiles ADD COLUMN IF NOT EXISTS portrait_blob BYTEA")
-            con.execute("ALTER TABLE public_profiles ADD COLUMN IF NOT EXISTS portrait_mime_type TEXT")
-            return
-        member_columns = {row["name"] for row in con.execute("PRAGMA table_info(members)").fetchall()}
+def execute_sql_batch(con: GatewayConnection, sql: str) -> None:
+    """Execute simple schema statements without SQLite executescript auto-commits."""
+    for statement in sql.split(";"):
+        statement = statement.strip()
+        if statement:
+            con.execute(statement)
+
+
+def sqlite_column_names(con: GatewayConnection, table: str) -> set[str]:
+    return {row["name"] for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def migration_001_initial_cloud_schema(con: GatewayConnection) -> None:
+    execute_sql_batch(con, POSTGRES_SCHEMA if con.backend == "postgres" else SCHEMA)
+
+
+def migration_002_account_workspaces(con: GatewayConnection) -> None:
+    # CREATE IF NOT EXISTS statements fill tables that were introduced during
+    # the account-storage cutover; explicit columns upgrade the earlier tables.
+    execute_sql_batch(con, POSTGRES_SCHEMA if con.backend == "postgres" else SCHEMA)
+    if con.backend == "postgres":
+        for name, definition in {
+            "email": "TEXT",
+            "password_hash": "TEXT",
+            "display_name": "TEXT NOT NULL DEFAULT ''",
+            "account_created_at": "TEXT",
+        }.items():
+            con.execute(f"ALTER TABLE members ADD COLUMN IF NOT EXISTS {name} {definition}")
+        con.execute("ALTER TABLE workspace_sessions ADD COLUMN IF NOT EXISTS database_id TEXT")
+    else:
+        member_columns = sqlite_column_names(con, "members")
         for name, definition in {
             "email": "TEXT",
             "password_hash": "TEXT",
@@ -820,27 +846,92 @@ def initialize_database() -> None:
         }.items():
             if name not in member_columns:
                 con.execute(f"ALTER TABLE members ADD COLUMN {name} {definition}")
-        workspace_columns = {
-            row["name"] for row in con.execute("PRAGMA table_info(workspace_sessions)").fetchall()
-        }
-        if "database_id" not in workspace_columns:
+        if "database_id" not in sqlite_column_names(con, "workspace_sessions"):
             con.execute("ALTER TABLE workspace_sessions ADD COLUMN database_id TEXT")
-        profile_columns = {
-            row["name"] for row in con.execute("PRAGMA table_info(public_profiles)").fetchall()
-        }
+    con.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_members_email_unique
+        ON members(email)
+        WHERE email IS NOT NULL
+        """
+    )
+
+
+def migration_003_oauth_and_portraits(con: GatewayConnection) -> None:
+    # The latest idempotent definitions create the OAuth tables for v2 stores.
+    execute_sql_batch(con, POSTGRES_SCHEMA if con.backend == "postgres" else SCHEMA)
+    if con.backend == "postgres":
+        con.execute("ALTER TABLE public_profiles ADD COLUMN IF NOT EXISTS portrait_blob BYTEA")
+        con.execute("ALTER TABLE public_profiles ADD COLUMN IF NOT EXISTS portrait_mime_type TEXT")
+    else:
+        profile_columns = sqlite_column_names(con, "public_profiles")
         for name, definition in {
             "portrait_blob": "BLOB",
             "portrait_mime_type": "TEXT",
         }.items():
             if name not in profile_columns:
                 con.execute(f"ALTER TABLE public_profiles ADD COLUMN {name} {definition}")
+
+
+CLOUD_MIGRATIONS = (
+    (1, migration_001_initial_cloud_schema),
+    (2, migration_002_account_workspaces),
+    (3, migration_003_oauth_and_portraits),
+)
+
+
+def run_cloud_migrations(con: GatewayConnection) -> list[int]:
+    """Upgrade one cloud store transactionally and return applied versions."""
+    con.execute("BEGIN IMMEDIATE")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cloud_schema_metadata (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            version INTEGER NOT NULL CHECK (version >= 0),
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    row = con.execute(
+        "SELECT version FROM cloud_schema_metadata WHERE singleton=1"
+    ).fetchone()
+    if row is None:
         con.execute(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_members_email_unique
-            ON members(email)
-            WHERE email IS NOT NULL
-            """
+            INSERT INTO cloud_schema_metadata(singleton, version, updated_at)
+            VALUES (1, 0, ?)
+            """,
+            (utc_now(),),
         )
+        current_version = 0
+    else:
+        current_version = int(row["version"])
+    if current_version > CLOUD_SCHEMA_VERSION:
+        raise RuntimeError(
+            "Cloud database schema is newer than this VitaMine version supports "
+            f"({current_version} > {CLOUD_SCHEMA_VERSION})."
+        )
+    applied: list[int] = []
+    for version, migration in CLOUD_MIGRATIONS:
+        if version <= current_version:
+            continue
+        migration(con)
+        con.execute(
+            """
+            UPDATE cloud_schema_metadata
+            SET version=?, updated_at=?
+            WHERE singleton=1
+            """,
+            (version, utc_now()),
+        )
+        applied.append(version)
+        LOGGER.info("cloud_schema_migration_applied backend=%s version=%d", con.backend, version)
+    return applied
+
+
+def initialize_database() -> None:
+    with connect() as con:
+        run_cloud_migrations(con)
 
 
 def normalize_invite_code(code: str) -> str:

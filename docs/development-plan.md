@@ -131,7 +131,7 @@ CI audit step, and README usage/scope notes; validated against tracked and
 non-ignored proposed files, representative forbidden fixtures, the full unit
 test suite, and `git diff --check`.
 
-### AUTO-003 [ ] - Introduce explicit, versioned cloud database migrations
+### AUTO-003 [x] - Introduce explicit, versioned cloud database migrations
 
 Risk: medium
 
@@ -169,7 +169,13 @@ Stop conditions:
 - A migration cannot be made additive or safely reversible without a product
   decision.
 
-Evidence: pending
+Evidence: the versioned migration runner in `vitamine/cloud_app.py`,
+`tests/test_cloud_migrations.py`, and the backup/validation/rollback procedure
+in `docs/strato-deployment.md`; validated for fresh stores, two historical
+schema versions, repeated execution, transactional failure, future-version
+rejection, the SQLite compatibility path, the full unit-test suite, repository
+audit, and `git diff --check`. The disposable PostgreSQL test remains
+explicitly skipped unless `VITAMINE_TEST_POSTGRES_URL` is supplied.
 
 ### AUTO-004 [ ] - Make background-job submission idempotent
 

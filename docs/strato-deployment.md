@@ -233,6 +233,62 @@ Run relevant tests locally first. Preserve the dirty worktree and deploy only
 the intended files. Copy source into the matching paths below
 `/srv/vitamine-cloud/current`; do not flatten nested directories.
 
+### Cloud schema migration procedure
+
+The gateway records its cloud-store version in `cloud_schema_metadata`.
+Application startup applies ordered additive migrations in one transaction and
+refuses to open a schema newer than the running code understands. Migration
+logs contain only the backend and numeric version.
+
+Before deploying code with a new cloud migration:
+
+1. Confirm there are no running background jobs.
+2. Run and verify a fresh PostgreSQL backup:
+
+   ```sh
+   sudo systemctl start vitamine-cloud-backup.service
+   sudo journalctl -u vitamine-cloud-backup.service -n 30 --no-pager
+   sudo find /var/backups/vitamine-cloud/postgres -maxdepth 1 \
+     -type f -name 'vitamine-*.dump' -printf '%TY-%Tm-%Td %TH:%TM %s %p\n'
+   ```
+
+3. Record the pre-deployment application revision and database schema version:
+
+   ```sh
+   git -C /srv/vitamine-cloud/current rev-parse HEAD
+   sudo -u postgres psql -d vitamine -c \
+     'SELECT version, updated_at FROM cloud_schema_metadata WHERE singleton=1;'
+   ```
+
+After restart, verify the service health, migration log, current version, and
+representative account/CV operations:
+
+```sh
+curl -fsS http://127.0.0.1:8766/health
+sudo journalctl -u vitamine-cloud.service -n 100 --no-pager \
+  | grep cloud_schema_migration
+sudo -u postgres psql -d vitamine -c \
+  'SELECT version, updated_at FROM cloud_schema_metadata WHERE singleton=1;'
+```
+
+Migrations are additive, but rolling application code back across a schema
+version is not assumed safe. If validation fails, stop VitaMine, preserve the
+failed database for diagnosis, restore the verified pre-migration dump using
+the commands below, redeploy the recorded application revision, and only then
+restart the service. Never attempt to lower the version number manually.
+
+```sh
+sudo systemctl stop vitamine-cloud.service
+sudo -u postgres pg_dump --format=custom --file=/tmp/vitamine-failed.dump vitamine
+sudo -u postgres pg_restore --clean --if-exists --exit-on-error \
+  --dbname=vitamine /var/backups/vitamine-cloud/postgres/<verified-pre-migration.dump>
+sudo systemctl start vitamine-cloud.service
+curl -fsS http://127.0.0.1:8766/health
+```
+
+Treat `/tmp/vitamine-failed.dump` as sensitive and move it to protected backup
+storage or remove it after diagnosis.
+
 Static HTML/JS changes can be copied without restarting the service. Bump the
 asset query string in `index.html` when JavaScript changes so browsers do not
 reuse an old script.
