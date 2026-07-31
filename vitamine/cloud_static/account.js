@@ -32,9 +32,6 @@ const elements = {
   profileSetupMessage: $("#profileSetupMessage"),
   closeProfileSetup: $("#closeProfileSetup"),
   premiumBalance: $("#premiumBalance"),
-  premiumCredit: $("#premiumCredit"),
-  premiumCharged: $("#premiumCharged"),
-  premiumWholesale: $("#premiumWholesale"),
   premiumChart: $("#premiumChart"),
   premiumRecent: $("#premiumRecent"),
 };
@@ -142,9 +139,6 @@ function premiumOperationLabel(value) {
 function renderPremiumAccount(payload) {
   elements.premiumBalance.textContent = formatUsd(payload.balance_microusd);
   elements.premiumBalance.classList.toggle("negative", Number(payload.balance_microusd) < 0);
-  elements.premiumCredit.textContent = formatUsd(payload.credited_microusd);
-  elements.premiumCharged.textContent = formatUsd(payload.charged_microusd, 4);
-  elements.premiumWholesale.textContent = formatUsd(payload.wholesale_cost_microusd, 4);
   const daily = payload.daily || [];
   const maximum = Math.max(1, ...daily.map((row) => Number(row.charged_microusd || 0)));
   elements.premiumChart.replaceChildren(...daily.map((row) => {
