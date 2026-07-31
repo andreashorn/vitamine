@@ -17,6 +17,7 @@ from vitamine.cloud_app import (
     claim_next_background_job,
     create_blank_workspace_database,
     execute_background_job,
+    fail_background_job,
     register_workspace,
     workspace_worker_is_running,
 )
@@ -389,6 +390,85 @@ class CloudAppTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400, response.text)
         self.assertIn("Idempotency-Key", response.json()["detail"])
+
+    def test_unexpected_request_failure_returns_correlated_privacy_safe_support_id(self):
+        private_values = (
+            "confidential-cv-text oauth-secret-value private-cookie-value invitation-value"
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+        try:
+            with (
+                patch("vitamine.cloud_app.connect", side_effect=RuntimeError(private_values)),
+                self.assertLogs("vitamine.cloud", level="ERROR") as captured,
+            ):
+                response = client.get(
+                    "/health",
+                    headers={"Cookie": "vitamine_session=private-cookie-value"},
+                )
+        finally:
+            client.close()
+
+        self.assertEqual(response.status_code, 500, response.text)
+        support_id = response.json()["support_id"]
+        self.assertRegex(support_id, r"^VM-[A-F0-9]{32}$")
+        self.assertIn(support_id, response.json()["detail"])
+        record = json.loads(captured.records[-1].getMessage())
+        self.assertEqual(record["event"], "unexpected_request_failure")
+        self.assertEqual(record["support_id"], support_id)
+        self.assertEqual(record["endpoint"], "/health")
+        self.assertEqual(record["category"], "internal_error")
+        combined = response.text + "\n" + "\n".join(
+            item.getMessage() for item in captured.records
+        )
+        for private_value in private_values.split():
+            self.assertNotIn(private_value, combined)
+
+    def test_expected_request_error_keeps_status_without_support_identifier(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        with patch("vitamine.cloud_app.log_support_event") as log_event:
+            response = self.client.post(
+                "/api/cloud/jobs/enrich-cv",
+                headers={"Idempotency-Key": "short"},
+            )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertNotIn("support_id", response.json())
+        log_event.assert_not_called()
+
+    def test_background_job_failure_stores_and_logs_only_support_metadata(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job_id = queued.json()["job"]["id"]
+        private_values = "confidential-cv-text oauth-secret-value private-cookie-value"
+
+        with self.assertLogs("vitamine.cloud", level="ERROR") as captured:
+            fail_background_job(job_id, RuntimeError(private_values))
+
+        failed = self.client.get(f"/api/cloud/jobs/{job_id}")
+        self.assertEqual(failed.status_code, 200, failed.text)
+        job = failed.json()["job"]
+        self.assertEqual(job["status"], "failed")
+        self.assertRegex(job["support_id"], r"^VM-[A-F0-9]{32}$")
+        self.assertIn(job["support_id"], job["error"])
+        record = json.loads(captured.records[-1].getMessage())
+        self.assertEqual(record["event"], "background_job_failed")
+        self.assertEqual(record["support_id"], job["support_id"])
+        self.assertEqual(record["job_id"], job_id)
+        self.assertEqual(record["job_kind"], "enrich_cv")
+        combined = job["error"] + "\n" + "\n".join(
+            item.getMessage() for item in captured.records
+        )
+        for private_value in private_values.split():
+            self.assertNotIn(private_value, combined)
+        with sqlite3.connect(self.db_path) as con:
+            stored = con.execute(
+                "SELECT support_id, error_message FROM background_jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+        self.assertEqual(stored[0], job["support_id"])
+        self.assertNotIn("confidential-cv-text", stored[1])
 
     def test_queued_cv_import_executes_and_refreshes_the_open_workspace(self):
         self.create_account()

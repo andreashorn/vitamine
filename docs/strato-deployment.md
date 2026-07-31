@@ -249,6 +249,35 @@ Uvicorn access-log entries appear only after a request completes. During a long
 CV import, also inspect the uploaded file, worker process, and outbound
 connection before concluding that the progress UI is stuck.
 
+### Support identifiers and privacy-safe failures
+
+Unexpected gateway failures and failed background jobs show the tester a
+random support identifier such as `VM-…`. The same identifier is recorded in a
+single-line JSON log entry with structural metadata only: timestamp, event,
+high-level failure category, and either the endpoint/method or job ID/kind.
+Exception messages, tracebacks, request bodies and headers, CV content,
+filenames, credentials, invitation codes, and cookies are deliberately not
+included. Background-job identifiers are also stored in
+`background_jobs.support_id`.
+
+Find the corresponding gateway record without broad log disclosure:
+
+```sh
+sudo journalctl -u vitamine-cloud.service --no-pager | grep -F 'VM-PASTE-ID-HERE'
+```
+
+For a background job, correlate its safe structural state in PostgreSQL:
+
+```sh
+sudo -u postgres psql -d vitamine -c \
+  "SELECT id, kind, status, support_id, created_at, finished_at FROM background_jobs WHERE support_id = 'VM-PASTE-ID-HERE';"
+```
+
+It is safe to ask a tester for the support ID, approximate time, operation they
+were attempting, browser/version, and reproduction steps. Do not ask them to
+send a CV, database, password, API/OAuth credential, invitation code, cookie,
+or full request/response headers merely to investigate a support ID.
+
 ## Private-data encryption key
 
 Production must set `VITAMINE_DATA_ENCRYPTION_KEY` in

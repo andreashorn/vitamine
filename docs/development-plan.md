@@ -219,7 +219,7 @@ isolation, legacy unkeyed behavior, browser key reuse, additive migration from
 schema 3, the complete unit-test suite, repository audit, and
 `git diff --check`.
 
-### AUTO-005 [ ] - Add privacy-safe error identifiers and structured logging
+### AUTO-005 [x] - Add privacy-safe error identifiers and structured logging
 
 Risk: medium
 
@@ -254,7 +254,13 @@ Stop conditions:
   production log change is required.
 - Useful correlation would require storing user document content.
 
-Evidence: pending
+Evidence: schema migration 6, the unexpected-request handler and background-job
+failure path in `vitamine/cloud_app.py`, operator guidance in
+`docs/strato-deployment.md`, and regression coverage in
+`tests/test_cloud_app.py` and `tests/test_cloud_migrations.py`; validated for
+request and job correlation, representative secret/CV redaction, preservation
+of expected HTTP errors, additive migration from schema 5, the complete unit
+test suite, repository audit, and `git diff --check`.
 
 ### AUTO-006 [ ] - Record privacy-minimal LLM usage metadata
 

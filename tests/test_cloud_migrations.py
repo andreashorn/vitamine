@@ -200,6 +200,43 @@ class CloudMigrationTests(unittest.TestCase):
         self.assertEqual(existing, ("job-1", "enrich_cv"))
         self.assertIsNotNone(index)
 
+    def test_version_five_store_receives_background_job_support_identifiers(self):
+        self.seed_version(5)
+        with sqlite3.connect(self.database) as con:
+            con.execute(
+                """
+                CREATE TABLE background_jobs (
+                    id TEXT PRIMARY KEY,
+                    member_id TEXT NOT NULL,
+                    database_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    error_message TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO background_jobs(id, member_id, database_id, kind, error_message)
+                VALUES ('job-1', 'member-1', 'database-1', 'enrich_cv', 'historical failure')
+                """
+            )
+            con.commit()
+        initialize_database()
+        self.assertEqual(self.schema_version(), CLOUD_SCHEMA_VERSION)
+        self.assertIn("support_id", self.table_columns("background_jobs"))
+        with sqlite3.connect(self.database) as con:
+            historical = con.execute(
+                "SELECT error_message, support_id FROM background_jobs WHERE id='job-1'"
+            ).fetchone()
+            index = con.execute(
+                """
+                SELECT 1 FROM sqlite_master
+                WHERE type='index' AND name='idx_background_jobs_support_id'
+                """
+            ).fetchone()
+        self.assertEqual(historical, ("historical failure", None))
+        self.assertIsNotNone(index)
+
     def test_version_four_store_encrypts_cv_blob_and_removes_private_projections(self):
         initialize_database()
         workspace = Path(self.directory.name) / "workspace.vitamine"

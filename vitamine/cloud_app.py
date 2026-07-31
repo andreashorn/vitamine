@@ -78,7 +78,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 5
+CLOUD_SCHEMA_VERSION = 6
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -177,6 +177,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     progress_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT,
     error_message TEXT,
+    support_id TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
     heartbeat_at TEXT,
@@ -355,6 +356,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     progress_json TEXT NOT NULL DEFAULT '{}',
     result_json TEXT,
     error_message TEXT,
+    support_id TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
     heartbeat_at TEXT,
@@ -520,6 +522,40 @@ class ProfileHeaderRequest(BaseModel):
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def new_support_id() -> str:
+    return f"VM-{secrets.token_hex(16).upper()}"
+
+
+def failure_category(error: Exception) -> str:
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, OSError):
+        return "io_error"
+    if isinstance(error, ValueError):
+        return "invalid_internal_state"
+    return "internal_error"
+
+
+def log_support_event(event: str, support_id: str, **safe_fields: Any) -> None:
+    # Values passed here must be structural allowlisted metadata. In particular,
+    # never pass exception messages, request headers/bodies, filenames, or CV data.
+    record = {
+        "event": event,
+        "support_id": support_id,
+        "timestamp": utc_now(),
+        **safe_fields,
+    }
+    LOGGER.error(
+        json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def request_endpoint_template(request: Request) -> str:
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return str(template) if template else "<unmatched>"
 
 
 def cloud_db_path() -> Path:
@@ -972,12 +1008,27 @@ def migration_005_encrypt_private_cv_storage(con: GatewayConnection) -> None:
         con.execute("UPDATE account_databases SET sqlite_blob=? WHERE id=?", (encrypted, row["id"]))
 
 
+def migration_006_background_job_support_ids(con: GatewayConnection) -> None:
+    if con.backend == "postgres":
+        con.execute("ALTER TABLE background_jobs ADD COLUMN IF NOT EXISTS support_id TEXT")
+    elif "support_id" not in sqlite_column_names(con, "background_jobs"):
+        con.execute("ALTER TABLE background_jobs ADD COLUMN support_id TEXT")
+    con.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_support_id
+        ON background_jobs(support_id)
+        WHERE support_id IS NOT NULL
+        """
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
     (3, migration_003_oauth_and_portraits),
     (4, migration_004_background_job_idempotency),
     (5, migration_005_encrypt_private_cv_storage),
+    (6, migration_006_background_job_support_ids),
 )
 
 
@@ -1703,6 +1754,7 @@ def background_job_payload(row: Any, *, include_result: bool = True) -> dict[str
         "progress": parsed_json_object(row["progress_json"]),
         "result": result,
         "error": row["error_message"] or "",
+        "support_id": row["support_id"] or "",
         "created_at": row["created_at"],
         "started_at": row["started_at"],
         "finished_at": row["finished_at"],
@@ -2151,7 +2203,6 @@ def execute_background_job(job: Any) -> None:
 
 
 def fail_background_job(job_id: str, error: Exception) -> None:
-    message = str(error).strip()[-4000:] or "The background process failed."
     if JOB_STOP.is_set():
         with connect() as con:
             con.execute(
@@ -2175,17 +2226,30 @@ def fail_background_job(job_id: str, error: Exception) -> None:
             )
         shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
         return
+    support_id = new_support_id()
+    category = failure_category(error)
+    message = f"The background process failed. Support ID: {support_id}"
     now = utc_now()
     with connect() as con:
+        job = con.execute(
+            "SELECT kind FROM background_jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        job_kind = (
+            str(job["kind"])
+            if job and job["kind"] in {"cv_import", "enrich_cv"}
+            else "unknown"
+        )
         con.execute(
             """
             UPDATE background_jobs
-            SET status='failed', error_message=?, heartbeat_at=?, finished_at=?,
+            SET status='failed', error_message=?, support_id=?, heartbeat_at=?, finished_at=?,
                 updated_at=?, progress_json=?
             WHERE id=?
             """,
             (
                 message,
+                support_id,
                 now,
                 now,
                 now,
@@ -2193,6 +2257,13 @@ def fail_background_job(job_id: str, error: Exception) -> None:
                 job_id,
             ),
         )
+    log_support_event(
+        "background_job_failed",
+        support_id,
+        category=category,
+        job_id=job_id,
+        job_kind=job_kind,
+    )
     shutil.rmtree(job_root() / job_id, ignore_errors=True)
     shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
 
@@ -2545,6 +2616,29 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.exception_handler(Exception)
+async def unexpected_request_failure(request: Request, error: Exception) -> JSONResponse:
+    support_id = new_support_id()
+    log_support_event(
+        "unexpected_request_failure",
+        support_id,
+        category=failure_category(error),
+        endpoint=request_endpoint_template(request),
+        method=(
+            request.method
+            if request.method in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+            else "OTHER"
+        ),
+    )
+    return JSONResponse(
+        {
+            "detail": f"Something went wrong. Support ID: {support_id}",
+            "support_id": support_id,
+        },
+        status_code=500,
+    )
 
 
 @app.on_event("startup")
