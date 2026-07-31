@@ -69,6 +69,16 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(year_2024["publications_published"], 2)
             self.assertEqual(year_2024["impact_factor_sum"], 5.2)
             self.assertEqual(year_2024["impact_factor_count"], 1)
+            first_last = payload["citation_profile"]["first_last_author"]
+            self.assertEqual(first_last["citations"], 10)
+            self.assertEqual(first_last["h_index"], 1)
+            self.assertEqual(first_last["i10_index"], 1)
+            first_last_recent = payload["citation_profile"][
+                "first_last_author_since_yearly_citations"
+            ]
+            self.assertEqual(first_last_recent["citations"], 4)
+            self.assertEqual(first_last_recent["h_index"], 1)
+            self.assertEqual(first_last_recent["i10_index"], 0)
 
     def test_dashboard_uses_public_facing_metric_labels(self):
         script = (
@@ -85,6 +95,8 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("Combined journal Impact Factors", script)
         self.assertIn("First/last-author citations", script)
         self.assertIn("citationYearDetail", script)
+        self.assertIn("first_last_author_since_yearly_citations", script)
+        self.assertIn("citationYearDetail isEmpty", script)
         document = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")

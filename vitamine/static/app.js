@@ -1674,6 +1674,8 @@ function renderCitationProfile(profile) {
   if (!coverage || !table || !chart) return;
   const all = profile.all || {};
   const recent = profile.since_yearly_citations || profile.since_publication_year || {};
+  const firstLast = profile.first_last_author || {};
+  const firstLastRecent = profile.first_last_author_since_yearly_citations || {};
   const sinceYear = profile.since_year || "";
   coverage.textContent = `${formatMetricNumber(profile.citation_metric_count || 0)} publications with OpenAlex citation data`;
   table.innerHTML = `
@@ -1689,6 +1691,18 @@ function renderCitationProfile(profile) {
     <span>i10-index</span>
     <strong>${formatMetricNumber(all.i10_index)}</strong>
     <strong>${formatMetricNumber(recent.i10_index)}</strong>
+    <span class="citationMetricGroup">First/last-author publications</span>
+    <span></span>
+    <span></span>
+    <span>Citations</span>
+    <strong>${formatMetricNumber(firstLast.citations)}</strong>
+    <strong>${formatMetricNumber(firstLastRecent.citations)}</strong>
+    <span>h-index</span>
+    <strong>${formatMetricNumber(firstLast.h_index)}</strong>
+    <strong>${formatMetricNumber(firstLastRecent.h_index)}</strong>
+    <span>i10-index</span>
+    <strong>${formatMetricNumber(firstLast.i10_index)}</strong>
+    <strong>${formatMetricNumber(firstLastRecent.i10_index)}</strong>
   `;
   const years = profile.by_year || [];
   const maxCitations = Math.max(...years.map((row) => Number(row.citations || 0)), 0);
@@ -1720,7 +1734,7 @@ function renderCitationProfile(profile) {
           <div></div>
         </div>
       </div>
-      <div id="citationYearDetail" class="citationYearDetail" hidden></div>`
+      <div id="citationYearDetail" class="citationYearDetail isEmpty" aria-live="polite"></div>`
     : `<p class="emptyState">No yearly OpenAlex citation counts available yet.</p>`;
   if (years.length) {
     requestAnimationFrame(() => {
@@ -1731,7 +1745,7 @@ function renderCitationProfile(profile) {
     const barItems = chart.querySelectorAll(".citationBarItem");
     const hideDetail = () => {
       if (!detail) return;
-      detail.hidden = true;
+      detail.classList.add("isEmpty");
       barItems.forEach((item) => item.removeAttribute("aria-current"));
     };
     const showDetail = (item) => {
@@ -1765,9 +1779,11 @@ function renderCitationProfile(profile) {
           ${impactFactorCount === 1 ? "publication" : "publications"} published that year; it is not a paper-quality score.
         </small>
       `;
-      detail.hidden = false;
+      detail.classList.remove("isEmpty");
       barItems.forEach((candidate) => candidate.toggleAttribute("aria-current", candidate === item));
     };
+    showDetail(barItems[barItems.length - 1]);
+    hideDetail();
     barItems.forEach((item) => {
       item.addEventListener("mouseenter", () => showDetail(item));
       item.addEventListener("mouseleave", () => {

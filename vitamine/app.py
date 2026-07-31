@@ -1684,8 +1684,10 @@ def metrics() -> dict[str, Any]:
         ).fetchone()
         name_terms = researcher_name_terms(person)
         citation_counts = [int(row["citations"] or 0) for row in citation_rows]
+        first_last_citation_counts: list[int] = []
         since_year = time.localtime().tm_year - 5
         yearly_citations_by_work: list[int] = []
+        first_last_yearly_citations_by_work: list[int] = []
         citations_by_year: dict[str, int] = {}
         first_last_citations_by_year: dict[str, int] = {}
         publications_by_year: dict[str, int] = {}
@@ -1707,6 +1709,8 @@ def metrics() -> dict[str, Any]:
                 researcher_authorship(row.get("authors"), name_terms),
                 "first_last",
             )
+            if first_or_last_author:
+                first_last_citation_counts.append(int(row["citations"] or 0))
             yearly_total = 0
             try:
                 counts_by_year = json.loads(row.get("openalex_counts_by_year_json") or "[]")
@@ -1726,6 +1730,8 @@ def metrics() -> dict[str, Any]:
                     yearly_total += citations
             if yearly_total:
                 yearly_citations_by_work.append(yearly_total)
+                if first_or_last_author:
+                    first_last_yearly_citations_by_work.append(yearly_total)
         citation_years_received = [
             {
                 "year": year,
@@ -1755,6 +1761,18 @@ def metrics() -> dict[str, Any]:
                 "citations": sum(yearly_citations_by_work),
                 "h_index": h_index(yearly_citations_by_work),
                 "i10_index": sum(1 for count in yearly_citations_by_work if count >= 10),
+            },
+            "first_last_author": {
+                "citations": sum(first_last_citation_counts),
+                "h_index": h_index(first_last_citation_counts),
+                "i10_index": sum(1 for count in first_last_citation_counts if count >= 10),
+            },
+            "first_last_author_since_yearly_citations": {
+                "citations": sum(first_last_yearly_citations_by_work),
+                "h_index": h_index(first_last_yearly_citations_by_work),
+                "i10_index": sum(
+                    1 for count in first_last_yearly_citations_by_work if count >= 10
+                ),
             },
             "by_year": citation_years_received,
         },

@@ -13,7 +13,7 @@ class OnboardingTests(unittest.TestCase):
         html = (root / "vitamine" / "static" / "index.html").read_text()
         script = (root / "vitamine" / "static" / "app.js").read_text()
 
-        self.assertIn("20260731-enrichment-progress", html)
+        self.assertIn("20260731-citation-layout", html)
         self.assertIn('id="orcidOauthDescription"', html)
         self.assertIn('id="linkOrcid" class="orcidLinkButton"', html)
         self.assertGreaterEqual(html.count('class="orcidIdMark"'), 2)
