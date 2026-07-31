@@ -176,10 +176,8 @@ class CloudAppTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Finally, an academic CV manager that works.", response.text)
-        self.assertIn(
-            "Curate and manage your academic CVs for various\n          occasions, in multiple languages.",
-            response.text,
-        )
+        self.assertIn("Curate and manage your academic CVs for various", response.text)
+        self.assertIn("occasions, in multiple languages.", response.text)
         self.assertNotIn("share a profile", response.text)
 
     def test_uploaded_database_runs_original_vitamine_app_in_isolated_worker(self):
@@ -754,10 +752,24 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertEqual(page.headers["vary"], "Cookie")
         self.assertIn('autocomplete="username"', page.text)
-        self.assertIn("20260731-premium-account", page.text)
+        self.assertIn("20260801-scroll-story", page.text)
         self.assertIn('class="library-workspace"', page.text)
         self.assertIn('class="cv-library-panel"', page.text)
+        self.assertIn('href="#what-is-vitamine">What is VitaMine?</a>', page.text)
+        self.assertEqual(page.text.count('class="feature-chapter'), 7)
+        self.assertIn('id="typedExportPrompt"', page.text)
+        self.assertIn('class="feature-visual map-visual"', page.text)
+        self.assertIn("Map geometry: Natural Earth", page.text)
+        self.assertIn("A website you don’t have to maintain.", page.text)
+        self.assertIn("Managing your CV should be simple.", page.text)
+        self.assertIn("Test VitaMine for free", page.text)
         script = self.client.get("/assets/account.js")
+        self.assertIn("Download data (.vitamine)", script.text)
+        self.assertIn("has-profile-action", script.text)
+        self.assertIn("initializeFeatureStory", script.text)
+        self.assertIn("prefers-reduced-motion: reduce", script.text)
+        self.assertIn("scrollProgress", script.text)
+        self.assertIn("window.scrollTo({ top: 0", script.text)
         self.assertEqual(script.status_code, 200, script.text)
         handler = script.text.split(
             'elements.loginForm.addEventListener("submit"',

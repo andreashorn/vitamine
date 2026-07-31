@@ -254,8 +254,9 @@ function databaseCard(database, job = null) {
   open.textContent = "Open";
   open.addEventListener("click", () => openDatabase(database.id, open));
   const download = document.createElement("a");
-  download.className = "card-button";
-  download.textContent = "Download";
+  download.className = "card-button download";
+  download.textContent = "Download data (.vitamine)";
+  download.title = "Download this CV's portable SQLite database";
   download.href = `/api/account/databases/${encodeURIComponent(database.id)}/download`;
   if (job && ["queued", "running"].includes(job.status)) {
     download.classList.add("disabled");
@@ -274,11 +275,15 @@ function databaseCard(database, job = null) {
   const profile = document.createElement("button");
   profile.className = "card-button profile";
   const currentProfile = libraryPayload?.profile;
+  const canSelectForProfile = currentProfile?.source_database_id !== database.id;
   profile.textContent = currentProfile ? "Use for profile" : "Publish profile";
   profile.disabled = Boolean(job && ["queued", "running"].includes(job.status));
   profile.addEventListener("click", () => openProfileSetup(database));
   actions.append(open);
-  if (currentProfile?.source_database_id !== database.id) actions.append(profile);
+  if (canSelectForProfile) {
+    actions.classList.add("has-profile-action");
+    actions.append(profile);
+  }
   actions.append(download, rename, remove);
   article.append(title, meta);
   if (job) article.append(jobStatus);
@@ -487,6 +492,98 @@ elements.databaseFileInput.addEventListener("change", async () => {
     elements.databaseFileInput.value = "";
   }
 });
+
+function initializeFeatureStory() {
+  const revealItems = [...document.querySelectorAll(".reveal-item")];
+  const chapters = [...document.querySelectorAll(".feature-chapter")];
+  const prompt = $("#typedExportPrompt");
+  const exportChapter = $(".feature-export");
+  const networkChapter = $(".feature-network");
+  const networkCount = $("#networkCount");
+  const networkUnit = $("#networkUnit");
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const promptText = prompt?.dataset.text || "";
+  let scrollFrame = null;
+
+  chapters.forEach((chapter, index) => {
+    if (!chapter.id) chapter.id = `feature-${index + 1}`;
+  });
+  chapters.forEach((chapter, index) => {
+    const next = chapters[index + 1] || $("#story-finale");
+    const link = document.createElement("a");
+    link.className = "chapter-next";
+    link.href = `#${next.id}`;
+    link.setAttribute("aria-label", `Continue to ${next.querySelector("h3, h2")?.textContent || "the next section"}`);
+    link.textContent = "↓";
+    chapter.append(link);
+  });
+
+  function scrollProgress(element) {
+    if (!element) return 0;
+    const bounds = element.getBoundingClientRect();
+    const distance = Math.max(1, bounds.height - window.innerHeight);
+    return Math.max(0, Math.min(1, (14 - bounds.top) / distance));
+  }
+
+  function renderScrollSequences() {
+    scrollFrame = null;
+    if (reducedMotion) return;
+    const promptProgress = scrollProgress(exportChapter);
+    if (prompt) prompt.textContent = promptText.slice(0, Math.floor(promptText.length * promptProgress));
+
+    const networkProgress = scrollProgress(networkChapter);
+    document.querySelectorAll(".map-routes [data-network-stage]").forEach((route) => {
+      const stage = Number(route.dataset.networkStage);
+      const localProgress = Math.max(0, Math.min(1, (networkProgress - ((stage - 1) * .2)) / .24));
+      route.style.strokeDashoffset = String(1 - localProgress);
+    });
+    document.querySelectorAll(".map-points [data-network-stage]").forEach((point) => {
+      const stage = Number(point.dataset.networkStage);
+      if (stage === 0) return;
+      const localProgress = Math.max(0, Math.min(1, (networkProgress - ((stage - 1) * .2)) / .24));
+      point.style.opacity = String(localProgress);
+      point.style.transform = `scale(${.65 + (.35 * localProgress)})`;
+    });
+    const collaboratorCount = 1 + Math.round(networkProgress * 17);
+    if (networkCount) networkCount.textContent = String(collaboratorCount);
+    if (networkUnit) networkUnit.textContent = collaboratorCount === 1 ? "collaborator" : "collaborators";
+  }
+
+  function requestSequenceRender() {
+    if (scrollFrame !== null) return;
+    scrollFrame = window.requestAnimationFrame(renderScrollSequences);
+  }
+
+  if (!("IntersectionObserver" in window) || reducedMotion) {
+    revealItems.forEach((item) => item.classList.add("is-visible"));
+    if (prompt) prompt.textContent = promptText;
+    document.querySelectorAll(".map-routes [data-network-stage]").forEach((route) => { route.style.strokeDashoffset = "0"; });
+    document.querySelectorAll(".map-points [data-network-stage]").forEach((point) => { point.style.opacity = "1"; });
+    if (networkCount) networkCount.textContent = "18";
+    if (networkUnit) networkUnit.textContent = "collaborators";
+    return;
+  }
+
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add("is-visible");
+      observer.unobserve(entry.target);
+    }
+  }, { rootMargin: "0px 0px -12%", threshold: 0.16 });
+  revealItems.forEach((item) => observer.observe(item));
+  window.addEventListener("scroll", requestSequenceRender, { passive: true });
+  window.addEventListener("resize", requestSequenceRender);
+  renderScrollSequences();
+
+  $("#returnToTop")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+  });
+}
+
+initializeFeatureStory();
 
 (async function initialize() {
   showAuth();
