@@ -140,6 +140,7 @@ PROMPT
   echo "Starting $task_id on $before_branch"
   if ! codex exec \
     --ephemeral \
+    --ignore-user-config \
     --sandbox workspace-write \
     --ask-for-approval never \
     --cd "$repo_root" \
