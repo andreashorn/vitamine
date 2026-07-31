@@ -1,7 +1,7 @@
-# VitaMine cloud hurdles
+# VitaMine development plan
 
-Temporary working checklist, reconstructed from the current implementation,
-architecture decisions, deployment notes, and tests on 31 July 2026.
+Working roadmap reconstructed from the current implementation, architecture
+decisions, deployment notes, and tests on 31 July 2026.
 
 Status notation:
 
@@ -41,6 +41,278 @@ on the claim, that evidence should include one or more of:
 | Long-running processing | Partial: durable import and enrichment jobs exist and survive browser closure; not every integration/export path is yet a queued, measured worker job. | No |
 | Zotero and other integrations | Partial: account-scoped integrations and ORCID OAuth work; Zotero OAuth, connection management, and operational monitoring remain. | No |
 | Public profiles and social features | Public-profile MVP is pilot-ready; the social-network portion is intentionally not built. | No |
+
+## Automation-ready development queue
+
+This is the only section intended for unattended sequential Codex runs.
+Unchecked items elsewhere in this document remain roadmap items and must not be
+selected automatically.
+
+An automation task may be checked off only when all of its acceptance criteria
+and validation steps pass. Each task must produce one cohesive local commit.
+The runner does not deploy, SSH to the server, purchase or configure services,
+push branches, use production secrets, or make external state changes.
+
+If a task exposes an architectural ambiguity, needs a credential, requires an
+external service, changes production data, or cannot pass its validation, the
+agent must leave it unchecked and stop for review. Completing a task here does
+not automatically award a `🌐` marker or complete a broader roadmap item.
+
+### AUTO-001 [ ] - Add continuous integration for the test suite
+
+Risk: low
+
+Dependencies: none
+
+Scope: repository and GitHub Actions workflow only; no repository-settings
+changes and no production deployment.
+
+Acceptance criteria:
+
+- A GitHub Actions workflow runs on pull requests and pushes to `main`.
+- It installs a supported Python version and the project dependencies without
+  requiring secrets.
+- It runs `python3 -m unittest discover -s tests`.
+- Concurrent superseded runs are cancelled, and dependency caching does not
+  cache credentials or private project data.
+- The workflow and its local reproduction command are documented.
+
+Validation:
+
+- The complete local test suite passes.
+- Workflow YAML is syntactically validated with an available local parser or a
+  focused regression test.
+- `git diff --check` passes.
+
+Stop conditions:
+
+- The workflow would require a production credential or repository secret.
+- Existing tests fail for reasons not caused and resolved by this task.
+
+Evidence: pending
+
+### AUTO-002 [ ] - Add a privacy-safe repository audit and run it in CI
+
+Risk: low
+
+Dependencies: AUTO-001
+
+Scope: repository audit script, tests, and the existing CI workflow only.
+
+Acceptance criteria:
+
+- A local script inspects tracked and proposed files for `.env` files, private
+  `.vitamine`/SQLite databases and journals, Finder metadata, private-key
+  material, and high-confidence credential patterns.
+- Findings report only paths and rule identifiers, never the suspected secret
+  value.
+- Deliberate placeholders in example environment files can be allowlisted
+  narrowly without disabling the corresponding rule globally.
+- Automated tests cover a safe fixture and representative forbidden fixtures.
+- CI runs the audit before or alongside the unit tests.
+- The script documents its scope and explicitly states that it complements,
+  rather than replaces, GitHub secret scanning or a dedicated scanner.
+
+Validation:
+
+- Audit tests and the full unit-test suite pass.
+- The audit passes on the current repository.
+- `git diff --check` passes.
+
+Stop conditions:
+
+- A possible real credential or private database is found.
+- Passing the audit would require a broad or unexplained allowlist.
+
+Evidence: pending
+
+### AUTO-003 [ ] - Introduce explicit, versioned cloud database migrations
+
+Risk: medium
+
+Dependencies: AUTO-001
+
+Scope: local application code, migration definitions, tests, and deployment
+documentation; do not connect to or migrate the production database.
+
+Acceptance criteria:
+
+- The cloud store records an explicit schema version.
+- Ordered, idempotent migrations upgrade supported older schemas without
+  deleting user data.
+- Fresh stores are initialized through the same migration mechanism or are
+  proven equivalent by tests.
+- Startup refuses a database whose schema version is newer than the running
+  application understands.
+- Migration execution is transactional where the backend supports it and
+  reports only privacy-safe structural information.
+- Deployment documentation includes pre-migration backup, validation, and
+  rollback instructions.
+
+Validation:
+
+- Tests cover fresh initialization, upgrade from at least two historical
+  fixtures, repeated migration, and rejection of a future schema.
+- SQLite compatibility-store tests pass.
+- PostgreSQL migration behavior is tested when a disposable test database is
+  available and otherwise remains explicitly skipped.
+- The full unit-test suite and `git diff --check` pass.
+
+Stop conditions:
+
+- The implementation requires inspecting or changing production data.
+- A migration cannot be made additive or safely reversible without a product
+  decision.
+
+Evidence: pending
+
+### AUTO-004 [ ] - Make background-job submission idempotent
+
+Risk: medium
+
+Dependencies: AUTO-003
+
+Scope: hosted API, background-job persistence, browser client, and tests; no
+production deployment.
+
+Acceptance criteria:
+
+- Import and enrichment submissions accept a client-generated idempotency key.
+- Repeating the same request with the same authenticated owner, CV, operation,
+  payload, and key returns the existing job rather than creating another.
+- Reusing a key for a materially different request is rejected clearly.
+- Keys are scoped so one account cannot discover or affect another account's
+  jobs.
+- The browser client reuses a key while retrying one logical submission and
+  creates a new key for an intentional new operation.
+- Existing behavior remains compatible for clients that omit the key.
+
+Validation:
+
+- Tests cover duplicate submission, conflicting reuse, owner isolation,
+  retries after a simulated response loss, and legacy clients.
+- The full unit-test suite and `git diff --check` pass.
+
+Stop conditions:
+
+- Safe behavior requires changing job cancellation, billing, or user-visible
+  retry policy beyond duplicate prevention.
+- The change would affect a running production job or require a live migration.
+
+Evidence: pending
+
+### AUTO-005 [ ] - Add privacy-safe error identifiers and structured logging
+
+Risk: medium
+
+Dependencies: AUTO-003
+
+Scope: hosted application, job records, tests, and operator documentation; no
+third-party logging service and no production deployment.
+
+Acceptance criteria:
+
+- Unexpected request and background-job failures receive a non-secret,
+  unguessable support identifier that is shown to the user and recorded
+  server-side.
+- Logs are structured enough to correlate the identifier, endpoint or job
+  kind, timestamp, and high-level failure category.
+- Logs do not include CV contents, uploaded document text, passwords, cookies,
+  invitation codes, OAuth credentials, API keys, or raw authorization headers.
+- Expected validation and authorization errors retain useful status codes and
+  do not expose tracebacks.
+- Operator documentation explains how to find an error by its identifier and
+  what information is safe to request from a tester.
+
+Validation:
+
+- Tests cover request failures, job failures, identifier correlation, and
+  redaction of representative sensitive values.
+- The full unit-test suite and `git diff --check` pass.
+
+Stop conditions:
+
+- A third-party monitoring provider, credential, retention policy, or
+  production log change is required.
+- Useful correlation would require storing user document content.
+
+Evidence: pending
+
+### AUTO-006 [ ] - Record privacy-minimal LLM usage metadata
+
+Risk: medium
+
+Dependencies: AUTO-003, AUTO-005
+
+Scope: managed-LLM call sites, account/job metadata, operator query tooling,
+and tests; accounting only, with no pricing, billing, or quota enforcement.
+
+Acceptance criteria:
+
+- Managed LLM responses record available input, cached-input, output, and
+  reasoning token counts together with account, CV/job, operation, model, and
+  timestamp.
+- No prompt, CV text, model output, API key, or credential is copied into the
+  usage ledger.
+- Missing or provider-specific usage fields are handled without failing the
+  user's operation.
+- Replayed or idempotently retried jobs do not double-count one provider
+  response.
+- An operator command can report totals by account, operation, model, and day
+  without exposing CV contents.
+- The schema leaves monetary pricing and user quotas deliberately undefined.
+
+Validation:
+
+- Mocked tests cover complete, partial, missing, and repeated usage metadata.
+- Tests verify that representative private strings never enter the ledger.
+- The full unit-test suite and `git diff --check` pass.
+
+Stop conditions:
+
+- Accurate accounting would require changing the selected LLM provider/model,
+  adding prices, enforcing limits, or accessing the production OpenAI account.
+- A call path cannot expose provider usage without logging prompt or response
+  content.
+
+Evidence: pending
+
+### AUTO-007 [ ] - Lock in browser security-header and CSRF regressions
+
+Risk: low
+
+Dependencies: AUTO-001
+
+Scope: hosted middleware, Apache configuration, tests, and documentation; no
+production deployment.
+
+Acceptance criteria:
+
+- Automated tests cover CSP, Referrer-Policy, X-Content-Type-Options, and
+  Permissions-Policy on representative public, authenticated, error, and file
+  responses.
+- Tests demonstrate that cross-origin state-changing requests are rejected
+  before endpoint behavior, including routes using JSON, forms, and uploads.
+- Same-origin requests and ORCID OAuth redirects continue to work.
+- The production Apache template sends HSTS for `vitamine.cloud` without
+  asserting `includeSubDomains` or preload eligibility.
+- The security documentation records which protections live in Apache and
+  which live in the application.
+
+Validation:
+
+- Header and cross-origin regression tests pass.
+- The Apache configuration passes `apachectl configtest` when Apache is
+  available; otherwise a focused configuration regression test runs.
+- The full unit-test suite and `git diff --check` pass.
+
+Stop conditions:
+
+- The change requires enrolling the domain in HSTS preload, changing unrelated
+  subdomains, or modifying the live Apache configuration.
+- A legitimate integration requires a new cross-origin trust decision.
+
+Evidence: pending
 
 ## Architecture and portability
 
@@ -247,13 +519,13 @@ on the claim, that evidence should include one or more of:
   while retaining `.vitamine` portability.
 - [x] Automated tests cover substantial account, cloud, profile, export, and
   compatibility behavior.
-- [ ] Establish a clean Git checkpoint for the cloud/account/public-profile
-  work that is currently uncommitted.
+- [x] Establish a clean Git checkpoint for the cloud/account/public-profile
+  work and push it to a reviewable remote branch.
 - [ ] Run tests and secret/artifact checks automatically for every proposed
   change.
 - [ ] Add continuous integration and protected, reviewable deployment
   artifacts.
-- [ ] Adopt small, cohesive commits and push them after verification so the VPS
+- [x] Adopt small, cohesive commits and push them after verification so the VPS
   is never the only copy of working code.
 - [ ] Tag known-good deployments and record the deployed commit rather than
   relying mainly on timestamped server backups.
@@ -278,12 +550,12 @@ on the claim, that evidence should include one or more of:
 
 ### 0. Create a safe source-control baseline
 
-1. Exclude private databases, SQLite journals, secrets, build artifacts, and
-   Finder metadata.
-2. Run the complete test suite and a secret/artifact audit.
-3. Commit the current cloud/account/profile implementation as a named
-   checkpoint and push it to GitHub.
-4. Add CI for tests, secret scanning, and basic dependency checks.
+- [x] Exclude private databases, SQLite journals, secrets, build artifacts, and
+  Finder metadata.
+- [x] Run the complete test suite and a secret/artifact audit.
+- [x] Commit the current cloud/account/profile implementation as a named
+  checkpoint and push it to GitHub.
+- [ ] Add CI for tests, secret scanning, and basic dependency checks.
 
 This is the immediate priority because the working implementation currently
 exists mainly in the worktree and on the VPS.

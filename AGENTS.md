@@ -27,3 +27,18 @@ Prefer small cohesive commits over one commit per incidental edit. Never commit
 `.vitamine` files, SQLite journals, local build output, or user data. Ask before
 publishing if ownership or scope is genuinely ambiguous; otherwise carry the
 verified Git checkpoint through without requiring a separate reminder.
+
+## Automated development queue
+
+Unattended Codex runs may work only on unchecked tasks in the
+“Automation-ready development queue” section of
+[`docs/development-plan.md`](docs/development-plan.md). Use
+`scripts/run_development_batch.sh`; do not select unchecked items elsewhere in
+the roadmap automatically.
+
+Each automated task must satisfy its documented acceptance criteria, run its
+validation, update its own checkbox and evidence line, and produce one cohesive
+local commit. Automated runs must not deploy, SSH to the server, push, purchase
+or configure external services, use production secrets, or make external state
+changes. Ambiguity, dirty state, missing credentials, destructive data changes,
+or failed validation must stop the batch for human review.
