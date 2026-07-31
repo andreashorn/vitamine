@@ -66,10 +66,43 @@ if ((list_only)); then
   exit 0
 fi
 
-if ! command -v codex >/dev/null 2>&1; then
-  echo "error: codex CLI is not installed or not on PATH" >&2
-  exit 1
-fi
+resolve_codex_binary() {
+  if [[ -n "${VITAMINE_CODEX_BIN:-}" ]]; then
+    if [[ -x "$VITAMINE_CODEX_BIN" ]]; then
+      printf '%s\n' "$VITAMINE_CODEX_BIN"
+      return 0
+    fi
+    echo "error: VITAMINE_CODEX_BIN is not executable: $VITAMINE_CODEX_BIN" >&2
+    return 1
+  fi
+
+  if command -v codex >/dev/null 2>&1; then
+    command -v codex
+    return 0
+  fi
+
+  local candidate
+  local newest=""
+  for candidate in \
+    "$HOME"/.vscode/extensions/openai.chatgpt-*/bin/macos-*/codex \
+    "$HOME"/.vscode-insiders/extensions/openai.chatgpt-*/bin/macos-*/codex \
+    "$HOME"/.cursor/extensions/openai.chatgpt-*/bin/macos-*/codex \
+    "/Applications/Codex.app/Contents/Resources/codex"; do
+    if [[ -x "$candidate" ]] && { [[ -z "$newest" ]] || [[ "$candidate" -nt "$newest" ]]; }; then
+      newest="$candidate"
+    fi
+  done
+  if [[ -n "$newest" ]]; then
+    printf '%s\n' "$newest"
+    return 0
+  fi
+
+  echo "error: Codex CLI was not found on PATH or in a known app/extension location" >&2
+  echo "Set VITAMINE_CODEX_BIN to the absolute path of an installed codex binary." >&2
+  return 1
+}
+
+codex_binary="$(resolve_codex_binary)" || exit 1
 
 current_branch="$(git -C "$repo_root" branch --show-current)"
 if [[ -z "$current_branch" ]]; then
@@ -138,7 +171,7 @@ and clean worktree.
 PROMPT
 
   echo "Starting $task_id on $before_branch"
-  if ! codex exec \
+  if ! "$codex_binary" exec \
     --ephemeral \
     --ignore-user-config \
     --sandbox workspace-write \

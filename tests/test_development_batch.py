@@ -66,8 +66,13 @@ class DevelopmentBatchRunnerTests(unittest.TestCase):
             check=True,
         )
 
-    def run_runner(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_runner(
+        self,
+        *arguments: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "PATH": f"{self.fake_bin}:{os.environ.get('PATH', '')}"}
+        env.update(extra_env or {})
         return subprocess.run(
             ["bash", "scripts/run_development_batch.sh", *arguments],
             cwd=self.repo,
@@ -107,6 +112,23 @@ class DevelopmentBatchRunnerTests(unittest.TestCase):
         result = self.run_runner("--max", "0")
         self.assertEqual(result.returncode, 2)
         self.assertIn("positive integer", result.stderr)
+
+    def test_accepts_explicit_codex_binary_outside_path(self) -> None:
+        self.run_git("switch", "-c", "agent/test-explicit-codex")
+        explicit_codex = Path(self.temporary.name) / "explicit-codex"
+        explicit_codex.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        explicit_codex.chmod(0o755)
+        result = self.run_runner(
+            "--max",
+            "1",
+            extra_env={
+                "PATH": os.environ.get("PATH", ""),
+                "VITAMINE_CODEX_BIN": str(explicit_codex),
+            },
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("did not create the required commit", result.stderr)
+        self.assertNotIn("Codex CLI was not found", result.stderr)
 
     def test_runs_tasks_sequentially_and_requires_local_commits(self) -> None:
         self.run_git("switch", "-c", "agent/test-success")
