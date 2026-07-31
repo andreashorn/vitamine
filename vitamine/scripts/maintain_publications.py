@@ -30,6 +30,15 @@ PREPRINT_DOI_PREFIXES = (
     "10.64898/",
 )
 POSTER_TERMS = ("poster", "conference poster", "meeting abstract")
+ORCID_POLICY_NAMES = {
+    "orcid_only",
+    "orcid_primary_zotero_validation",
+}
+LEGACY_ORCID_POLICY_NOTES = (
+    "Suppressed ORCID-only record without clear Horn authorship; review before showing in CV.",
+    "Suppressed ORCID-only record; use Zotero/manual record as authoritative CV source.",
+    "Suppressed ORCID record without clear researcher authorship; review before showing in CV.",
+)
 
 
 def connect() -> sqlite3.Connection:
@@ -89,6 +98,81 @@ def compact_title(value: str | None) -> str:
     return re.sub(r"\W+", " ", normalize_title(value)).strip()
 
 
+def get_setting(con: sqlite3.Connection, key: str) -> str:
+    table = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'").fetchone()
+    if not table:
+        return ""
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return str(row["value"] or "") if row else ""
+
+
+def effective_publication_source_policy(con: sqlite3.Connection) -> str:
+    policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
+    if policy not in {
+        "zotero_only",
+        "orcid_only",
+        "zotero_primary_orcid_validation",
+        "orcid_primary_zotero_validation",
+    }:
+        policy = "zotero_primary_orcid_validation"
+    zotero_key = get_setting(con, "zotero_api_key")
+    identifiers_table = con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='person_identifiers'"
+    ).fetchone()
+    orcid_row = con.execute(
+        (
+            """
+            SELECT COALESCE(
+              (SELECT identifier_value FROM person_identifiers WHERE person_id=1 AND lower(platform)='orcid' ORDER BY id LIMIT 1),
+              (SELECT orcid_id FROM person WHERE id=1),
+              ''
+            ) AS orcid_id
+            """
+            if identifiers_table
+            else "SELECT COALESCE((SELECT orcid_id FROM person WHERE id=1), '') AS orcid_id"
+        )
+    ).fetchone()
+    has_orcid = bool(orcid_row and str(orcid_row["orcid_id"] or "").strip())
+    if not zotero_key and has_orcid and policy != "zotero_only":
+        return "orcid_only"
+    if not zotero_key and has_orcid and policy == "zotero_only":
+        return "orcid_only"
+    return policy
+
+
+def name_terms_for_researcher(con: sqlite3.Connection) -> list[str]:
+    row = con.execute("SELECT full_name, display_name FROM person WHERE id=1").fetchone()
+    if not row:
+        return []
+    names = [str(row["display_name"] or "").strip(), str(row["full_name"] or "").strip()]
+    terms: set[str] = set()
+    for name in names:
+        parts = [part for part in re.split(r"\s+", name.casefold()) if part]
+        if not parts:
+            continue
+        terms.add(" ".join(parts))
+        first = parts[0]
+        last = parts[-1]
+        if first and last and first != last:
+            terms.add(f"{first} {last}")
+            terms.add(f"{last} {first}")
+            terms.add(f"{first[0]} {last}")
+            terms.add(f"{last} {first[0]}")
+        if len(last) > 3:
+            terms.add(last)
+    return sorted(terms, key=len, reverse=True)
+
+
+def has_researcher_authorship(authors: str | None, terms: list[str]) -> bool:
+    text = re.sub(r"[^a-z0-9]+", " ", str(authors or "").casefold())
+    if not text.strip():
+        return False
+    if not terms:
+        return True
+    padded = f" {text} "
+    return any(f" {re.sub(r'[^a-z0-9]+', ' ', term).strip()} " in padded for term in terms)
+
+
 def is_preprint(row: sqlite3.Row) -> bool:
     item_type = (row["item_type"] or "").casefold()
     category = (row["category"] or "").casefold()
@@ -142,17 +226,17 @@ def suppress_incomplete_duplicates(con: sqlite3.Connection) -> int:
                 """
                 UPDATE publications
                 SET suppress_display=1,
-                    quality_note=COALESCE(NULLIF(quality_note, ''), 'Suppressed incomplete duplicate; complete Zotero record exists.')
+                    quality_note=COALESCE(NULLIF(quality_note, ''), 'Suppressed incomplete duplicate; complete curated record exists.')
                 WHERE id=?
                 """,
                 (row["id"],),
             )
             suppressed += 1
-    con.execute(
+    cursor = con.execute(
         """
         UPDATE publications
         SET suppress_display=1,
-            quality_note=COALESCE(NULLIF(quality_note, ''), 'Suppressed incomplete Zotero record; missing year/venue/DOI.')
+            quality_note=COALESCE(NULLIF(quality_note, ''), 'Suppressed incomplete publication record; missing year/venue/DOI.')
         WHERE COALESCE(suppress_display, 0) = 0
           AND (year IS NULL OR year = '')
           AND (doi IS NULL OR doi = '')
@@ -160,8 +244,108 @@ def suppress_incomplete_duplicates(con: sqlite3.Connection) -> int:
           AND COALESCE(include_ultrashort, 0) = 0
         """
     )
-    suppressed += con.total_changes
+    suppressed += cursor.rowcount
     return suppressed
+
+
+def publication_quality_rank(row: sqlite3.Row) -> tuple[int, ...]:
+    source_priority = {
+        "manual": 5,
+        "cv_import_llm": 4,
+        "cv_import_parser": 4,
+        "zotero": 3,
+        "identifier_import": 2,
+        "orcid": 1,
+    }
+    return (
+        1 if not row["suppress_display"] else 0,
+        1 if not is_preprint(row) else 0,
+        source_priority.get(str(row["source"] or ""), 0),
+        1 if normalize_doi(row["doi"]) else 0,
+        1 if str(row["authors"] or "").strip() else 0,
+        1 if str(row["venue"] or "").strip() else 0,
+        1 if str(row["year"] or "").strip() else 0,
+        -int(row["id"]),
+    )
+
+
+def suppress_definite_duplicates(con: sqlite3.Connection) -> int:
+    """Hide only duplicates supported by DOI or exact normalized-title evidence."""
+    rows = con.execute(
+        """
+        SELECT id, source, item_type, category, authors, title, venue, year, doi,
+               raw_citation, extra, suppress_display
+        FROM publications
+        WHERE COALESCE(title, '') != ''
+        """
+    ).fetchall()
+    by_doi: dict[str, list[sqlite3.Row]] = {}
+    by_title: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        doi = normalize_doi(row["doi"])
+        if doi:
+            by_doi.setdefault(doi, []).append(row)
+        title = compact_title(row["title"])
+        if title:
+            by_title.setdefault(title, []).append(row)
+
+    duplicate_to_keeper: dict[int, tuple[int, str]] = {}
+    for doi, group in by_doi.items():
+        if len(group) < 2:
+            continue
+        keeper = max(group, key=publication_quality_rank)
+        for row in group:
+            if row["id"] != keeper["id"]:
+                duplicate_to_keeper[int(row["id"])] = (
+                    int(keeper["id"]),
+                    f"Suppressed exact DOI duplicate of publication {keeper['id']} ({doi}).",
+                )
+
+    for _title, group in by_title.items():
+        if len(group) < 2:
+            continue
+        keeper = max(group, key=publication_quality_rank)
+        keeper_doi = normalize_doi(keeper["doi"])
+        keeper_is_preprint = is_preprint(keeper)
+        for row in group:
+            if row["id"] == keeper["id"] or int(row["id"]) in duplicate_to_keeper:
+                continue
+            row_doi = normalize_doi(row["doi"])
+            definite = (
+                not row_doi
+                or (row_doi == keeper_doi and bool(row_doi))
+                or (is_preprint(row) and not keeper_is_preprint)
+            )
+            if definite:
+                duplicate_to_keeper[int(row["id"])] = (
+                    int(keeper["id"]),
+                    f"Suppressed exact-title duplicate/version of publication {keeper['id']}.",
+                )
+
+    changed = 0
+    for duplicate_id, (_keeper_id, note) in duplicate_to_keeper.items():
+        cursor = con.execute(
+            """
+            UPDATE publications
+            SET suppress_display=1,
+                include_short=0,
+                include_ultrashort=0,
+                selected_order=NULL,
+                short_selected_order=NULL,
+                ultrashort_selected_order=NULL,
+                quality_note=?
+            WHERE id=?
+              AND (
+                COALESCE(suppress_display, 0) != 1
+                OR COALESCE(include_short, 0) != 0
+                OR COALESCE(include_ultrashort, 0) != 0
+                OR COALESCE(quality_note, '') != ?
+              )
+            """,
+            (note, duplicate_id, note),
+        )
+        changed += cursor.rowcount
+    return changed
 
 
 def classify_and_suppress_non_cv_publications(con: sqlite3.Connection) -> int:
@@ -208,6 +392,24 @@ def classify_and_suppress_non_cv_publications(con: sqlite3.Connection) -> int:
         )
         changed += cursor.rowcount
     return changed
+
+
+def restore_authoritatively_published_rows(con: sqlite3.Connection) -> int:
+    """Undo our stale preprint suppression after registry-backed correction."""
+    note = "Suppressed preprint; not exported to CV publication lists."
+    cursor = con.execute(
+        """
+        UPDATE publications
+        SET suppress_display=0,
+            quality_note=NULL
+        WHERE item_type='journalArticle'
+          AND category='peer_reviewed'
+          AND COALESCE(doi, '') != ''
+          AND COALESCE(quality_note, '')=?
+        """,
+        (note,),
+    )
+    return cursor.rowcount
 
 
 def suppress_orcid_duplicates(con: sqlite3.Connection) -> int:
@@ -285,39 +487,51 @@ def suppress_unverified_wos_profile_imports(con: sqlite3.Connection) -> int:
     return cursor.rowcount
 
 
-def suppress_orcid_without_horn_authorship(con: sqlite3.Connection) -> int:
-    note = "Suppressed ORCID-only record without clear Horn authorship; review before showing in CV."
-    cursor = con.execute(
+def suppress_orcid_without_researcher_authorship(con: sqlite3.Connection) -> int:
+    terms = name_terms_for_researcher(con)
+    if not terms:
+        return 0
+    note = "Suppressed ORCID record without clear researcher authorship; review before showing in CV."
+    rows = con.execute(
         """
-        UPDATE publications
-        SET suppress_display=1,
-            include_short=0,
-            include_ultrashort=0,
-            selected_order=NULL,
-            short_selected_order=NULL,
-            ultrashort_selected_order=NULL,
-            quality_note=?
+        SELECT id, authors
+        FROM publications
         WHERE source='orcid'
           AND COALESCE(suppress_display, 0)=0
           AND category='peer_reviewed'
-          AND (
-            authors IS NULL
-            OR authors=''
-            OR lower(authors) NOT LIKE '%horn%'
-          )
-          AND (
-            COALESCE(suppress_display, 0) != 1
-            OR COALESCE(include_short, 0) != 0
-            OR COALESCE(include_ultrashort, 0) != 0
-            OR COALESCE(quality_note, '') != ?
-          )
-        """,
-        (note, note),
-    )
-    return cursor.rowcount
+        """
+    ).fetchall()
+    changed = 0
+    for row in rows:
+        if has_researcher_authorship(row["authors"], terms):
+            continue
+        cursor = con.execute(
+            """
+            UPDATE publications
+            SET suppress_display=1,
+                include_short=0,
+                include_ultrashort=0,
+                selected_order=NULL,
+                short_selected_order=NULL,
+                ultrashort_selected_order=NULL,
+                quality_note=?
+            WHERE id=?
+              AND (
+                COALESCE(suppress_display, 0) != 1
+                OR COALESCE(include_short, 0) != 0
+                OR COALESCE(include_ultrashort, 0) != 0
+                OR COALESCE(quality_note, '') != ?
+              )
+            """,
+            (note, row["id"], note),
+        )
+        changed += cursor.rowcount
+    return changed
 
 
 def suppress_orcid_only_records(con: sqlite3.Connection) -> int:
+    if effective_publication_source_policy(con) in ORCID_POLICY_NAMES:
+        return 0
     note = "Suppressed ORCID-only record; use Zotero/manual record as authoritative CV source."
     cursor = con.execute(
         """
@@ -333,6 +547,38 @@ def suppress_orcid_only_records(con: sqlite3.Connection) -> int:
           AND COALESCE(suppress_display, 0)=0
         """,
         (note,),
+    )
+    return cursor.rowcount
+
+
+def restore_legacy_orcid_policy_suppression(con: sqlite3.Connection) -> int:
+    if effective_publication_source_policy(con) not in ORCID_POLICY_NAMES:
+        return 0
+    placeholders = ", ".join("?" for _ in LEGACY_ORCID_POLICY_NOTES)
+    cursor = con.execute(
+        f"""
+        UPDATE publications
+        SET suppress_display=0,
+            quality_note=NULL
+        WHERE source='orcid'
+          AND COALESCE(suppress_display, 0)=1
+          AND COALESCE(quality_note, '') IN ({placeholders})
+        """,
+        LEGACY_ORCID_POLICY_NOTES,
+    )
+    return cursor.rowcount
+
+
+def clear_legacy_orcid_policy_notes(con: sqlite3.Connection) -> int:
+    placeholders = ", ".join("?" for _ in LEGACY_ORCID_POLICY_NOTES)
+    cursor = con.execute(
+        f"""
+        UPDATE publications
+        SET quality_note=NULL
+        WHERE source='orcid'
+          AND COALESCE(quality_note, '') IN ({placeholders})
+        """,
+        LEGACY_ORCID_POLICY_NOTES,
     )
     return cursor.rowcount
 
@@ -367,14 +613,18 @@ def apply_journal_metrics(con: sqlite3.Connection) -> int:
 
 def maintain() -> dict[str, int]:
     with connect() as con:
+        restored_orcid_policy = restore_legacy_orcid_policy_suppression(con)
+        published_restored = restore_authoritatively_published_rows(con)
         non_cv_changed = classify_and_suppress_non_cv_publications(con)
+        definite_duplicates = suppress_definite_duplicates(con)
         orcid_duplicates = suppress_orcid_duplicates(con)
         wos_profile_imports = suppress_unverified_wos_profile_imports(con)
-        orcid_no_horn = suppress_orcid_without_horn_authorship(con)
+        orcid_no_researcher = suppress_orcid_without_researcher_authorship(con)
         orcid_only = suppress_orcid_only_records(con)
         before = con.total_changes
         suppress_incomplete_duplicates(con)
         suppressed = con.total_changes - before
+        legacy_notes_cleared = clear_legacy_orcid_policy_notes(con)
         metric_before = con.total_changes
         apply_journal_metrics(con)
         metrics_updated = con.total_changes - metric_before
@@ -382,10 +632,14 @@ def maintain() -> dict[str, int]:
     return {
         "suppressed": suppressed,
         "non_cv_suppressed": non_cv_changed,
+        "definite_duplicates_suppressed": definite_duplicates,
         "orcid_duplicates_suppressed": orcid_duplicates,
         "wos_profile_imports_suppressed": wos_profile_imports,
-        "orcid_without_horn_suppressed": orcid_no_horn,
+        "orcid_without_researcher_suppressed": orcid_no_researcher,
         "orcid_only_suppressed": orcid_only,
+        "orcid_policy_restored": restored_orcid_policy,
+        "authoritative_publications_restored": published_restored,
+        "legacy_orcid_notes_cleared": legacy_notes_cleared,
         "metrics_updated": metrics_updated,
     }
 

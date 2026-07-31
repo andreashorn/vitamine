@@ -3,15 +3,35 @@ const state = {
   entries: [],
   publications: [],
   journalMetrics: [],
+  importInbox: { items: [], counts: [] },
   identifiers: [],
   connections: {},
+  enrichmentSettings: {},
   cvImport: {},
+  database: {},
+  onboarding: null,
+  pendingCvImportFiles: [],
+  cloud: {
+    enabled: false,
+    workspace: null,
+    activeJob: null,
+    resuming: false,
+  },
+  orcidOauth: null,
+  orcidOauthLoaded: false,
+  orcidDiscoveryAttempted: false,
   zoteroCollections: [],
   zoteroLibraries: [],
+  zoteroSetupOpened: false,
   exportProfiles: {
     short: { selected: [], candidates: [], settings: {} },
     ultrashort: { selected: [], candidates: [], settings: {} },
   },
+  exportFormats: [],
+  exportFormatsApiAvailable: true,
+  exportSettings: {},
+  exportArtifacts: {},
+  exportPromptPlans: {},
   biosketch: {
     contributions: [],
     publication_count: 0,
@@ -20,9 +40,21 @@ const state = {
     publication_limit: 20,
   },
   selectedEntry: null,
+  entryAutosave: {
+    timer: null,
+    pending: null,
+    saving: false,
+  },
+  personAutosave: {
+    timer: null,
+    pending: null,
+    saving: false,
+  },
+  institutionMappingPollActive: false,
   selectedPublicationId: null,
   suppressPublicationClick: false,
   publicationSort: { key: "year", direction: "desc" },
+  publicationCategoryFilters: new Set(["peer_reviewed", "patents"]),
   draggedPublicationId: null,
   draggedDropProfile: null,
   draggedDropId: null,
@@ -35,10 +67,40 @@ const state = {
     origin: null,
     drag: null,
   },
+  activity: {
+    timer: null,
+    startedAt: null,
+    depth: 0,
+  },
 };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
+
+const PUBLICATION_CATEGORIES = [
+  { key: "peer_reviewed", label: "Peer-reviewed papers" },
+  { key: "patents", label: "Patents" },
+  { key: "review", label: "Reviews" },
+  { key: "books_chapters", label: "Books and chapters" },
+  { key: "preprints", label: "Preprints" },
+  { key: "manuscripts_in_preparation", label: "Manuscripts in preparation" },
+  { key: "abstract", label: "Abstracts" },
+  { key: "poster_presentations", label: "Poster presentations" },
+  { key: "other", label: "Other" },
+];
+
+const DEFAULT_PUBLICATION_CATEGORIES = new Set(["peer_reviewed", "patents"]);
+const OPENAI_MODEL_PRESETS = new Set(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"]);
+
+function normalizedApiKeyInput(value) {
+  let text = String(value || "").trim().replace(/\s+/g, "").replace(/^['"]|['"]$/g, "");
+  if (text.toLowerCase().startsWith("bearer")) text = text.slice(6).trim();
+  return text;
+}
+
+function looksLikeOpenAiApiKey(value) {
+  return /^sk-[A-Za-z0-9_-]+$/.test(normalizedApiKeyInput(value));
+}
 
 function on(selector, eventName, handler, options) {
   const element = $(selector);
@@ -46,8 +108,53 @@ function on(selector, eventName, handler, options) {
   return element;
 }
 
-function setStatus(text) {
-  $("#status").textContent = text;
+function appendConsole(text) {
+  const output = $("#globalConsoleOutput");
+  if (!output || !text) return;
+  const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const current = output.textContent === "VitaMine is ready." ? "" : output.textContent;
+  output.textContent = `${current}${current ? "\n\n" : ""}[${stamp}] ${text}`.trim();
+  output.scrollTop = output.scrollHeight;
+}
+
+function setStatus(text, { log = true, error = false } = {}) {
+  const status = $("#status");
+  if (status) status.textContent = text;
+  $("#globalActivity")?.classList.toggle("hasError", error);
+  if (log) appendConsole(text);
+}
+
+function startProcessing(label, detail = "") {
+  state.activity.depth += 1;
+  if (state.activity.depth === 1) {
+    state.activity.startedAt = Date.now();
+    $("#globalActivity")?.classList.add("processing");
+    const time = $("#processingTime");
+    if (time) time.hidden = false;
+    const update = () => {
+      const elapsed = Math.max(0, Math.floor((Date.now() - state.activity.startedAt) / 1000));
+      if (time) time.textContent = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
+    };
+    update();
+    state.activity.timer = window.setInterval(update, 1000);
+  }
+  setStatus(label);
+  if (detail) appendConsole(detail);
+  let stopped = false;
+  return (finalText = "") => {
+    if (stopped) return;
+    stopped = true;
+    state.activity.depth = Math.max(0, state.activity.depth - 1);
+    if (state.activity.depth === 0) {
+      window.clearInterval(state.activity.timer);
+      state.activity.timer = null;
+      state.activity.startedAt = null;
+      $("#globalActivity")?.classList.remove("processing");
+      const time = $("#processingTime");
+      if (time) time.hidden = true;
+    }
+    if (finalText) setStatus(finalText);
+  };
 }
 
 async function api(path, options = {}) {
@@ -58,20 +165,170 @@ async function api(path, options = {}) {
   });
   const data = await response.json();
   if (!response.ok) {
-    throw new Error(data.stderr || data.detail || "Request failed");
+    const error = new Error(data.stderr || data.detail || "Request failed");
+    error.status = response.status;
+    throw error;
   }
   return data;
+}
+
+const delay = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+function accountInitials(account = {}) {
+  const source = String(account.display_name || account.email || "VitaMine").trim();
+  const words = source.split(/\s+/).filter(Boolean);
+  if (words.length > 1) return `${words[0][0]}${words.at(-1)[0]}`.toUpperCase();
+  return source.slice(0, 2).toUpperCase();
+}
+
+function closeCloudAccountMenu() {
+  const panel = $("#cloudAccountMenuPanel");
+  const button = $("#cloudAccountMenuButton");
+  if (panel) panel.hidden = true;
+  button?.setAttribute("aria-expanded", "false");
+}
+
+async function returnToWorkspaceHome() {
+  closeCloudAccountMenu();
+  if (!state.cloud.enabled) {
+    switchView("dashboard");
+    $("#dashboardTab")?.focus();
+    window.scrollTo({ top: 0, left: 0 });
+    return;
+  }
+
+  setStatus(state.cloud.activeJob ? "The process will continue in the background." : "Saving your CV…");
+  try {
+    const response = await fetch("/gateway/workspace", {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.detail || "Could not return to My CVs.");
+    }
+    window.location.assign("/");
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  }
+}
+
+function setCloudJobControls(running) {
+  const download = $("#cloudDownloadDatabase");
+  if (download) {
+    download.classList.toggle("disabledLink", running);
+    download.setAttribute("aria-disabled", String(running));
+  }
+}
+
+function configureCloudWorkspace(workspace) {
+  state.cloud.enabled = true;
+  state.cloud.workspace = workspace;
+  const account = workspace.account || {};
+  $("#cloudAccountMenu").hidden = false;
+  $("#cloudAccountInitials").textContent = accountInitials(account);
+  $("#cloudAccountName").textContent = account.display_name || "VitaMine account";
+  $("#cloudAccountEmail").textContent = account.email || "";
+  $("#cloudDownloadDatabase").setAttribute("download", workspace.filename || "workspace.vitamine");
+  $("#brandHome").setAttribute("aria-label", "Back to My CVs");
+  $("#brandHome").setAttribute("title", "My CVs");
+  $("#cloudAccountMenuButton").addEventListener("click", () => {
+    const panel = $("#cloudAccountMenuPanel");
+    const opening = panel.hidden;
+    panel.hidden = !opening;
+    $("#cloudAccountMenuButton").setAttribute("aria-expanded", String(opening));
+  });
+  $("#cloudMyCvs").addEventListener("click", returnToWorkspaceHome);
+  $("#cloudSignOut").addEventListener("click", async () => {
+    closeCloudAccountMenu();
+    try {
+      await api("/api/account/logout", { method: "POST" });
+    } finally {
+      window.location.assign("/");
+    }
+  });
+  $("#cloudDownloadDatabase").addEventListener("click", (event) => {
+    if (!state.cloud.activeJob) return;
+    event.preventDefault();
+    closeCloudAccountMenu();
+    setStatus("The backup will be available as soon as the background process finishes.");
+  });
+  document.addEventListener("click", (event) => {
+    if (!$("#cloudAccountMenu")?.contains(event.target)) closeCloudAccountMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeCloudAccountMenu();
+  });
+}
+
+function cloudJobMessage(job) {
+  const progress = job?.progress || {};
+  const percent = Number(progress.percent);
+  const suffix = Number.isFinite(percent) && job.status === "running" ? ` · ${percent}%` : "";
+  return `${progress.message || "VitaMine is working in the background"}${suffix}`;
+}
+
+async function waitForCloudJob(jobId) {
+  let previousPhase = "";
+  while (true) {
+    const payload = await api(`/api/cloud/jobs/${encodeURIComponent(jobId)}`);
+    const job = payload.job;
+    state.cloud.activeJob = ["queued", "running"].includes(job.status) ? job : null;
+    setCloudJobControls(Boolean(state.cloud.activeJob));
+    const phase = String(job.progress?.phase || job.status);
+    setStatus(cloudJobMessage(job), { log: phase !== previousPhase });
+    previousPhase = phase;
+    if (job.status === "succeeded") {
+      await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" });
+      state.cloud.activeJob = null;
+      setCloudJobControls(false);
+      return job.result || { ok: true };
+    }
+    if (job.status === "failed") {
+      await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" }).catch(() => {});
+      state.cloud.activeJob = null;
+      setCloudJobControls(false);
+      throw new Error(job.error || "The background process failed.");
+    }
+    await delay(2000);
+  }
+}
+
+async function resumeCloudBackgroundJob() {
+  if (!state.cloud.enabled || state.cloud.resuming) return;
+  const payload = await api("/api/cloud/jobs");
+  const databaseId = state.cloud.workspace?.database_id;
+  const job = (payload.jobs || []).find((item) => item.database_id === databaseId);
+  if (!job) return;
+  if (job.status === "succeeded" || job.status === "failed") {
+    if (job.status === "succeeded") {
+      setStatus(job.kind === "cv_import" ? "CV import completed and saved" : "CV enrichment completed and saved");
+    } else {
+      setStatus(job.error || "The background process failed.", { error: true });
+    }
+    await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" }).catch(() => {});
+    return;
+  }
+  state.cloud.resuming = true;
+  const stopProcessing = startProcessing(cloudJobMessage(job));
+  setActionButtons(true);
+  try {
+    await waitForCloudJob(job.id);
+    setStatus(job.kind === "cv_import" ? "CV import completed and saved" : "CV enrichment completed and saved");
+    window.location.reload();
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  } finally {
+    stopProcessing();
+    setActionButtons(false);
+    state.cloud.resuming = false;
+  }
 }
 
 function setActionButtons(disabled) {
   [
     "#syncZoteroDashboard",
-    "#syncOrcidDashboard",
-    "#syncSourcesDashboard",
-    "#enrichDoiDashboard",
-    "#maintainPubsDashboard",
-    "#fetchJournalMetrics",
-    "#saveJournalMetrics",
+    "#enrichCvDashboard",
     "#connectionsForm button[type='submit']",
     "#connectZotero",
     "#testZoteroConnection",
@@ -80,7 +337,11 @@ function setActionButtons(disabled) {
     "#createBlankDatabase",
     "#loadDatabase",
     "#saveCvImportSettings",
+    "#restoreInboxSelected",
+    "#resolveInboxPublications",
     "#chooseCvImportFile",
+    "#createPromptExportPlan",
+    "#clearPromptExportPlan",
     "#importCvFile",
     "#buildUltraDashboard",
     "#buildShortDashboard",
@@ -90,9 +351,19 @@ function setActionButtons(disabled) {
     "#deleteBiosketchContribution",
     "#importPublicationIds",
     "#resolvePublicationIdentifiers",
+    "#acceptInboxSelected",
+    "#rejectInboxSelected",
+    "#acceptReviewSelected",
+    "#rejectReviewSelected",
+    "#selectInboxVisible",
+    "#acceptHighConfidenceInbox",
+    "#rejectDuplicateInbox",
   ].forEach((selector) => {
     const button = $(selector);
     if (button) button.disabled = disabled;
+  });
+  $$(".formatActionButton").forEach((button) => {
+    button.disabled = disabled;
   });
   if (!disabled && $("#connectionZoteroSource")) updateZoteroSourceVisibility();
 }
@@ -114,15 +385,743 @@ async function loadSummary() {
   $("#summaryGrid").innerHTML = [
     summaryBox("Entries", data.entries.map((row) => `${state.sections[row.section_key] || row.section_key}: ${row.count}`)),
     summaryBox("Publications", data.publications.map((row) => `${row.source} / ${row.category}: ${row.count}`)),
+    summaryBox("Import Inbox", [`Pending: ${data.import_inbox_pending || 0}`]),
     summaryBox("Warnings", data.warnings.map((row) => `${row.warning_type}: ${row.count}`)),
   ].join("");
+  updateInboxBadge(data.import_inbox_pending || 0);
+}
+
+function updateInboxBadge(count) {
+  const badge = $("#inboxBadge");
+  if (!badge) return;
+  badge.textContent = count;
+  badge.hidden = !count;
+}
+
+function inboxTypeLabel(type) {
+  return {
+    entry: "Entry",
+    publication: "Publication",
+    person: "Person",
+    narrative_report: "Narrative",
+    contribution: "Contribution",
+  }[type] || type || "Candidate";
+}
+
+function confidenceClass(confidence) {
+  return `confidence-${["low", "medium", "high"].includes(confidence) ? confidence : "medium"}`;
+}
+
+async function loadImportInbox(status = $("#inboxStatusFilter")?.value || "pending", targetType = $("#inboxTypeFilter")?.value || "all") {
+  const data = await api(`/api/import-inbox?status=${encodeURIComponent(status)}&target_type=${encodeURIComponent(targetType)}`);
+  state.importInbox = data;
+  renderImportInbox("#inboxList", data.items || [], { selectableStatuses: ["pending", "rejected"] });
+  updateInboxBadge((data.counts || [])
+    .filter((row) => row.status === "pending")
+    .reduce((total, row) => total + Number(row.count || 0), 0));
+  return data;
+}
+
+function setVisibleInboxChecks(checked = true) {
+  $$("#inboxList [data-inbox-check]:not(:disabled)").forEach((input) => {
+    input.checked = checked;
+  });
+}
+
+function renderImportInbox(selector, items, options = {}) {
+  const container = $(selector);
+  if (!container) return;
+  container.innerHTML = items.length
+    ? items.map((item) => inboxItemMarkup(item, options)).join("")
+    : `<p class="emptyState">No import candidates here.</p>`;
+}
+
+function inboxItemMarkup(item, options = {}) {
+  const selectableStatuses = options.selectableStatuses || ["pending"];
+  const selectable = selectableStatuses.includes(item.status || "pending");
+  const duplicate = item.duplicate_of_id ? `<span class="duplicateBadge">Possible duplicate</span>` : "";
+  const cautiousHonor = item.target_type === "entry" && item.payload?.section_key === "honors";
+  const identityReview = Boolean(item.payload?._identity_review_required);
+  const manualReview = cautiousHonor || identityReview
+    ? `<span class="duplicateBadge">${identityReview ? "Identity uncertain" : "Review manually"}</span>`
+    : "";
+  const checked = selectable && !item.duplicate_of_id && !cautiousHonor && !identityReview && item.confidence !== "low" ? "checked" : "";
+  const disabled = selectable ? "" : "disabled";
+  const raw = item.raw_text || item.payload?.raw_citation || item.payload?.raw_text || "";
+  return `
+    <article class="inboxItem ${confidenceClass(item.confidence)}" data-inbox-id="${item.id}">
+      <label class="inboxCheck">
+        <input type="checkbox" data-inbox-check="${item.id}" ${checked} ${disabled}>
+      </label>
+      <div class="inboxMain">
+        <div class="inboxMeta">
+          <span>${escapeHtml(inboxTypeLabel(item.target_type))}</span>
+          <span>${escapeHtml(item.confidence || "medium")}</span>
+          ${duplicate}
+          ${manualReview}
+          ${item.document_title ? `<span>${escapeHtml(item.document_title)}</span>` : ""}
+        </div>
+        <strong>${escapeHtml(item.title || inboxTypeLabel(item.target_type))}</strong>
+        ${item.subtitle ? `<small>${escapeHtml(item.subtitle)}</small>` : ""}
+        ${identityReview ? `<small>${escapeHtml(item.payload?._identity_review_reason || "The registries could not distinguish this author from a namesake.")}</small>` : ""}
+        ${raw ? `<p>${escapeHtml(raw).slice(0, 900)}</p>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function selectedInboxIds(containerSelector) {
+  return $$(`${containerSelector} [data-inbox-check]:checked`).map((input) => Number(input.dataset.inboxCheck)).filter(Boolean);
+}
+
+async function acceptInboxItems(containerSelector = "#inboxList") {
+  const ids = selectedInboxIds(containerSelector);
+  if (!ids.length) {
+    setStatus("Choose at least one import candidate.");
+    return;
+  }
+  const data = await api("/api/import-inbox/accept", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+  setStatus(`Accepted ${data.accepted || 0}; skipped ${Number(data.duplicates || 0) + Number(data.skipped || 0)}.`);
+  await refreshAfterInboxReview();
+}
+
+async function rejectInboxItems(containerSelector = "#inboxList") {
+  const ids = selectedInboxIds(containerSelector);
+  if (!ids.length) {
+    setStatus("Choose at least one import candidate.");
+    return;
+  }
+  const data = await api("/api/import-inbox/reject", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+  setStatus(`Rejected ${data.rejected || 0} import candidate${data.rejected === 1 ? "" : "s"}.`);
+  await refreshAfterInboxReview();
+}
+
+async function restoreInboxItems(containerSelector = "#inboxList") {
+  const ids = selectedInboxIds(containerSelector);
+  if (!ids.length) {
+    setStatus("Choose at least one rejected import candidate.");
+    return;
+  }
+  const data = await api("/api/import-inbox/restore", {
+    method: "POST",
+    body: JSON.stringify({ ids }),
+  });
+  setStatus(`Restored ${data.restored || 0} import candidate${data.restored === 1 ? "" : "s"} to pending.`);
+  await refreshAfterInboxReview();
+}
+
+async function resolveInboxPublications(containerSelector = "#inboxList") {
+  const ids = selectedInboxIds(containerSelector);
+  if (!ids.length) {
+    setStatus("Choose at least one publication candidate.");
+    return;
+  }
+  setActionButtons(true);
+  try {
+    const data = await api("/api/import-inbox/resolve-publications", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+    setStatus(`Resolved ${data.resolved || 0} publication candidate${data.resolved === 1 ? "" : "s"}; unresolved ${data.unresolved || 0}.`);
+    await refreshAfterInboxReview();
+  } finally {
+    setActionButtons(false);
+  }
+}
+
+async function acceptHighConfidenceInbox() {
+  const data = await api("/api/import-inbox/accept-high-confidence", { method: "POST" });
+  setStatus(`Accepted ${data.accepted || 0} high-confidence candidate${data.accepted === 1 ? "" : "s"}.`);
+  await refreshAfterInboxReview();
+}
+
+async function rejectDuplicateInbox() {
+  const data = await api("/api/import-inbox/reject-duplicates", { method: "POST" });
+  setStatus(`Rejected ${data.rejected || 0} duplicate-looking candidate${data.rejected === 1 ? "" : "s"}.`);
+  await refreshAfterInboxReview();
+}
+
+async function refreshAfterInboxReview() {
+  await loadSummary();
+  await loadImportInbox();
+  await loadMetrics();
+  await loadEntries();
+  await loadPublications();
+  await loadPerson();
+  await loadNarrativeReport();
+  await loadBiosketch();
+  const dialog = $("#importReviewDialog");
+  if (dialog?.open) {
+    const data = await loadImportInbox("pending");
+    renderImportInbox("#importReviewList", data.items || [], { editable: true });
+    if (!data.items?.length) dialog.close();
+  }
+}
+
+async function openImportReview(data = null) {
+  const inbox = await loadImportInbox("pending");
+  const dialog = $("#importReviewDialog");
+  if (!dialog) return;
+  const staged = data?.staged || {};
+  $("#importReviewSummary").innerHTML = [
+    `<strong>${data?.candidates_staged ?? inbox.items.length} candidates staged</strong>`,
+    `<span>Entries ${staged.entries || 0}</span>`,
+    `<span>Publications ${staged.publications || 0}</span>`,
+    `<span>Person ${staged.person || 0}</span>`,
+    `<span>Narrative ${staged.narrative || 0}</span>`,
+    `<span>Contributions ${staged.contributions || 0}</span>`,
+  ].join("");
+  renderImportInbox("#importReviewList", inbox.items || [], { editable: true });
+  if (typeof dialog.showModal === "function") dialog.showModal();
 }
 
 async function loadDatabaseInfo() {
   const data = await api("/api/database");
+  state.database = data;
   const label = data.is_example ? `${data.active_name} (example)` : data.active_name;
   $("#databaseName").textContent = label;
   $("#databaseName").title = data.active || "";
+  $("#renameDatabase").disabled = !!data.is_example;
+}
+
+function setRenameDatabaseError(message = "") {
+  const error = $("#renameDatabaseError");
+  const field = $("#renameDatabaseNameField");
+  if (!error || !field) return;
+  error.textContent = message;
+  error.hidden = !message;
+  field.classList.toggle("invalid", !!message);
+}
+
+function openRenameDatabaseDialog() {
+  const dialog = $("#renameDatabaseDialog");
+  const input = $("#renameDatabaseName");
+  if (!dialog || !input) return;
+  input.value = (state.database.active_name || "default.vitamine").replace(/\.vitamine$/i, "");
+  setRenameDatabaseError("");
+  dialog.showModal();
+  input.focus();
+  input.select();
+}
+
+function closeRenameDatabaseDialog() {
+  $("#renameDatabaseDialog")?.close();
+}
+
+async function renameDatabase(event) {
+  event.preventDefault();
+  const name = $("#renameDatabaseName")?.value.trim() || "";
+  if (!name) {
+    setRenameDatabaseError("Enter a database name.");
+    return;
+  }
+  try {
+    await api("/api/database/rename", { method: "POST", body: JSON.stringify({ name }) });
+    closeRenameDatabaseDialog();
+    setStatus("Database renamed");
+    window.location.reload();
+  } catch (error) {
+    setRenameDatabaseError(error.message || "Could not rename database.");
+  }
+}
+
+const ONBOARDING_STEPS = {
+  import_cv: {
+    target: "#importCvDropzone",
+    title: "Start with your CV",
+    text: "Drop one or several CV files here.",
+    image: "/static/assets/onboarding_arrow.png",
+    view: "dashboard",
+  },
+  orcid: {
+    target: "#linkOrcid",
+    title: "Link your ORCID next",
+    text: "We’ll try a confident match from your imported CV.",
+    image: "/static/assets/onboarding_orcid.png?v=2",
+    direction: "down-left",
+    compact: true,
+    view: "dashboard",
+  },
+  zotero: {
+    target: "#connectZotero",
+    title: "Add your Zotero library",
+    text: "Open Zotero’s key page in a new tab. You’ll return here to paste the key.",
+    image: "/static/assets/onboarding_arrow_blank.png",
+    direction: "down-left",
+    compact: true,
+    view: "dashboard",
+  },
+  enrich: {
+    target: "#enrichCvDashboard",
+    title: "Find what’s new",
+    text: "Enrich your CV from trusted databases and reviewed online sources.",
+    image: "/static/assets/onboarding_enrich.png?v=2",
+    direction: "down-left",
+    compact: true,
+    view: "dashboard",
+  },
+  inbox: {
+    target: "#inboxTab",
+    title: "You’ve got mail!",
+    text: "We found additional assets to populate your CV. Review them in the Inbox.",
+    image: "/static/assets/onboarding_inbox.png",
+    direction: "up-right",
+    view: "dashboard",
+  },
+};
+
+function clearOnboardingTarget() {
+  $$(".onboardingTarget").forEach((element) => element.classList.remove("onboardingTarget"));
+}
+
+function positionOnboardingCoach(target, config = {}) {
+  const coach = $("#onboardingCoach");
+  if (!coach || !target) return;
+  const rect = target.getBoundingClientRect();
+  if (config.compact) {
+    const coachRect = coach.getBoundingClientRect();
+    const gap = 18;
+    let left = rect.left;
+    let top = rect.top - coachRect.height - gap;
+    if (top < 8) top = rect.bottom + gap;
+    left = Math.max(8, Math.min(left, window.innerWidth - coachRect.width - 8));
+    top = Math.max(8, Math.min(top, window.innerHeight - coachRect.height - 8));
+    coach.style.left = `${left}px`;
+    coach.style.top = `${top}px`;
+    coach.classList.remove("flipX");
+    return;
+  }
+  const width = Math.min(580, window.innerWidth * 0.56);
+  const image = $("#onboardingCoachImage");
+  const ratio = image?.naturalWidth ? image.naturalHeight / image.naturalWidth : 998 / 1576;
+  const height = width * ratio;
+  if (config.direction === "up-right") {
+    // Stop the tip below-left of the control instead of covering it.
+    const tipX = rect.left - 18;
+    const tipY = rect.bottom + 24;
+    let left = tipX - width * 0.91;
+    let top = tipY - height * 0.1;
+    left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+    top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+    coach.style.left = `${left}px`;
+    coach.style.top = `${top}px`;
+    coach.classList.remove("flipX");
+    return;
+  }
+  if (config.direction === "down-left") {
+    // Leave enough air around the control for the entire oversized
+    // arrowhead—not merely its mathematical tip—to remain outside it.
+    const tipX = rect.right + 34;
+    const tipY = rect.top - 70;
+    let left = tipX - width * 0.1;
+    let top = tipY - height * 0.84;
+    left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+    top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+    coach.style.left = `${left}px`;
+    coach.style.top = `${top}px`;
+    coach.classList.remove("flipX");
+    return;
+  }
+  let left = rect.left + rect.width / 2 - width * 0.08;
+  let top = rect.top - height * 0.86;
+  let flip = false;
+  if (left + width > window.innerWidth - 10) {
+    flip = true;
+    left = rect.left + rect.width / 2 - width * 0.92;
+  }
+  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+  top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+  coach.style.left = `${left}px`;
+  coach.style.top = `${top}px`;
+  coach.classList.toggle("flipX", flip);
+}
+
+function renderOnboardingCoach() {
+  const coach = $("#onboardingCoach");
+  clearOnboardingTarget();
+  if (state.pendingCvImportFiles.length || $("#llmOnboardingDialog")?.open || $("#llmAdvancedDialog")?.open) {
+    if (coach) coach.hidden = true;
+    return;
+  }
+  if (!coach || !state.onboarding?.step) {
+    if (coach) coach.hidden = true;
+    return;
+  }
+  let config = ONBOARDING_STEPS[state.onboarding.step];
+  if (state.onboarding.step === "zotero" && state.zoteroSetupOpened) {
+    config = {
+      ...config,
+      target: "#connectionZoteroKey",
+      title: "Paste your Zotero key",
+      text: "Return from Zotero, paste the new key here, then choose Save Connections.",
+    };
+  }
+  const target = config ? $(config.target) : null;
+  if (!config || !target) {
+    coach.hidden = true;
+    return;
+  }
+  if (config.view) switchView(config.view);
+  target.scrollIntoView({ block: "center", behavior: "smooth" });
+  target.classList.add("onboardingTarget");
+  $("#onboardingCoachImage").src = config.image;
+  $("#onboardingCoachTitle").textContent = config.title;
+  $("#onboardingCoachText").textContent = config.text;
+  coach.classList.toggle("importStep", state.onboarding.step === "import_cv");
+  coach.classList.toggle("fixedStep", !!config.direction);
+  coach.classList.toggle("downLeftStep", config.direction === "down-left");
+  coach.classList.toggle("compactStep", !!config.compact);
+  coach.hidden = false;
+  const position = () => positionOnboardingCoach(target, config);
+  $("#onboardingCoachImage").onload = position;
+  window.setTimeout(position, 350);
+}
+
+function showLlmOnboardingDialog() {
+  const dialog = $("#llmOnboardingDialog");
+  if (dialog && !dialog.open) {
+    dialog.showModal();
+    updateSimpleOnboardingActions();
+  }
+}
+
+function updateSimpleOnboardingActions() {
+  const key = $("#onboardingApiKey")?.value.trim() || "";
+  const openAiButton = $("#saveOnboardingApiKey");
+  const localButton = $("#useLocalOnboardingModel");
+  const canUseOpenAi = looksLikeOpenAiApiKey(key);
+  openAiButton.disabled = !canUseOpenAi;
+  openAiButton.classList.toggle("onboardingPrimaryAction", canUseOpenAi);
+  localButton.classList.toggle("onboardingPrimaryAction", !canUseOpenAi);
+}
+
+function showAdvancedLlmDialog() {
+  $("#llmOnboardingDialog")?.close();
+  $("#onboardingCoach").hidden = true;
+  clearOnboardingTarget();
+  updateOnboardingProviderVisibility();
+  $("#llmAdvancedStatus").textContent = "";
+  $("#llmAdvancedDialog")?.showModal();
+}
+
+function closeAdvancedLlmDialog() {
+  $("#llmAdvancedDialog")?.close();
+  showLlmOnboardingDialog();
+  updateSimpleOnboardingActions();
+}
+
+async function loadOnboarding() {
+  state.onboarding = await api("/api/onboarding");
+  if (
+    state.onboarding.step === "orcid"
+    && state.onboarding.population?.has_person
+    && !state.orcidDiscoveryAttempted
+  ) {
+    state.orcidDiscoveryAttempted = true;
+    try {
+      const discovery = await api("/api/orcid/discover", { method: "POST" });
+      if (discovery.auto_linked) {
+        await loadConnections();
+        await loadPersonIdentifiers();
+        state.onboarding = await api("/api/onboarding");
+      }
+    } catch (error) {
+      console.warn("Automatic ORCID discovery failed", error);
+    }
+  }
+  renderOnboardingCoach();
+  return state.onboarding;
+}
+
+async function skipOnboardingStep() {
+  const step = state.onboarding?.step;
+  if (!step) return;
+  state.onboarding = await api("/api/onboarding/step", {
+    method: "POST",
+    body: JSON.stringify({ step, action: "skip" }),
+  });
+  state.zoteroSetupOpened = false;
+  renderOnboardingCoach();
+}
+
+async function completeOnboarding() {
+  const step = state.onboarding?.step || "inbox";
+  state.onboarding = await api("/api/onboarding/step", {
+    method: "POST",
+    body: JSON.stringify({ step, action: "complete" }),
+  });
+  renderOnboardingCoach();
+}
+
+async function configureOnboardingLlm(provider, apiKey = "", overrides = {}) {
+  const payload = {
+    provider,
+    ollama_url: "http://127.0.0.1:11434",
+    ollama_model: "llama3.1:8b",
+    api_base_url: "https://api.openai.com/v1",
+    api_model: "gpt-4.1-mini",
+    bundled_llama_model_path: "",
+    bundled_llama_ctx_size: "4096",
+    api_key: apiKey,
+    ...overrides,
+  };
+  await api("/api/cv-import/settings", { method: "PUT", body: JSON.stringify(payload) });
+  $("#llmOnboardingDialog")?.close();
+  $("#llmAdvancedDialog")?.close();
+  await loadCvImportSettings();
+  await loadOnboarding();
+  const pendingFiles = state.pendingCvImportFiles;
+  state.pendingCvImportFiles = [];
+  if (pendingFiles.length) await importCvFiles(pendingFiles);
+}
+
+async function saveOnboardingApiKey(event) {
+  event.preventDefault();
+  const key = $("#onboardingApiKey")?.value.trim() || "";
+  const error = $("#llmOnboardingError");
+  if (!key) {
+    error.textContent = "Paste an OpenAI API key or choose the local model.";
+    error.hidden = false;
+    return;
+  }
+  try {
+    error.hidden = true;
+    await configureOnboardingLlm("openai", key);
+  } catch (caught) {
+    error.textContent = caught.message;
+    error.hidden = false;
+  }
+}
+
+async function useLocalOnboardingModel() {
+  await configureOnboardingLlm("bundled_llama");
+}
+
+function updateOnboardingProviderVisibility() {
+  const provider = $("#onboardingProvider")?.value || "bundled_llama";
+  $("#onboardingOllamaFields").hidden = provider !== "ollama";
+  $("#onboardingApiFields").hidden = !["openai", "openai_compatible"].includes(provider);
+  $("#onboardingApiBaseUrlField").hidden = provider === "openai";
+  if (provider === "openai") $("#onboardingApiBaseUrl").value = "https://api.openai.com/v1";
+}
+
+function onboardingAdvancedPayload() {
+  return {
+    provider: $("#onboardingProvider").value,
+    ollama_url: $("#onboardingOllamaUrl").value.trim(),
+    ollama_model: $("#onboardingOllamaModel").value.trim(),
+    api_base_url: $("#onboardingApiBaseUrl").value.trim(),
+    api_model: $("#onboardingApiModel").value.trim(),
+    api_key: $("#onboardingAdvancedApiKey").value.trim(),
+  };
+}
+
+async function testOnboardingAdvancedConfig() {
+  const status = $("#llmAdvancedStatus");
+  status.textContent = "Testing connection…";
+  try {
+    const result = await api("/api/cv-import/test-connection", {
+      method: "POST",
+      body: JSON.stringify(onboardingAdvancedPayload()),
+    });
+    status.textContent = result.message || "Connection successful.";
+  } catch (caught) {
+    status.textContent = caught.message;
+  }
+}
+
+async function saveOnboardingAdvancedConfig(event) {
+  event.preventDefault();
+  const settings = onboardingAdvancedPayload();
+  const status = $("#llmAdvancedStatus");
+  try {
+    status.textContent = "";
+    await configureOnboardingLlm(settings.provider, settings.api_key, settings);
+  } catch (caught) {
+    status.textContent = caught.message;
+  }
+}
+
+function openOrcidLinkDialog() {
+  $("#orcidLinkValue").value = $("#connectionOrcid").value || "";
+  $("#orcidDiscoveryResults").innerHTML = "";
+  $("#orcidLinkError").hidden = true;
+  renderOrcidOAuthStatus();
+  $("#orcidLinkDialog").showModal();
+}
+
+function renderOrcidOAuthStatus() {
+  const panel = $("#orcidOauthPanel");
+  const fallback = $("#orcidManualFallback");
+  const button = $("#connectOrcidOAuth");
+  const label = $("#connectOrcidOAuthLabel");
+  const description = $("#orcidOauthDescription");
+  const status = $("#orcidOauthStatus");
+  const oauth = state.orcidOauth;
+  const currentOrcid = String(state.connections?.orcid_id || "").toUpperCase();
+  const available = Boolean(state.cloud.enabled && oauth?.configured);
+  panel.hidden = !state.cloud.enabled;
+  fallback.open = !available;
+  if (!state.cloud.enabled) return;
+  if (!state.orcidOauthLoaded) {
+    description.textContent = "Checking whether secure ORCID sign-in is available…";
+    label.textContent = "Connect your ORCID iD";
+    status.textContent = "";
+    button.disabled = true;
+    return;
+  }
+  if (!available) {
+    description.textContent = "Secure ORCID sign-in has not yet been enabled for this VitaMine deployment.";
+    label.textContent = "ORCID sign-in unavailable";
+    status.textContent = "You can link an iD manually below in the meantime.";
+    button.disabled = true;
+    return;
+  }
+  description.textContent = "Sign in at ORCID to verify your iD and return securely to VitaMine.";
+  button.disabled = false;
+  if (!oauth.connected) {
+    label.textContent = "Connect your ORCID iD";
+    status.textContent = "";
+    return;
+  }
+  const identity = [oauth.display_name, oauth.orcid_id].filter(Boolean).join(" · ");
+  status.textContent = `Authenticated with ORCID${identity ? ` as ${identity}` : ""}.`;
+  label.textContent = currentOrcid === String(oauth.orcid_id || "").toUpperCase()
+    ? "Reconnect your ORCID iD"
+    : "Use this ORCID iD for this CV";
+  button.disabled = false;
+}
+
+async function loadOrcidOAuthStatus() {
+  if (!state.cloud.enabled) {
+    state.orcidOauth = null;
+    state.orcidOauthLoaded = true;
+    renderOrcidOAuthStatus();
+    return;
+  }
+  try {
+    state.orcidOauth = await api("/gateway/orcid/oauth/status");
+  } catch (error) {
+    state.orcidOauth = null;
+    console.warn("ORCID OAuth status is unavailable:", error);
+  } finally {
+    state.orcidOauthLoaded = true;
+  }
+  renderOrcidOAuthStatus();
+}
+
+async function connectOrcidOAuth() {
+  const oauth = state.orcidOauth;
+  const currentOrcid = String(state.connections?.orcid_id || "").toUpperCase();
+  if (oauth?.connected && currentOrcid !== String(oauth.orcid_id || "").toUpperCase()) {
+    const button = $("#connectOrcidOAuth");
+    button.disabled = true;
+    try {
+      const result = await api("/gateway/orcid/oauth/link-current", { method: "POST" });
+      $("#connectionOrcid").value = result.orcid_id;
+      $("#orcidLinkValue").value = result.orcid_id;
+      await loadConnections();
+      await loadPersonIdentifiers();
+      await loadOnboarding();
+      pollAutomaticInstitutionMapping();
+      setStatus("Authenticated ORCID iD linked");
+    } catch (error) {
+      $("#orcidLinkError").textContent = error.message;
+      $("#orcidLinkError").hidden = false;
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
+  try {
+    const started = await api("/gateway/orcid/oauth/start", { method: "POST" });
+    window.location.assign(started.authorization_url);
+  } catch (error) {
+    $("#orcidLinkError").textContent = error.message;
+    $("#orcidLinkError").hidden = false;
+  }
+}
+
+function handleOrcidOAuthResult() {
+  const url = new URL(window.location.href);
+  const result = url.searchParams.get("orcid_oauth");
+  if (!result) return;
+  const messages = {
+    connected: ["ORCID iD authenticated and linked", false],
+    cancelled: ["ORCID sign-in was cancelled", false],
+    "workspace-changed": ["The open CV changed during ORCID sign-in. Try again from this CV.", true],
+    "link-error": ["ORCID sign-in completed, but the iD could not be linked to this CV. Open the ORCID dialog to retry.", true],
+    error: ["ORCID sign-in could not be completed. Please try again.", true],
+  };
+  const [message, isError] = messages[result] || messages.error;
+  setStatus(message, { error: isError });
+  url.searchParams.delete("orcid_oauth");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
+function renderOrcidCandidates(data) {
+  const container = $("#orcidDiscoveryResults");
+  if (data.auto_linked) {
+    container.innerHTML = `<div class="orcidCandidate"><strong>Linked ${escapeHtml(data.orcid_id)}</strong><span>Exact-name high-confidence public ORCID match.</span></div>`;
+    $("#orcidLinkValue").value = data.orcid_id;
+    return;
+  }
+  if (data.warning) {
+    container.innerHTML = `<p>${escapeHtml(data.warning)}</p>`;
+    return;
+  }
+  container.innerHTML = (data.candidates || []).map((candidate) => `
+    <button class="orcidCandidate" type="button" data-orcid="${escapeHtml(candidate.orcid_id)}">
+      <strong>${escapeHtml(candidate.name || candidate.orcid_id)}</strong>
+      <span>${escapeHtml(candidate.orcid_id)}${candidate.institutions?.length ? ` · ${escapeHtml(candidate.institutions.join(", "))}` : ""}</span>
+    </button>
+  `).join("") || "<p>No confident public ORCID match found. Paste the iD below.</p>";
+  $$(".orcidCandidate[data-orcid]").forEach((button) => button.addEventListener("click", () => {
+    $("#orcidLinkValue").value = button.dataset.orcid;
+  }));
+}
+
+async function discoverOrcid() {
+  const container = $("#orcidDiscoveryResults");
+  container.innerHTML = "<p>Searching the public ORCID directory…</p>";
+  try {
+    const data = await api("/api/orcid/discover", { method: "POST" });
+    renderOrcidCandidates(data);
+    if (data.auto_linked) {
+      await loadConnections();
+      await loadPersonIdentifiers();
+      await loadOnboarding();
+      pollAutomaticInstitutionMapping();
+    }
+  } catch (error) {
+    container.innerHTML = `<p class="fieldError">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function linkOrcid(event) {
+  event.preventDefault();
+  const error = $("#orcidLinkError");
+  try {
+    const data = await api("/api/orcid/link", {
+      method: "POST",
+      body: JSON.stringify({ orcid_id: $("#orcidLinkValue").value }),
+    });
+    $("#connectionOrcid").value = data.orcid_id;
+    $("#orcidLinkDialog").close();
+    await loadConnections();
+    await loadPersonIdentifiers();
+    await loadOnboarding();
+    pollAutomaticInstitutionMapping();
+  } catch (caught) {
+    error.textContent = caught.message;
+    error.hidden = false;
+  }
 }
 
 async function useExampleDatabase() {
@@ -131,15 +1130,56 @@ async function useExampleDatabase() {
   window.location.reload();
 }
 
-async function createBlankDatabase() {
-  const name = window.prompt("Name for the new database", "workspace");
-  if (name === null) return;
-  await api("/api/database/create", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-  setStatus("Blank database created");
-  window.location.reload();
+function setNewDatabaseError(message = "") {
+  const field = $("#newDatabaseNameField");
+  const input = $("#newDatabaseName");
+  const error = $("#newDatabaseError");
+  if (!field || !input || !error) return;
+  field.classList.toggle("invalid", Boolean(message));
+  input.setAttribute("aria-invalid", message ? "true" : "false");
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+function openNewDatabaseDialog() {
+  const dialog = $("#newDatabaseDialog");
+  const input = $("#newDatabaseName");
+  if (!dialog || !input) return;
+  input.value = "workspace";
+  setNewDatabaseError("");
+  if (typeof dialog.showModal === "function") dialog.showModal();
+  else dialog.setAttribute("open", "");
+  input.focus();
+  input.select();
+}
+
+function closeNewDatabaseDialog() {
+  const dialog = $("#newDatabaseDialog");
+  if (!dialog) return;
+  if (typeof dialog.close === "function") dialog.close();
+  else dialog.removeAttribute("open");
+}
+
+async function createBlankDatabase(event) {
+  event.preventDefault();
+  const name = $("#newDatabaseName")?.value.trim() || "";
+  if (!name) {
+    setNewDatabaseError("Enter a database name.");
+    return;
+  }
+  setNewDatabaseError("");
+  try {
+    await api("/api/database/create", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    setStatus("Blank database created");
+    closeNewDatabaseDialog();
+    window.location.reload();
+  } catch (error) {
+    setNewDatabaseError(error.message || "Could not create database.");
+    setStatus(error.message);
+  }
 }
 
 async function useDatabasePath(path) {
@@ -182,13 +1222,26 @@ async function loadCvImportSettings() {
   if (!$("#cvImportProvider")) return;
   const data = await api("/api/cv-import/settings");
   state.cvImport = data;
+  const configurationAllowed = data.configuration_allowed !== false;
+  const settingsControls = $("#cvImportSettingsControls");
+  const managedNotice = $("#managedLlmNotice");
+  if (settingsControls) settingsControls.hidden = !configurationAllowed;
+  if (managedNotice) managedNotice.hidden = configurationAllowed;
   $("#cvImportProvider").value = data.provider || "bundled_llama";
   $("#cvImportOllamaUrl").value = data.ollama_url || "http://127.0.0.1:11434";
   $("#cvImportOllamaModel").value = data.ollama_model || "llama3.1:8b";
   $("#cvImportApiBaseUrl").value = data.api_base_url || "https://api.openai.com/v1";
-  $("#cvImportApiModel").value = data.api_model || "gpt-4.1-mini";
+  const apiModel = data.api_model || "gpt-4.1-mini";
+  $("#cvImportApiModel").value = apiModel;
+  $("#cvImportOpenAiModel").value = OPENAI_MODEL_PRESETS.has(apiModel) ? apiModel : "custom";
   $("#cvImportApiKey").value = "";
-  $("#cvImportKeyStatus").textContent = data.api_key_set ? "API key saved" : "No API key";
+  $("#cvImportApiKey").placeholder = data.api_key_set ? "Saved locally; paste to replace" : "Paste API key";
+  $("#cvImportKeyStatus").textContent = data.api_key_set ? "API key saved locally" : "No API key";
+  if (!configurationAllowed) {
+    $("#cvImportOllamaFields").hidden = true;
+    $("#cvImportApiFields").hidden = true;
+    return;
+  }
   updateCvImportProviderVisibility();
 }
 
@@ -199,33 +1252,94 @@ function updateCvImportProviderVisibility() {
   const ollamaFields = $("#cvImportOllamaFields");
   const apiFields = $("#cvImportApiFields");
   const apiBaseUrlField = $("#cvImportApiBaseUrlField");
+  const openAiModelField = $("#cvImportOpenAiModelField");
   const apiModelField = $("#cvImportApiModelField");
+  const openAiModel = $("#cvImportOpenAiModel");
+  if (provider === "openai") {
+    $("#cvImportApiBaseUrl").value = "https://api.openai.com/v1";
+  }
   if (ollamaFields) ollamaFields.hidden = provider !== "ollama";
   if (apiFields) apiFields.hidden = !["openai", "openai_compatible"].includes(provider);
   if (apiBaseUrlField) apiBaseUrlField.hidden = provider !== "openai_compatible";
-  if (apiModelField) apiModelField.hidden = provider !== "openai_compatible";
+  if (openAiModelField) openAiModelField.hidden = provider !== "openai";
+  if (apiModelField) apiModelField.hidden = provider === "openai" ? openAiModel?.value !== "custom" : provider !== "openai_compatible";
+  if (provider === "openai" && openAiModel && openAiModel.value !== "custom") {
+    $("#cvImportApiModel").value = openAiModel.value;
+  }
 }
 
 async function saveCvImportSettings() {
   if (!$("#cvImportProvider")) return;
-  await api("/api/cv-import/settings", {
+  const testsConnection = ["openai", "openai_compatible"].includes($("#cvImportProvider").value);
+  const apiKeyInput = $("#cvImportApiKey").value;
+  if ($("#cvImportProvider").value === "openai" && apiKeyInput.trim() && !looksLikeOpenAiApiKey(apiKeyInput)) {
+    setStatus("OpenAI API keys should start with sk-. Clear the key field or paste a valid OpenAI API key.");
+    return;
+  }
+  if (testsConnection) {
+    setStatus("Testing API connection...");
+  }
+  setActionButtons(true);
+  try {
+    await api("/api/cv-import/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        provider: $("#cvImportProvider").value,
+        ollama_url: $("#cvImportOllamaUrl").value,
+        ollama_model: $("#cvImportOllamaModel").value,
+        api_base_url: $("#cvImportApiBaseUrl").value,
+        api_model: $("#cvImportProvider").value === "openai" && $("#cvImportOpenAiModel").value !== "custom"
+          ? $("#cvImportOpenAiModel").value
+          : $("#cvImportApiModel").value,
+        api_key: normalizedApiKeyInput(apiKeyInput),
+      }),
+    });
+    setStatus(testsConnection ? "API connection verified; CV import settings saved" : "CV import settings saved");
+    await loadCvImportSettings();
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    setActionButtons(false);
+  }
+}
+
+async function loadEnrichmentSettings() {
+  const discovery = $("#aiWebDiscoveryEnabled");
+  if (!discovery) return;
+  const data = await api("/api/enrichment-settings");
+  state.enrichmentSettings = data;
+  discovery.checked = !!data.ai_web_discovery_enabled;
+  const lastRun = $("#enrichmentLastRun");
+  if (lastRun) lastRun.textContent = data.enrichment_last_run ? `Last enriched ${data.enrichment_last_run}` : "Not enriched yet";
+}
+
+async function saveEnrichmentSettings() {
+  await api("/api/enrichment-settings", {
     method: "PUT",
     body: JSON.stringify({
-      provider: $("#cvImportProvider").value,
-      ollama_url: $("#cvImportOllamaUrl").value,
-      ollama_model: $("#cvImportOllamaModel").value,
-      api_base_url: $("#cvImportApiBaseUrl").value,
-      api_model: $("#cvImportApiModel").value,
-      api_key: $("#cvImportApiKey").value,
+      ai_web_discovery_enabled: $("#aiWebDiscoveryEnabled").checked,
     }),
   });
-  setStatus("CV import settings saved");
-  await loadCvImportSettings();
+  setStatus("Enrichment option saved");
+  await loadEnrichmentSettings();
 }
 
 async function importCvFiles(files) {
   files = Array.from(files || []);
   if (!files.length) return;
+  if (state.onboarding?.enabled && !state.onboarding.llm_configured) {
+    state.pendingCvImportFiles = files;
+    const coach = $("#onboardingCoach");
+    if (coach) coach.hidden = true;
+    clearOnboardingTarget();
+    showLlmOnboardingDialog();
+    return;
+  }
+  if (state.onboarding?.step === "import_cv") {
+    const coach = $("#onboardingCoach");
+    if (coach) coach.hidden = true;
+    clearOnboardingTarget();
+  }
   const form = new FormData();
   files.forEach((file) => form.append("files", file));
   const startedAt = Date.now();
@@ -236,7 +1350,7 @@ async function importCvFiles(files) {
       ? "Uploading and extracting text"
       : elapsed < 45
         ? "Running import parser"
-        : "Still working; local LLM imports can take a few minutes";
+        : "Still working; LLM imports can take a few minutes";
     return [
       `Importing ${files.length} CV document${files.length === 1 ? "" : "s"}...`,
       "",
@@ -245,39 +1359,46 @@ async function importCvFiles(files) {
       `${phase} (${elapsed}s elapsed)`,
     ].join("\n");
   };
-  const output = $("#cvImportOutput");
-  if (output) output.textContent = progressText();
-  const progressTimer = window.setInterval(() => {
-    const currentOutput = $("#cvImportOutput");
-    if (currentOutput) currentOutput.textContent = progressText();
-  }, 1000);
-  setStatus(`Importing ${files.length} CV document${files.length === 1 ? "" : "s"}...`);
+  const stopProcessing = startProcessing(
+    `Importing ${files.length} CV document${files.length === 1 ? "" : "s"}…`,
+    progressText(),
+  );
   setActionButtons(true);
   try {
-    const data = await api("/api/cv-import/upload", {
+    const uploadPath = state.cloud.enabled && state.cloud.workspace?.background_jobs
+      ? "/api/cloud/jobs/cv-import"
+      : "/api/cv-import/upload";
+    let data = await api(uploadPath, {
       method: "POST",
       body: form,
     });
-    window.clearInterval(progressTimer);
-    const mode = data.used_llm ? "LLM" : "heuristic";
+    if (data.background && data.job?.id) {
+      state.cloud.activeJob = data.job;
+      setCloudJobControls(true);
+      data = await waitForCloudJob(data.job.id);
+    }
     const publicationPart = data.publications_inserted ? `, ${data.publications_inserted} publications` : "";
     const narrativePart = data.narratives_imported ? `, ${data.narratives_imported} narrative report${data.narratives_imported === 1 ? "" : "s"}` : "";
-    const warningText = (data.warnings || []).length ? `; ${data.warnings.length} warning(s)` : "";
-    if ($("#cvImportOutput")) $("#cvImportOutput").textContent = JSON.stringify(data, null, 2);
-    setStatus(`Imported ${data.entries_inserted || 0} entries, ${data.contributions_inserted || 0} Contributions to Science${publicationPart}${narrativePart} via ${mode}${warningText}`);
+    const rememberedPart = data.staged?.remembered_rejections ? ` ${data.staged.remembered_rejections} previously rejected candidate${data.staged.remembered_rejections === 1 ? "" : "s"} skipped.` : "";
+    const stagedPart = data.candidates_staged ? `${data.candidates_staged} candidates staged for review.${rememberedPart}` : rememberedPart.trim();
+    const reviewText = (data.warnings || []).length ? " Review the import log for details." : "";
+    appendConsole(JSON.stringify(data, null, 2));
+    setStatus(stagedPart || `Imported ${data.entries_inserted || 0} entries, ${data.contributions_inserted || 0} Contributions to Science${publicationPart}${narrativePart}.${reviewText}`);
     await loadSummary();
+    await loadImportInbox();
     await loadMetrics();
     await loadEntries();
     await loadPublications();
     await loadPerson();
     await loadNarrativeReport();
     await loadBiosketch();
+    if (data.candidates_staged) await openImportReview(data);
+    await loadOnboarding();
   } catch (error) {
-    window.clearInterval(progressTimer);
-    if ($("#cvImportOutput")) $("#cvImportOutput").textContent = error.message;
-    setStatus(error.message);
+    setStatus(error.message, { error: true });
+    if (state.onboarding?.step === "import_cv") renderOnboardingCoach();
   } finally {
-    window.clearInterval(progressTimer);
+    stopProcessing();
     setActionButtons(false);
     if ($("#cvImportFileInput")) $("#cvImportFileInput").value = "";
   }
@@ -293,14 +1414,19 @@ async function loadConnections() {
   $("#connectionZoteroSource").value = data.zotero_source_mode || "my_publications";
   $("#publicationSourcePolicy").value = data.publication_source_policy || "zotero_primary_orcid_validation";
   renderZoteroCollections();
-  $("#connectionStatus").textContent = data.zotero_api_key_set ? "Zotero key saved" : "No Zotero key";
+  const effective = data.effective_publication_source_policy || data.publication_source_policy || "";
+  $("#connectionStatus").textContent = data.zotero_api_key_set
+    ? "Zotero key saved"
+    : (effective === "orcid_only" && data.orcid_id ? "ORCID-only sync active" : "No Zotero key");
   updateZoteroSourceVisibility();
+  await loadOrcidOAuthStatus();
 }
 
 async function saveConnections(event) {
   event.preventDefault();
   const sourceMode = $("#connectionZoteroSource").value;
   const selected = sourceMode === "collection" ? selectedZoteroCollection() : null;
+  const orcidId = $("#connectionOrcid").value.trim();
   await api("/api/connections", {
     method: "PUT",
     body: JSON.stringify({
@@ -320,6 +1446,8 @@ async function saveConnections(event) {
     await testZoteroConnection();
   }
   await loadPersonIdentifiers();
+  await loadOnboarding();
+  if (orcidId) pollAutomaticInstitutionMapping();
 }
 
 function renderZoteroLibraries() {
@@ -404,6 +1532,11 @@ async function connectZotero() {
   const data = await api("/api/zotero/connect-url");
   window.open(data.url, "_blank", "noopener,width=980,height=760,left=0,top=0");
   setStatus(data.oauth_available ? "Opening Zotero authorization" : "Opening Zotero key setup");
+  if (state.onboarding?.step === "zotero") {
+    state.zoteroSetupOpened = true;
+    renderOnboardingCoach();
+    window.setTimeout(() => $("#connectionZoteroKey")?.focus(), 400);
+  }
 }
 
 async function loadZoteroCollections() {
@@ -447,17 +1580,48 @@ async function loadMetrics() {
   const data = await api("/api/metrics");
   const pubs = data.publications || {};
   $("#metricsGrid").innerHTML = [
-    metricCard("Visible pubs", pubs.visible || 0),
-    metricCard("Peer reviewed", pubs.peer_reviewed || 0),
-    metricCard("Short selected", pubs.selected_short || 0),
-    metricCard("Ultrashort", pubs.selected_ultrashort || 0),
-    metricCard("ORCID matched", pubs.orcid_matched || 0),
-    metricCard("Citation metrics", pubs.citation_metric_count || 0),
-    metricCard("OpenAlex Citations", pubs.openalex_cited_by_total || 0),
-    metricCard("Impact factors", pubs.impact_factor_count || 0),
-    metricCard("Hidden/problem", pubs.suppressed || 0),
-    metricCard("Missing year", pubs.missing_year || 0),
-    metricCard("Missing DOI", pubs.missing_doi || 0),
+    metricCard(
+      "Total Publications",
+      pubs.visible || 0,
+      "All publications included in your CV metrics, including preprints and other formats. Records marked hidden or problematic are excluded.",
+      "total-publications",
+    ),
+    metricCard(
+      "Peer Reviewed Publications",
+      pubs.peer_reviewed || 0,
+      "Publications categorized as peer reviewed. This is a subset of Total Publications.",
+      "peer-reviewed",
+    ),
+    metricCard(
+      "Total Citations",
+      pubs.openalex_cited_by_total || 0,
+      "Cumulative citations to your work as reported by OpenAlex.",
+      "total-citations",
+    ),
+    metricCard(
+      "ORCID Matched Publications",
+      pubs.orcid_matched || 0,
+      "Publications in this CV that are linked to a work on your ORCID record.",
+      "orcid-matched",
+    ),
+    metricCard(
+      "Publications with Citation Data",
+      pubs.citation_metric_count || 0,
+      "Publications for which VitaMine has an OpenAlex citation count. This measures data coverage, not the impact of those publications.",
+      "citation-coverage",
+    ),
+    metricCard(
+      "Publications with Impact Factors",
+      pubs.impact_factor_count || 0,
+      "Publications whose journal has a stored Journal Impact Factor. The Impact Factor is a journal-level citation average and does not measure the quality of an individual paper.",
+      "impact-factor-coverage",
+    ),
+    metricCard(
+      "Hidden / Problem Records",
+      pubs.suppressed || 0,
+      "Records excluded from normal CV output and public metrics because they were marked as duplicates, uncertain matches, or other problems.",
+      "hidden-records",
+    ),
   ].join("");
   $("#yearMetrics").innerHTML = (data.by_year || [])
     .map((row) => `<span>${row.year}: <strong>${row.count}</strong></span>`)
@@ -468,10 +1632,152 @@ async function loadMetrics() {
       return `<span>${row.venue}: <strong>${row.count}</strong>${impact}</span>`;
     })
     .join("");
+  renderCitationProfile(data.citation_profile || {});
 }
 
-function metricCard(label, value) {
-  return `<div class="metricCard"><strong>${value}</strong><span>${label}</span></div>`;
+function metricCard(label, value, description, key) {
+  const tooltipId = `metric-tooltip-${key}`;
+  return `
+    <article class="metricCard" tabindex="0" aria-describedby="${tooltipId}">
+      <strong>${escapeHtml(formatMetricNumber(value))}</strong>
+      <span class="metricLabel">${escapeHtml(label)}<i aria-hidden="true">i</i></span>
+      <span id="${tooltipId}" class="metricTooltip">${escapeHtml(description)}</span>
+    </article>`;
+}
+
+function formatMetricNumber(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function formatMetricDecimal(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "—";
+  return number.toLocaleString(undefined, {
+    minimumFractionDigits: Number.isInteger(number) ? 0 : 1,
+    maximumFractionDigits: 2,
+  });
+}
+
+function citationAxisMax(value) {
+  const amount = Number(value || 0);
+  if (!amount) return 0;
+  const magnitude = 10 ** Math.floor(Math.log10(amount));
+  const normalized = amount / magnitude;
+  const step = [1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10].find((candidate) => normalized <= candidate) || 10;
+  return step * magnitude;
+}
+
+function renderCitationProfile(profile) {
+  const coverage = $("#citationProfileCoverage");
+  const table = $("#citationProfileTable");
+  const chart = $("#citationProfileChart");
+  if (!coverage || !table || !chart) return;
+  const all = profile.all || {};
+  const recent = profile.since_yearly_citations || profile.since_publication_year || {};
+  const sinceYear = profile.since_year || "";
+  coverage.textContent = `${formatMetricNumber(profile.citation_metric_count || 0)} publications with OpenAlex citation data`;
+  table.innerHTML = `
+    <div></div>
+    <strong>All</strong>
+    <strong>Since ${escapeHtml(sinceYear)}</strong>
+    <span>Citations</span>
+    <strong>${formatMetricNumber(all.citations)}</strong>
+    <strong>${formatMetricNumber(recent.citations)}</strong>
+    <span>h-index</span>
+    <strong>${formatMetricNumber(all.h_index)}</strong>
+    <strong>${formatMetricNumber(recent.h_index)}</strong>
+    <span>i10-index</span>
+    <strong>${formatMetricNumber(all.i10_index)}</strong>
+    <strong>${formatMetricNumber(recent.i10_index)}</strong>
+  `;
+  const years = profile.by_year || [];
+  const maxCitations = Math.max(...years.map((row) => Number(row.citations || 0)), 0);
+  const axisMax = citationAxisMax(maxCitations);
+  chart.innerHTML = years.length && axisMax
+    ? `<div class="citationChartPlot">
+        <div class="citationChartBars">${years.map((row, index) => {
+          const height = Math.max(6, Number(row.citations || 0) / axisMax * 100);
+          const year = escapeHtml(row.year);
+          return `<button
+            type="button"
+            class="citationBarItem"
+            data-citation-year-index="${index}"
+            aria-label="${year}: ${formatMetricNumber(row.citations)} citations. Show yearly details."
+            aria-describedby="citationYearDetail"
+          >
+            <span class="citationBarValue">${formatMetricNumber(row.citations)}</span>
+            <span class="citationBarTrack"><span class="citationBar" style="height:${height.toFixed(1)}%"></span></span>
+            <strong>${year}</strong>
+          </button>`;
+        }).join("")}</div>
+        <div class="citationAxis" aria-hidden="true">
+          <div></div>
+          <div class="citationAxisTicks">
+            ${[1, 0.75, 0.5, 0.25, 0].map((fraction) => `
+              <span style="top:${((1 - fraction) * 100).toFixed(1)}%">${formatMetricNumber(axisMax * fraction)}</span>
+            `).join("")}
+          </div>
+          <div></div>
+        </div>
+      </div>
+      <div id="citationYearDetail" class="citationYearDetail" hidden></div>`
+    : `<p class="emptyState">No yearly OpenAlex citation counts available yet.</p>`;
+  if (years.length) {
+    requestAnimationFrame(() => {
+      const bars = chart.querySelector(".citationChartBars");
+      if (bars) bars.scrollLeft = bars.scrollWidth;
+    });
+    const detail = chart.querySelector("#citationYearDetail");
+    const barItems = chart.querySelectorAll(".citationBarItem");
+    const hideDetail = () => {
+      if (!detail) return;
+      detail.hidden = true;
+      barItems.forEach((item) => item.removeAttribute("aria-current"));
+    };
+    const showDetail = (item) => {
+      if (!detail) return;
+      const row = years[Number(item.dataset.citationYearIndex)];
+      if (!row) return;
+      const impactFactorCount = Number(row.impact_factor_count || 0);
+      detail.innerHTML = `
+        <strong>${escapeHtml(row.year)} details</strong>
+        <dl>
+          <div>
+            <dt>Citations received</dt>
+            <dd>${formatMetricNumber(row.citations)}</dd>
+          </div>
+          <div>
+            <dt>First/last-author citations</dt>
+            <dd>${formatMetricNumber(row.first_last_author_citations)}</dd>
+          </div>
+          <div>
+            <dt>Publications published</dt>
+            <dd>${formatMetricNumber(row.publications_published)}</dd>
+          </div>
+          <div>
+            <dt>Combined journal Impact Factors</dt>
+            <dd>${impactFactorCount ? formatMetricDecimal(row.impact_factor_sum) : "—"}</dd>
+          </div>
+        </dl>
+        <small>
+          Citations are citations received during this year. The Impact Factor figure sums the journal-level
+          values available for ${formatMetricNumber(impactFactorCount)}
+          ${impactFactorCount === 1 ? "publication" : "publications"} published that year; it is not a paper-quality score.
+        </small>
+      `;
+      detail.hidden = false;
+      barItems.forEach((candidate) => candidate.toggleAttribute("aria-current", candidate === item));
+    };
+    barItems.forEach((item) => {
+      item.addEventListener("mouseenter", () => showDetail(item));
+      item.addEventListener("mouseleave", () => {
+        if (document.activeElement !== item) hideDetail();
+      });
+      item.addEventListener("focus", () => showDetail(item));
+      item.addEventListener("blur", hideDetail);
+      item.addEventListener("click", () => showDetail(item));
+    });
+  }
 }
 
 const MAP_WIDTH = 1000;
@@ -648,10 +1954,11 @@ function renderCollaborationMap() {
   const own = data.nodes.find((node) => node.own) || data.own;
   const collaborators = (data.nodes || []).filter((node) => !node.own);
   if (!collaborators.length) {
+    const needsOwnInstitution = data.needs_own_institution;
     container.innerHTML = `
       <div class="emptyMap">
-        <strong>No collaboration geography yet</strong>
-        <span>Run DOI metadata enrichment to collect OpenAlex institution locations.</span>
+        <strong>${needsOwnInstitution ? "Institution mapping pending" : "No collaboration geography yet"}</strong>
+        <span>${needsOwnInstitution ? "Save an institution or connect ORCID; VitaMine will add its map coordinates automatically." : "Resolve publication metadata to collect OpenAlex institution locations."}</span>
       </div>`;
     $("#collaborationMapStats").innerHTML = `<span>Institutions: <strong>0</strong></span>`;
     $("#collaborationCountries").innerHTML = "";
@@ -813,7 +2120,7 @@ function actionLog(target, data) {
   Object.entries(data)
     .filter(([key]) => !["ok", "stdout"].includes(key))
     .forEach(([key, value]) => lines.push(`${key}: ${value}`));
-  $(target).textContent = lines.filter(Boolean).join("\n") || "Done.";
+  appendConsole(lines.filter(Boolean).join("\n") || "Done.");
 }
 
 function exportLanguage() {
@@ -822,10 +2129,140 @@ function exportLanguage() {
 
 async function loadExportSettings() {
   const data = await api("/api/export-settings");
+  state.exportSettings = data;
   const label = data.home_language_label || "Deutsch";
   $("#homeLanguageLabel").value = label;
   $("#homeLanguageOption").textContent = label;
+  const citationStyle = $("#exportCitationStyle");
+  if (citationStyle) {
+    const styleGroups = new Map();
+    (data.citation_style_options || []).forEach((option) => {
+      const group = option.group || "Other";
+      if (!styleGroups.has(group)) styleGroups.set(group, []);
+      styleGroups.get(group).push(option);
+    });
+    citationStyle.innerHTML = [...styleGroups.entries()].map(([group, options]) =>
+      `<optgroup label="${escapeHtml(group)}">${options.map((option) =>
+        `<option value="${escapeHtml(option.id)}" title="${escapeHtml(option.description || "")}">${escapeHtml(option.label)}</option>`
+      ).join("")}</optgroup>`
+    ).join("");
+    citationStyle.value = data.citation_style || "vitamine-long";
+  }
   renderLongPublicationCategories(data);
+}
+
+async function loadExportFormats() {
+  try {
+    const data = await api("/api/export-formats");
+    state.exportFormatsApiAvailable = true;
+    state.exportFormats = Array.isArray(data.formats) ? data.formats : [];
+  } catch (error) {
+    if (error.status !== 404) throw error;
+    const response = await fetch("/static/export-formats.json");
+    if (!response.ok) throw error;
+    const data = await response.json();
+    state.exportFormatsApiAvailable = false;
+    state.exportFormats = (Array.isArray(data.formats) ? data.formats : []).map((format) => ({
+      ...format,
+      installed: Boolean(format.preinstalled),
+    }));
+  }
+  renderExportFormats();
+  renderPromptExportFormats();
+}
+
+function promptCapableFormats() {
+  return state.exportFormats.filter((format) => format.installed && ["long", "short", "ultrashort"].includes(format.exporter));
+}
+
+function renderPromptExportFormats() {
+  const select = $("#promptExportFormat");
+  if (!select) return;
+  const previous = select.value;
+  const formats = promptCapableFormats();
+  select.innerHTML = formats.map((format) => `<option value="${escapeHtml(format.id)}">${escapeHtml(format.name)}</option>`).join("");
+  if (formats.some((format) => format.id === previous)) select.value = previous;
+  loadPromptExportPlan();
+}
+
+function renderPromptExportPlan(plan) {
+  const container = $("#promptExportPlan");
+  const clear = $("#clearPromptExportPlan");
+  if (!container) return;
+  if (!plan) {
+    container.hidden = true;
+    container.innerHTML = "";
+    if (clear) clear.hidden = true;
+    return;
+  }
+  const papers = (plan.selected_publications || []).map((publication, index) => `
+    <li>
+      <strong>${index + 1}. ${escapeHtml(publication.title || "Untitled publication")}</strong>
+      <span>${escapeHtml([publication.year, publication.venue, publication.authorship?.replace("_", "/"), publication.impact_factor != null ? `IF ${publication.impact_factor}` : ""].filter(Boolean).join(" · "))}</span>
+    </li>`).join("");
+  const warnings = (plan.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
+  container.innerHTML = `
+    <div class="promptPlanSummary">
+      <strong>${escapeHtml(plan.interpretation || "Export plan ready")}</strong>
+      <span>${plan.max_pages ? `Target: ${plan.max_pages} page${plan.max_pages === 1 ? "" : "s"} · ` : ""}${plan.selected_publication_ids?.length || 0} publication${plan.selected_publication_ids?.length === 1 ? "" : "s"} · ${escapeHtml((plan.section_strategy || "compact").replace("_", " "))}</span>
+    </div>
+    ${warnings ? `<ul class="promptPlanWarnings">${warnings}</ul>` : ""}
+    <ol class="promptPlanPublications">${papers}</ol>`;
+  container.hidden = false;
+  if (clear) clear.hidden = false;
+}
+
+async function loadPromptExportPlan() {
+  const formatId = $("#promptExportFormat")?.value;
+  if (!formatId || !state.exportFormatsApiAvailable) {
+    renderPromptExportPlan(null);
+    return;
+  }
+  try {
+    const data = await api(`/api/export-formats/${encodeURIComponent(formatId)}/prompt-plan`);
+    state.exportPromptPlans[formatId] = data.plan || null;
+    renderPromptExportPlan(data.plan);
+    if (data.plan?.prompt && $("#promptExportInstructions")) $("#promptExportInstructions").value = data.plan.prompt;
+  } catch (error) {
+    renderPromptExportPlan(null);
+    setStatus(error.message, { error: true });
+  }
+}
+
+async function createPromptExportPlan() {
+  const formatId = $("#promptExportFormat")?.value;
+  const prompt = $("#promptExportInstructions")?.value.trim();
+  if (!formatId || !prompt) {
+    setStatus("Choose a format and describe the export you want.");
+    return;
+  }
+  const stopProcessing = startProcessing("Creating a tailored export plan…", "The configured LLM is reviewing publication metadata and your constraints.");
+  setActionButtons(true);
+  try {
+    const data = await api(`/api/export-formats/${encodeURIComponent(formatId)}/prompt-plan`, {
+      method: "POST",
+      body: JSON.stringify({ prompt }),
+    });
+    state.exportPromptPlans[formatId] = data.plan;
+    renderPromptExportPlan(data.plan);
+    renderExportFormats();
+    setStatus(`Export plan ready with ${data.plan?.selected_publication_ids?.length || 0} publications`);
+    appendConsole(JSON.stringify(data.plan, null, 2));
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  } finally {
+    stopProcessing();
+    setActionButtons(false);
+  }
+}
+
+async function clearPromptExportPlan() {
+  const formatId = $("#promptExportFormat")?.value;
+  if (!formatId) return;
+  await api(`/api/export-formats/${encodeURIComponent(formatId)}/prompt-plan`, { method: "DELETE" });
+  state.exportPromptPlans[formatId] = null;
+  renderPromptExportPlan(null);
+  setStatus("Prompt-guided export plan cleared");
 }
 
 function renderLongPublicationCategories(settings = {}) {
@@ -837,6 +2274,11 @@ function renderLongPublicationCategories(settings = {}) {
     <input type="checkbox" class="longPublicationCategory" value="${escapeHtml(option.key)}" ${selected.has(option.key) ? "checked" : ""}>
     ${escapeHtml(option.label)}
   </label>`).join("");
+  $$(".longPublicationCategory").forEach((input) => {
+    input.addEventListener("change", () => {
+      state.exportSettings.long_cv_publication_categories = selectedLongPublicationCategories();
+    });
+  });
 }
 
 function selectedLongPublicationCategories() {
@@ -845,59 +2287,184 @@ function selectedLongPublicationCategories() {
 
 async function saveExportSettings() {
   const label = $("#homeLanguageLabel").value.trim() || "Deutsch";
+  const categories = selectedLongPublicationCategories();
   $("#homeLanguageLabel").value = label;
   $("#homeLanguageOption").textContent = label;
+  state.exportSettings.home_language_label = label;
+  state.exportSettings.long_cv_publication_categories = categories;
+  state.exportSettings.citation_style = $("#exportCitationStyle")?.value || "vitamine-long";
   await api("/api/export-settings", {
     method: "PUT",
     body: JSON.stringify({
       home_language_label: label,
-      long_cv_publication_categories: selectedLongPublicationCategories(),
+      citation_style: state.exportSettings.citation_style,
+      long_cv_publication_categories: categories,
     }),
   });
   setStatus("Native / second CV language saved");
 }
 
-function refreshExportLinks(profile, data) {
-  const selectors = {
-    ultrashort: {
-      docx: "#openUltraDashboardDocx",
-      html: "#openUltraDashboardHtml",
-      pdf: "#openUltraDashboardPdf",
-    },
-    short: {
-      docx: "#openShortDashboardDocx",
-      html: "#openShortDashboardHtml",
-      pdf: "#openShortDashboardPdf",
-    },
-    long: {
-      docx: "#openLongDashboardDocx",
-      html: "#openLongDashboardHtml",
-      pdf: "#openLongDashboardPdf",
-    },
-    biosketch: {
-      docx: "#openBiosketchDashboardDocx",
-      html: "#openBiosketchDashboardHtml",
-      pdf: "#openBiosketchDashboardPdf",
-    },
-  }[profile];
-  if (!selectors) return;
-  Object.entries(selectors).forEach(([format, selector]) => {
-    if (data[format]) enableExportLink(selector, data[format], data[`${format}_path`]);
+function exportFormatMatches(format, query) {
+  if (!query) return true;
+  const searchable = [
+    format.name,
+    format.summary,
+    format.length,
+    format.audience,
+    ...(format.focus || []),
+  ].join(" ").toLowerCase();
+  return searchable.includes(query);
+}
+
+function exportFormatCard(format) {
+  const quality = format.quality || {};
+  const source = format.source || {};
+  const artifact = state.exportArtifacts[format.id] || {};
+  const focus = (format.focus || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+  const sourceLink = String(source.url || "").startsWith("https://")
+    ? `<a class="formatSourceLink" href="${escapeHtml(source.url)}" target="_blank" rel="noopener">Format guidance</a>`
+    : "";
+  let actions = "";
+  if (format.installed) {
+    const buildLabel = quality.key === "reference_only" ? "Export draft" : "Export Word document";
+    const buildButton = format.exporter
+      ? `<button class="formatActionButton formatBuildButton" data-format-id="${escapeHtml(format.id)}" type="button">${buildLabel}</button>`
+      : `<button type="button" disabled title="The Word exporter has not been implemented yet">Export coming later</button>`;
+    const artifactLink = artifact.docx
+      ? `<a href="${escapeHtml(artifact.docx)}" title="${escapeHtml(artifact.docx_path || "")}" target="_blank" rel="noopener">Open last export</a>`
+      : "";
+    actions = `${buildButton}${artifactLink}<button class="formatActionButton quietButton formatRemoveButton" data-format-id="${escapeHtml(format.id)}" type="button">Remove</button>`;
+  } else {
+    actions = `<button class="formatActionButton formatInstallButton" data-format-id="${escapeHtml(format.id)}" type="button">Add format</button>`;
+  }
+  const longOptions = format.installed && format.exporter === "long"
+    ? `<details class="formatCardOptions">
+        <summary>Content options</summary>
+        <div id="longPublicationCategories" class="checkboxStack compact"></div>
+      </details>`
+    : "";
+  return `<article class="formatCard ${format.installed ? "installed" : ""}">
+    <div class="formatPreview">
+      <img src="${escapeHtml(format.preview)}" alt="">
+    </div>
+    <div class="formatCardBody">
+      <div class="formatTitleRow">
+        <div>
+          <h4>${escapeHtml(format.name)}</h4>
+          <span class="qualityBadge quality-${escapeHtml(quality.key || "preview")}" title="${escapeHtml(quality.description || "")}">${escapeHtml(quality.label || "")}</span>
+        </div>
+        ${format.preinstalled ? '<span class="defaultBadge">Included</span>' : ""}
+      </div>
+      <span class="formatLength">${escapeHtml(format.length || "")}</span>
+      <p>${escapeHtml(format.summary || "")}</p>
+      <div class="formatFocus" aria-label="Focus">${focus}</div>
+      ${longOptions}
+      ${sourceLink ? `<div class="formatSource">${sourceLink}</div>` : ""}
+      <div class="buttonRow formatActions">${actions}</div>
+    </div>
+  </article>`;
+}
+
+function bindExportFormatActions() {
+  $$(".formatInstallButton").forEach((button) => {
+    button.addEventListener("click", () => installExportFormat(button.dataset.formatId));
+  });
+  $$(".formatRemoveButton").forEach((button) => {
+    button.addEventListener("click", () => removeExportFormat(button.dataset.formatId));
+  });
+  $$(".formatBuildButton").forEach((button) => {
+    button.addEventListener("click", () => buildExportFormat(button.dataset.formatId));
   });
 }
 
-function enableExportLink(selector, href, path = "") {
-  const link = $(selector);
-  if (!link) return;
-  link.href = href;
-  if (path) link.title = path;
-  link.classList.remove("disabledLink");
-  link.removeAttribute("aria-disabled");
-  link.removeAttribute("tabindex");
+function renderExportFormats() {
+  const query = ($("#exportFormatSearch")?.value || "").trim().toLowerCase();
+  const matching = state.exportFormats.filter((format) => exportFormatMatches(format, query));
+  const installed = matching.filter((format) => format.installed);
+  const available = matching.filter((format) => !format.installed);
+  const installedContainer = $("#installedExportFormats");
+  const availableContainer = $("#availableExportFormats");
+  if (installedContainer) installedContainer.innerHTML = installed.map(exportFormatCard).join("");
+  if (availableContainer) availableContainer.innerHTML = available.map(exportFormatCard).join("");
+  if ($("#availableFormatsEmpty")) $("#availableFormatsEmpty").hidden = available.length > 0;
+  if ($("#exportFormatCount")) {
+    const installedTotal = state.exportFormats.filter((format) => format.installed).length;
+    $("#exportFormatCount").textContent = `${installedTotal} format${installedTotal === 1 ? "" : "s"}`;
+  }
+  renderLongPublicationCategories(state.exportSettings);
+  bindExportFormatActions();
+}
+
+async function installExportFormat(formatId) {
+  if (!state.exportFormatsApiAvailable) {
+    const format = state.exportFormats.find((item) => item.id === formatId);
+    if (format) format.installed = true;
+    renderExportFormats();
+    setStatus("Format added for this session");
+    return;
+  }
+  await api(`/api/export-formats/${encodeURIComponent(formatId)}/install`, { method: "POST" });
+  await loadExportFormats();
+  setStatus("Format added");
+}
+
+async function removeExportFormat(formatId) {
+  if (!state.exportFormatsApiAvailable) {
+    const format = state.exportFormats.find((item) => item.id === formatId);
+    if (format) format.installed = false;
+    delete state.exportArtifacts[formatId];
+    renderExportFormats();
+    setStatus("Format removed for this session");
+    return;
+  }
+  await api(`/api/export-formats/${encodeURIComponent(formatId)}/install`, { method: "DELETE" });
+  delete state.exportArtifacts[formatId];
+  await loadExportFormats();
+  setStatus("Format removed");
+}
+
+async function buildExportFormat(formatId) {
+  const format = state.exportFormats.find((item) => item.id === formatId);
+  if (!format) return;
+  const language = exportLanguage();
+  if (format.exporter === "long") await saveExportSettings();
+  const legacyPaths = {
+    ultrashort: "/api/actions/build-ultrashort-tabular",
+    short: "/api/actions/build-short",
+    long: "/api/actions/build-long",
+    biosketch: "/api/actions/build-biosketch",
+  };
+  const actionPath = state.exportFormatsApiAvailable
+    ? `/api/actions/export/${encodeURIComponent(formatId)}`
+    : legacyPaths[format.exporter];
+  if (!actionPath) return;
+  $("#exportResult").hidden = false;
+  $("#exportResultTitle").textContent = `Creating ${format.name}…`;
+  $("#exportOutput").textContent = "The Word document will open when it is ready.";
+  $("#exportResultLink").hidden = true;
+  let data;
+  try {
+    data = await runAction(
+      `${actionPath}?lang=${encodeURIComponent(language)}`,
+      `${format.name} exported`,
+      `Creating ${format.name}...`,
+    );
+  } catch (error) {
+    $("#exportResultTitle").textContent = `Could not export ${format.name}`;
+    $("#exportOutput").textContent = error.message || "Export failed";
+    return;
+  }
+  state.exportArtifacts[formatId] = data;
+  renderExportFormats();
+  $("#exportResultTitle").textContent = `${format.name} is ready`;
+  $("#exportOutput").textContent = data.docx_path ? data.docx_path.split("/").pop() : "Word document created";
+  $("#exportResultLink").href = data.docx;
+  $("#exportResultLink").hidden = false;
+  openBuiltArtifact(data);
 }
 
 function openBuiltArtifact(data) {
-  const href = data.pdf || data.docx || data.html;
+  const href = data.docx;
   if (!href) return;
   window.open(href, "_blank", "noopener,width=980,height=760,left=0,top=0");
 }
@@ -1026,20 +2593,84 @@ function entryPayload() {
   };
 }
 
-async function saveEntry(event) {
-  event.preventDefault();
-  const id = $("#entryId").value;
+function mergeSavedEntry(id, payload) {
+  const numericId = Number(id);
+  const index = state.entries.findIndex((entry) => entry.id === numericId);
+  const savedEntry = { ...(index >= 0 ? state.entries[index] : {}), ...payload, id: numericId };
+  if (index >= 0) {
+    state.entries[index] = savedEntry;
+  } else {
+    state.entries.push(savedEntry);
+  }
+  if (state.selectedEntry && state.selectedEntry.id === numericId) state.selectedEntry = savedEntry;
+  renderEntries();
+}
+
+async function persistEntrySnapshot(snapshot) {
+  const id = snapshot.id;
   const method = id ? "PUT" : "POST";
   const path = id ? `/api/entries/${id}` : "/api/entries";
-  await api(path, { method, body: JSON.stringify(entryPayload()) });
-  setStatus("Entry saved");
-  await loadEntries();
+  const data = await api(path, { method, body: JSON.stringify(snapshot.payload) });
+  const savedId = id || data.id;
+  if (savedId) {
+    if (!id && $("#entryId").value === "") {
+      $("#entryId").value = savedId;
+      state.selectedEntry = { ...snapshot.payload, id: Number(savedId), achievements: [] };
+    }
+    if (!id && state.entryAutosave.pending && !state.entryAutosave.pending.id) {
+      state.entryAutosave.pending.id = String(savedId);
+    }
+    mergeSavedEntry(savedId, snapshot.payload);
+  }
+  setStatus("Entry autosaved");
   await loadSummary();
+}
+
+async function runEntryAutosave() {
+  clearTimeout(state.entryAutosave.timer);
+  state.entryAutosave.timer = null;
+  if (state.entryAutosave.saving || !state.entryAutosave.pending) return;
+
+  const snapshot = state.entryAutosave.pending;
+  state.entryAutosave.pending = null;
+  state.entryAutosave.saving = true;
+  try {
+    await persistEntrySnapshot(snapshot);
+  } catch (error) {
+    state.entryAutosave.pending = snapshot;
+    setStatus(error.message);
+  } finally {
+    state.entryAutosave.saving = false;
+    if (state.entryAutosave.pending) {
+      state.entryAutosave.timer = setTimeout(runEntryAutosave, 500);
+    }
+  }
+}
+
+function scheduleEntryAutosave() {
+  state.entryAutosave.pending = {
+    id: $("#entryId").value,
+    payload: entryPayload(),
+  };
+  clearTimeout(state.entryAutosave.timer);
+  state.entryAutosave.timer = setTimeout(runEntryAutosave, 450);
+}
+
+async function saveEntry(event) {
+  event.preventDefault();
+  state.entryAutosave.pending = {
+    id: $("#entryId").value,
+    payload: entryPayload(),
+  };
+  await runEntryAutosave();
 }
 
 async function deleteEntry() {
   const id = $("#entryId").value;
   if (!id) return;
+  clearTimeout(state.entryAutosave.timer);
+  state.entryAutosave.timer = null;
+  state.entryAutosave.pending = null;
   await api(`/api/entries/${id}`, { method: "DELETE" });
   clearEntryForm();
   setStatus("Entry deleted");
@@ -1054,7 +2685,76 @@ async function loadPerson() {
     const input = form.elements.namedItem(key);
     if (input) input.value = value || "";
   });
+  renderPersonPortrait(person);
   await loadPersonIdentifiers();
+}
+
+function renderPersonPortrait(person = {}) {
+  const image = $("#personPortraitImage");
+  const placeholder = $("#personPortraitPlaceholder");
+  const removeButton = $("#removePersonPortrait");
+  const status = $("#personPortraitStatus");
+  const available = Boolean(person.portrait_available);
+  image.hidden = !available;
+  placeholder.hidden = available;
+  removeButton.hidden = !available;
+  if (available) {
+    const name = person.display_name || person.full_name || "researcher";
+    image.alt = `Portrait of ${name}`;
+    image.src = `/api/person/portrait?v=${Date.now()}`;
+    status.textContent = person.portrait_filename
+      ? `${person.portrait_filename} · stored in this VitaMine database.`
+      : "Profile picture stored in this VitaMine database.";
+  } else {
+    image.removeAttribute("src");
+    image.alt = "";
+    status.textContent = "JPEG or PNG, up to 25 MB. Saved as PNG.";
+  }
+}
+
+async function uploadPersonPortrait(event) {
+  const input = event.currentTarget;
+  const file = input.files?.[0];
+  if (!file) return;
+  const status = $("#personPortraitStatus");
+  if (file.size > 25 * 1024 * 1024) {
+    status.textContent = "The original portrait must be 25 MB or smaller.";
+    input.value = "";
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file, file.name);
+  status.textContent = "Optimizing and saving picture…";
+  input.disabled = true;
+  try {
+    const result = await api("/api/person/portrait", { method: "PUT", body: form });
+    renderPersonPortrait(result);
+    setStatus("Profile picture saved");
+  } catch (error) {
+    status.textContent = error.message;
+    setStatus(error.message, { error: true });
+  } finally {
+    input.disabled = false;
+    input.value = "";
+  }
+}
+
+async function removePersonPortrait() {
+  if (!window.confirm("Remove this profile picture from the VitaMine database and public profile?")) return;
+  const button = $("#removePersonPortrait");
+  const status = $("#personPortraitStatus");
+  button.disabled = true;
+  status.textContent = "Removing picture…";
+  try {
+    const result = await api("/api/person/portrait", { method: "DELETE" });
+    renderPersonPortrait(result);
+    setStatus("Profile picture removed");
+  } catch (error) {
+    status.textContent = error.message;
+    setStatus(error.message, { error: true });
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function loadPersonIdentifiers() {
@@ -1086,23 +2786,51 @@ async function loadPersonIdentifiers() {
 }
 
 function clearIdentifierForm() {
+  $("#identifierForm").reset();
   $("#identifierId").value = "";
-  $("#identifierPlatform").value = "";
-  $("#identifierType").value = "";
-  $("#identifierValue").value = "";
-  $("#identifierUrl").value = "";
-  $("#identifierNotes").value = "";
+  $("#identifierDialogTitle").textContent = "Add identifier";
+  $("#deleteIdentifier").hidden = true;
+  setIdentifierFormError("");
 }
 
-function editIdentifier(id) {
+function populateIdentifierForm(id) {
   const row = state.identifiers.find((identifier) => identifier.id === id);
-  if (!row) return;
+  if (!row) return false;
   $("#identifierId").value = row.id;
   $("#identifierPlatform").value = row.platform || "";
   $("#identifierType").value = row.identifier_type || "";
   $("#identifierValue").value = row.identifier_value || "";
   $("#identifierUrl").value = row.url || "";
   $("#identifierNotes").value = row.notes || "";
+  $("#identifierDialogTitle").textContent = "Edit identifier";
+  $("#deleteIdentifier").hidden = false;
+  return true;
+}
+
+function setIdentifierFormError(message = "") {
+  const error = $("#identifierFormError");
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+function openIdentifierDialog(id = null) {
+  clearIdentifierForm();
+  if (id && !populateIdentifierForm(id)) return;
+  const dialog = $("#identifierDialog");
+  if (dialog.showModal) dialog.showModal();
+  else dialog.setAttribute("open", "");
+  $("#identifierPlatform").focus();
+}
+
+function closeIdentifierDialog() {
+  const dialog = $("#identifierDialog");
+  if (dialog.close) dialog.close();
+  else dialog.removeAttribute("open");
+  clearIdentifierForm();
+}
+
+function editIdentifier(id) {
+  openIdentifierDialog(id);
 }
 
 function identifierPayload() {
@@ -1118,38 +2846,170 @@ function identifierPayload() {
   };
 }
 
+function autofillIdentifierUrl() {
+  const platform = $("#identifierPlatform").value.trim().toLowerCase();
+  const value = $("#identifierValue").value.trim();
+  if (!$("#identifierUrl").value.trim() && platform === "orcid" && value) {
+    $("#identifierUrl").value = `https://orcid.org/${value}`;
+  }
+}
+
 async function saveIdentifier(event) {
   event.preventDefault();
-  const id = $("#identifierId").value;
-  const path = id ? `/api/person/identifiers/${id}` : "/api/person/identifiers";
-  const method = id ? "PUT" : "POST";
-  await api(path, { method, body: JSON.stringify(identifierPayload()) });
-  setStatus("Identifier saved");
-  clearIdentifierForm();
-  await loadPersonIdentifiers();
-  await loadConnections();
+  autofillIdentifierUrl();
+  setIdentifierFormError("");
+  const saveButton = $("#identifierForm button[type='submit']");
+  saveButton.disabled = true;
+  try {
+    const id = $("#identifierId").value;
+    const path = id ? `/api/person/identifiers/${id}` : "/api/person/identifiers";
+    const method = id ? "PUT" : "POST";
+    const payload = identifierPayload();
+    await api(path, { method, body: JSON.stringify(payload) });
+    setStatus("Identifier saved");
+    closeIdentifierDialog();
+    await loadPersonIdentifiers();
+    await loadConnections();
+    if (payload.platform.trim().toLowerCase() === "orcid") {
+      pollAutomaticInstitutionMapping();
+    }
+  } catch (error) {
+    setIdentifierFormError(error.message);
+    setStatus(error.message);
+  } finally {
+    saveButton.disabled = false;
+  }
 }
 
 async function deleteIdentifier() {
   const id = $("#identifierId").value;
   if (!id) return;
-  await api(`/api/person/identifiers/${id}`, { method: "DELETE" });
-  setStatus("Identifier deleted");
-  clearIdentifierForm();
-  await loadPersonIdentifiers();
-  await loadConnections();
+  setIdentifierFormError("");
+  const button = $("#deleteIdentifier");
+  button.disabled = true;
+  try {
+    await api(`/api/person/identifiers/${id}`, { method: "DELETE" });
+    setStatus("Identifier deleted");
+    closeIdentifierDialog();
+    await loadPersonIdentifiers();
+    await loadConnections();
+  } catch (error) {
+    setIdentifierFormError(error.message);
+    setStatus(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
-async function savePerson(event) {
-  event.preventDefault();
+function personPayload() {
   const payload = {};
   new FormData($("#personForm")).forEach((value, key) => {
     payload[key] = value;
   });
-  await api("/api/person", { method: "PUT", body: JSON.stringify(payload) });
-  await saveExportSettings();
-  setStatus("Person saved");
-  await loadCollaborationMap();
+  return payload;
+}
+
+function setPersonAutosaveStatus(text, stateName = "") {
+  const status = $("#personAutosaveStatus");
+  if (!status) return;
+  status.textContent = text;
+  status.dataset.state = stateName;
+}
+
+async function runPersonAutosave() {
+  clearTimeout(state.personAutosave.timer);
+  state.personAutosave.timer = null;
+  if (state.personAutosave.saving || !state.personAutosave.pending) return;
+
+  const snapshot = state.personAutosave.pending;
+  state.personAutosave.pending = null;
+  state.personAutosave.saving = true;
+  let retryDelay = 100;
+  setPersonAutosaveStatus("Saving changes…", "saving");
+  try {
+    const result = await api("/api/person", {
+      method: "PUT",
+      body: JSON.stringify(snapshot.payload),
+    });
+    setPersonAutosaveStatus(
+      state.personAutosave.pending ? "Unsaved changes" : "All changes saved",
+      state.personAutosave.pending ? "pending" : "saved",
+    );
+    $("#globalActivity")?.classList.remove("hasError");
+    if (result.institution_mapping_pending) {
+      pollAutomaticInstitutionMapping();
+    } else if (snapshot.refreshMap) {
+      try {
+        await loadCollaborationMap();
+      } catch (_error) {
+        // The person record is already saved; the map can refresh later.
+      }
+    }
+  } catch (error) {
+    retryDelay = 1200;
+    if (!state.personAutosave.pending) {
+      state.personAutosave.pending = snapshot;
+    } else {
+      state.personAutosave.pending.refreshMap =
+        state.personAutosave.pending.refreshMap || snapshot.refreshMap;
+    }
+    setPersonAutosaveStatus("Couldn’t save yet · retrying", "error");
+    setStatus(error.message, { log: false, error: true });
+  } finally {
+    state.personAutosave.saving = false;
+    if (state.personAutosave.pending) {
+      state.personAutosave.timer = setTimeout(runPersonAutosave, retryDelay);
+    }
+  }
+}
+
+function schedulePersonAutosave(event, { immediate = false } = {}) {
+  const institutionField = String(event?.target?.name || "").startsWith("own_institution_");
+  state.personAutosave.pending = {
+    payload: personPayload(),
+    refreshMap: Boolean(state.personAutosave.pending?.refreshMap || institutionField),
+  };
+  clearTimeout(state.personAutosave.timer);
+  if (immediate) {
+    runPersonAutosave();
+  } else {
+    setPersonAutosaveStatus("Unsaved changes", "pending");
+    state.personAutosave.timer = setTimeout(runPersonAutosave, 400);
+  }
+}
+
+function submitPersonAutosave(event) {
+  event.preventDefault();
+  schedulePersonAutosave(event, { immediate: true });
+}
+
+function pollAutomaticInstitutionMapping(attempt = 0) {
+  if (attempt === 0) {
+    if (state.institutionMappingPollActive) return;
+    state.institutionMappingPollActive = true;
+  }
+  const delays = [1200, 2200, 3500, 5000];
+  if (attempt >= delays.length) {
+    state.institutionMappingPollActive = false;
+    return;
+  }
+  setTimeout(async () => {
+    try {
+      const status = await api("/api/person/institution-mapping-status");
+      if (status.mapped && !status.pending) {
+        await loadCollaborationMap();
+        state.institutionMappingPollActive = false;
+        return;
+      }
+      if (!status.pending) {
+        state.institutionMappingPollActive = false;
+        return;
+      }
+    } catch (_error) {
+      // The mapping task is best-effort and a normal page refresh will retry.
+    }
+    pollAutomaticInstitutionMapping(attempt + 1);
+  }, delays[attempt]);
 }
 
 async function loadNarrativeReport() {
@@ -1174,6 +3034,87 @@ async function saveNarrativeReport(event) {
   setStatus("Narrative report saved");
 }
 
+function publicationCategoryLabel(key) {
+  const option = PUBLICATION_CATEGORIES.find((item) => item.key === key);
+  return option ? option.label : String(key || "other").replace(/_/g, " ");
+}
+
+function loadPublicationCategoryFilters() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("vitamine.publicationCategories") || "[]");
+    if (Array.isArray(saved) && saved.length) {
+      state.publicationCategoryFilters = new Set(saved);
+      return;
+    }
+  } catch {
+    // Keep defaults when local storage contains older or invalid values.
+  }
+  state.publicationCategoryFilters = new Set(DEFAULT_PUBLICATION_CATEGORIES);
+}
+
+function renderPublicationCategoryFilters() {
+  const container = $("#publicationCategoryFilters");
+  if (!container) return;
+  container.innerHTML = PUBLICATION_CATEGORIES.map((option) => `<label class="inlineCheck">
+    <input class="publicationCategoryFilter" type="checkbox" value="${escapeHtml(option.key)}" ${state.publicationCategoryFilters.has(option.key) ? "checked" : ""}>
+    ${escapeHtml(option.label)}
+  </label>`).join("");
+  $$(".publicationCategoryFilter").forEach((input) => {
+    input.addEventListener("change", () => {
+      const selected = $$(".publicationCategoryFilter:checked").map((item) => item.value);
+      state.publicationCategoryFilters = new Set(selected);
+      window.localStorage.setItem("vitamine.publicationCategories", JSON.stringify(selected));
+      loadPublications();
+    });
+  });
+}
+
+function renderPublicationCategoryOptions() {
+  const select = $("#publicationCategory");
+  if (!select) return;
+  select.innerHTML = PUBLICATION_CATEGORIES.map((option) => `<option value="${escapeHtml(option.key)}">${escapeHtml(option.label)}</option>`).join("");
+}
+
+function setPublicationCategoryValue(value) {
+  const select = $("#publicationCategory");
+  if (!select) return;
+  const category = value || "peer_reviewed";
+  if (![...select.options].some((option) => option.value === category)) {
+    select.insertAdjacentHTML("beforeend", `<option value="${escapeHtml(category)}">${escapeHtml(publicationCategoryLabel(category))}</option>`);
+  }
+  select.value = category;
+}
+
+function filteredPublications(publications) {
+  return publications.filter((pub) => state.publicationCategoryFilters.has(pub.category || "other"));
+}
+
+function groupedPublications(publications) {
+  const groups = new Map();
+  publications.forEach((pub) => {
+    const key = pub.category || "other";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(pub);
+  });
+  const orderedKeys = PUBLICATION_CATEGORIES.map((option) => option.key)
+    .filter((key) => groups.has(key))
+    .concat(Array.from(groups.keys()).filter((key) => !PUBLICATION_CATEGORIES.some((option) => option.key === key)).sort());
+  return orderedKeys.map((key) => ({ key, publications: groups.get(key) || [] }));
+}
+
+function publicationRow(pub) {
+  return `<tr class="${pub.suppress_display ? "mutedRow" : ""}" draggable="true" data-publication-id="${pub.id}">
+    <td>${escapeHtml(pub.year || "")}</td>
+    <td>${publicationSource(pub)}</td>
+    <td>${publicationFlags(pub)}</td>
+    <td>${escapeHtml(pub.selected_order || "")}</td>
+    <td>${escapeHtml(pub.title || "")}${pub.quality_note ? `<div class="qualityNote">${escapeHtml(pub.quality_note)}</div>` : ""}</td>
+    <td>${escapeHtml(pub.venue || "")}</td>
+    <td>${impactFactor(pub)}</td>
+    <td>${escapeHtml(pub.doi || "")}</td>
+  </tr>`;
+}
+
 async function loadPublications() {
   const params = new URLSearchParams();
   const q = $("#pubSearch").value.trim();
@@ -1183,18 +3124,13 @@ async function loadPublications() {
   params.set("direction", state.publicationSort.direction);
   const data = await api(`/api/publications?${params.toString()}`);
   state.publications = data.publications;
-  $("#publicationsBody").innerHTML = data.publications
-    .map((pub) => `<tr class="${pub.suppress_display ? "mutedRow" : ""}" draggable="true" data-publication-id="${pub.id}">
-      <td>${escapeHtml(pub.year || "")}</td>
-      <td>${publicationSource(pub)}</td>
-      <td>${publicationFlags(pub)}</td>
-      <td>${escapeHtml(pub.selected_order || "")}</td>
-      <td>${escapeHtml(pub.title || "")}${pub.quality_note ? `<div class="qualityNote">${escapeHtml(pub.quality_note)}</div>` : ""}</td>
-      <td>${escapeHtml(pub.venue || "")}</td>
-      <td>${impactFactor(pub)}</td>
-      <td>${escapeHtml(pub.doi || "")}</td>
-    </tr>`)
-    .join("");
+  const filtered = filteredPublications(data.publications);
+  $("#publicationsBody").innerHTML = groupedPublications(filtered)
+    .map((group) => `<tr class="publicationCategoryRow">
+        <th colspan="8">${escapeHtml(publicationCategoryLabel(group.key))}<span>${group.publications.length}</span></th>
+      </tr>
+      ${group.publications.map(publicationRow).join("")}`)
+    .join("") || `<tr><td colspan="8" class="emptyCell">No matching publications.</td></tr>`;
   $$("#publicationsBody tr[data-publication-id]").forEach((row) => {
     row.classList.toggle("selected", Number(row.dataset.publicationId) === state.selectedPublicationId);
     row.addEventListener("click", () => {
@@ -1224,7 +3160,7 @@ function clearPublicationForm() {
   state.selectedPublicationId = null;
   $("#publicationForm").reset();
   $("#publicationId").value = "";
-  $("#publicationCategory").value = "peer_reviewed";
+  setPublicationCategoryValue("peer_reviewed");
   $$("#publicationsBody tr[data-publication-id]").forEach((row) => row.classList.remove("selected"));
 }
 
@@ -1277,13 +3213,13 @@ async function importPublicationIdentifiers(event) {
     return;
   }
   setActionButtons(true);
-  $("#publicationIdentifierResults").textContent = "Resolving identifiers...";
+  const stopProcessing = startProcessing("Resolving publication identifiers…");
   try {
     const data = await api("/api/publications/import-identifiers", {
       method: "POST",
       body: JSON.stringify({ text }),
     });
-    $("#publicationIdentifierResults").textContent = identifierImportSummary(data);
+    appendConsole(identifierImportSummary(data));
     setStatus(`Imported ${data.imported || 0} publication${data.imported === 1 ? "" : "s"} from identifiers`);
     await loadPublications();
     await loadSummary();
@@ -1291,9 +3227,9 @@ async function importPublicationIdentifiers(event) {
     await loadExportProfile("short");
     await loadBiosketch();
   } catch (error) {
-    $("#publicationIdentifierResults").textContent = error.message;
-    setStatus(error.message);
+    setStatus(error.message, { error: true });
   } finally {
+    stopProcessing();
     setActionButtons(false);
   }
 }
@@ -1306,7 +3242,7 @@ function editPublication(id) {
   $("#publicationTitle").value = pub.title || "";
   $("#publicationAuthors").value = pub.authors || "";
   $("#publicationYear").value = pub.year || "";
-  $("#publicationCategory").value = pub.category || "";
+  setPublicationCategoryValue(pub.category || "peer_reviewed");
   $("#publicationVenue").value = pub.venue || "";
   $("#publicationDoi").value = pub.doi || "";
   $("#publicationPmid").value = pub.pmid || "";
@@ -1867,10 +3803,15 @@ function impactFactor(pub) {
 }
 
 async function runAction(path, doneText, workingText = "Working...") {
-  setStatus(workingText);
+  const stopProcessing = startProcessing(workingText);
   setActionButtons(true);
   try {
-    const data = await api(path, { method: "POST" });
+    let data = await api(path, { method: "POST" });
+    if (data.background && data.job?.id) {
+      state.cloud.activeJob = data.job;
+      setCloudJobControls(true);
+      data = await waitForCloudJob(data.job.id);
+    }
     setStatus(doneText);
     await loadSummary();
     await loadMetrics();
@@ -1878,25 +3819,50 @@ async function runAction(path, doneText, workingText = "Working...") {
     await loadPublications();
     return data;
   } catch (error) {
-    setStatus(error.message);
+    setStatus(error.message, { error: true });
     throw error;
   } finally {
+    stopProcessing();
     setActionButtons(false);
   }
 }
 
 function switchView(name) {
-  $$(".tab").forEach((tab) => {
+  $$(".tab[data-view]").forEach((tab) => {
     const selected = tab.dataset.view === name;
     tab.classList.toggle("active", selected);
     tab.setAttribute("aria-selected", selected ? "true" : "false");
     tab.tabIndex = selected ? 0 : -1;
+  });
+  $$(".topbarViewButton[data-view]").forEach((button) => {
+    const selected = button.dataset.view === name;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-pressed", selected ? "true" : "false");
   });
   $$(".view").forEach((view) => {
     const selected = view.id === `${name}View`;
     view.classList.toggle("active", selected);
     view.hidden = !selected;
   });
+}
+
+function enrichmentSummaryText(data) {
+  const summary = data?.enrichment_summary;
+  if (!summary) return "CV enrichment complete";
+  const coverage = summary.citation_coverage || {};
+  const staged = Number(summary.staged_from_sources || 0) + Number(summary.staged_from_web || 0);
+  const reviewed = (
+    Number(summary.matched_at_source || 0)
+    + Number(summary.duplicates || 0)
+    + Number(summary.backfilled || 0)
+  );
+  return [
+    `${formatMetricNumber(summary.source_records_fetched || 0)} source records fetched`,
+    `${formatMetricNumber(reviewed)} already present or backfilled`,
+    `${formatMetricNumber(summary.rejected || 0)} rejected by safety checks`,
+    `${formatMetricNumber(staged)} added to Inbox`,
+    `OpenAlex citations for ${formatMetricNumber(coverage.publications_with_citations || 0)}/${formatMetricNumber(coverage.visible_publications || 0)} publications (${formatMetricNumber(coverage.citation_total || 0)} total)`,
+  ].join(" · ");
 }
 
 function handleTabKeydown(event) {
@@ -1924,28 +3890,112 @@ function debounce(fn, delay = 250) {
   };
 }
 
+async function loadStartupStep(label, loader) {
+  try {
+    await loader();
+  } catch (error) {
+    console.error(`${label} failed`, error);
+    setStatus(`${label}: ${error.message || "Could not load"}`);
+  }
+}
+
 async function init() {
+  try {
+    const response = await fetch("/gateway/workspace/status", { credentials: "same-origin" });
+    if (response.ok) {
+      const workspace = await response.json();
+      configureCloudWorkspace(workspace);
+      const databaseModeHelp = $("#databaseModeHelp");
+      if (databaseModeHelp) databaseModeHelp.hidden = true;
+      ["#renameDatabase", "#useExampleDatabase", "#createBlankDatabase", "#loadDatabase"].forEach((selector) => {
+        const control = $(selector);
+        if (control) control.hidden = true;
+      });
+    }
+  } catch (error) {
+    console.warn("Cloud workspace controls are unavailable:", error);
+  }
+  $("#brandHome").addEventListener("click", returnToWorkspaceHome);
   $$(".tab[data-view]").forEach((tab) => {
     tab.addEventListener("click", () => switchView(tab.dataset.view));
     tab.addEventListener("keydown", handleTabKeydown);
   });
+  $$(".topbarViewButton[data-view]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      switchView(button.dataset.view);
+      if (button.dataset.view === "inbox" && state.onboarding?.step === "inbox") {
+        await completeOnboarding();
+      }
+    });
+  });
+  loadPublicationCategoryFilters();
+  renderPublicationCategoryFilters();
+  renderPublicationCategoryOptions();
   switchView("dashboard");
   $("#sectionFilter").addEventListener("change", loadEntries);
   $("#entrySearch").addEventListener("input", debounce(loadEntries));
   $("#pubSearch").addEventListener("input", debounce(loadPublications));
   $("#showSuppressedPubs").addEventListener("change", loadPublications);
   $("#journalMetricSearch").addEventListener("input", debounce(loadJournalMetrics));
-  $("#saveJournalMetrics").addEventListener("click", saveJournalMetrics);
+  $("#exportFormatSearch").addEventListener("input", renderExportFormats);
+  $("#journalMetricEditor").addEventListener("change", debounce(saveJournalMetrics, 500));
   $("#connectionsForm").addEventListener("submit", saveConnections);
   $("#connectZotero").addEventListener("click", connectZotero);
   $("#testZoteroConnection").addEventListener("click", testZoteroConnection);
   $("#loadZoteroCollections").addEventListener("click", loadZoteroCollections);
   $("#connectionZoteroSource").addEventListener("change", updateZoteroSourceVisibility);
+  $("#inboxStatusFilter").addEventListener("change", () => loadImportInbox());
+  $("#inboxTypeFilter").addEventListener("change", () => loadImportInbox());
+  $("#selectInboxVisible").addEventListener("click", () => setVisibleInboxChecks(true));
+  $("#acceptInboxSelected").addEventListener("click", () => acceptInboxItems("#inboxList"));
+  $("#rejectInboxSelected").addEventListener("click", () => rejectInboxItems("#inboxList"));
+  $("#restoreInboxSelected").addEventListener("click", () => restoreInboxItems("#inboxList"));
+  $("#resolveInboxPublications").addEventListener("click", () => resolveInboxPublications("#inboxList"));
+  $("#acceptHighConfidenceInbox").addEventListener("click", acceptHighConfidenceInbox);
+  $("#rejectDuplicateInbox").addEventListener("click", rejectDuplicateInbox);
+  $("#acceptReviewSelected").addEventListener("click", () => acceptInboxItems("#importReviewList"));
+  $("#rejectReviewSelected").addEventListener("click", () => rejectInboxItems("#importReviewList"));
+  $("#closeImportReview").addEventListener("click", () => $("#importReviewDialog").close());
   $("#useExampleDatabase").addEventListener("click", useExampleDatabase);
-  $("#createBlankDatabase").addEventListener("click", createBlankDatabase);
+  $("#renameDatabase").addEventListener("click", openRenameDatabaseDialog);
+  $("#renameDatabaseForm").addEventListener("submit", renameDatabase);
+  $("#closeRenameDatabaseDialog").addEventListener("click", closeRenameDatabaseDialog);
+  $("#createBlankDatabase").addEventListener("click", openNewDatabaseDialog);
+  $("#closeNewDatabaseDialog").addEventListener("click", closeNewDatabaseDialog);
+  $("#newDatabaseDialog").addEventListener("click", (event) => {
+    if (event.target === $("#newDatabaseDialog")) closeNewDatabaseDialog();
+  });
+  $("#newDatabaseName").addEventListener("input", () => setNewDatabaseError(""));
+  $("#newDatabaseForm").addEventListener("submit", createBlankDatabase);
+  $("#llmOnboardingForm").addEventListener("submit", saveOnboardingApiKey);
+  $("#useLocalOnboardingModel").addEventListener("click", useLocalOnboardingModel);
+  $("#onboardingApiKey").addEventListener("input", updateSimpleOnboardingActions);
+  $("#showOnboardingAdvancedConfig").addEventListener("click", showAdvancedLlmDialog);
+  $("#showOnboardingHowto").addEventListener("click", (event) => {
+    const panel = $("#onboardingHowto");
+    panel.hidden = !panel.hidden;
+    event.currentTarget.setAttribute("aria-expanded", String(!panel.hidden));
+  });
+  $("#onboardingProvider").addEventListener("change", updateOnboardingProviderVisibility);
+  $("#llmAdvancedForm").addEventListener("submit", saveOnboardingAdvancedConfig);
+  $("#testOnboardingAdvancedConfig").addEventListener("click", testOnboardingAdvancedConfig);
+  $("#closeLlmAdvancedDialog").addEventListener("click", closeAdvancedLlmDialog);
+  $("#llmOnboardingDialog").addEventListener("close", () => {
+    if (!state.pendingCvImportFiles.length && state.onboarding?.step === "import_cv") renderOnboardingCoach();
+  });
+  $("#llmOnboardingDialog").addEventListener("cancel", (event) => event.preventDefault());
+  $("#llmAdvancedDialog").addEventListener("cancel", (event) => event.preventDefault());
+  $("#skipOnboardingStep").addEventListener("click", skipOnboardingStep);
+  $("#linkOrcid").addEventListener("click", openOrcidLinkDialog);
+  $("#closeOrcidLinkDialog").addEventListener("click", () => $("#orcidLinkDialog").close());
+  $("#connectOrcidOAuth").addEventListener("click", connectOrcidOAuth);
+  $("#discoverOrcid").addEventListener("click", discoverOrcid);
+  $("#orcidLinkForm").addEventListener("submit", linkOrcid);
   $("#loadDatabase").addEventListener("click", chooseDatabaseFile);
   on("#cvImportProvider", "change", updateCvImportProviderVisibility);
+  on("#cvImportOpenAiModel", "change", updateCvImportProviderVisibility);
   on("#saveCvImportSettings", "click", saveCvImportSettings);
+  on("#aiWebDiscoveryEnabled", "change", saveEnrichmentSettings);
   on("#chooseCvImportFile", "click", () => $("#cvImportFileInput")?.click());
   on("#cvImportFileInput", "change", (event) => importCvFiles(event.target.files));
   on("#importCvDropzone", "dragover", (event) => {
@@ -1988,102 +4038,92 @@ async function init() {
   $("#deletePublication").addEventListener("click", deletePublication);
   $("#newEntry").addEventListener("click", clearEntryForm);
   $("#entryForm").addEventListener("submit", saveEntry);
+  $$("#entryForm input, #entryForm textarea, #entryForm select").forEach((field) => {
+    if (field.type !== "hidden") field.addEventListener("input", scheduleEntryAutosave);
+    if (field.type === "checkbox" || field.tagName === "SELECT") field.addEventListener("change", scheduleEntryAutosave);
+  });
   $("#deleteEntry").addEventListener("click", deleteEntry);
-  $("#personForm").addEventListener("submit", savePerson);
+  $("#personForm").addEventListener("submit", submitPersonAutosave);
+  $("#personPortraitInput").addEventListener("change", uploadPersonPortrait);
+  $("#removePersonPortrait").addEventListener("click", removePersonPortrait);
+  $$("#personForm input[name], #personForm textarea[name], #personForm select[name]").forEach((field) => {
+    field.addEventListener("input", schedulePersonAutosave);
+    field.addEventListener("change", (event) => schedulePersonAutosave(event, { immediate: true }));
+  });
   $("#identifierForm").addEventListener("submit", saveIdentifier);
-  $("#newIdentifier").addEventListener("click", clearIdentifierForm);
+  $("#identifierPlatform").addEventListener("input", autofillIdentifierUrl);
+  $("#identifierValue").addEventListener("input", autofillIdentifierUrl);
+  $("#addIdentifier").addEventListener("click", () => openIdentifierDialog());
+  $("#closeIdentifierDialog").addEventListener("click", closeIdentifierDialog);
+  $("#identifierDialog").addEventListener("click", (event) => {
+    if (event.target === $("#identifierDialog")) closeIdentifierDialog();
+  });
   $("#deleteIdentifier").addEventListener("click", deleteIdentifier);
   $("#narrativeForm").addEventListener("submit", saveNarrativeReport);
   const sync = async () => {
-    $("#syncOutput").textContent = "Syncing Zotero...";
-    const data = await runAction("/api/actions/sync-zotero", "Zotero synced", "Syncing Zotero...");
+    const data = await runAction("/api/actions/sync-zotero", "Zotero pulled", "Pulling from Zotero...");
     actionLog("#syncOutput", data);
   };
-  const syncSources = async () => {
-    $("#syncOutput").textContent = "Syncing publication sources...";
-    const data = await runAction("/api/actions/sync-publication-sources", "Publication sources synced", "Syncing publication sources...");
+  const enrichCv = async () => {
+    if (state.onboarding?.step === "enrich") {
+      const coach = $("#onboardingCoach");
+      if (coach) coach.hidden = true;
+      clearOnboardingTarget();
+    }
+    const enrichPath = state.cloud.enabled && state.cloud.workspace?.background_jobs
+      ? "/api/cloud/jobs/enrich-cv"
+      : "/api/actions/enrich-cv";
+    const data = await runAction(enrichPath, "CV enrichment complete", "Enriching CV from databases and online sources...");
+    setStatus(enrichmentSummaryText(data));
     actionLog("#syncOutput", data);
-  };
-  const buildUltra = async () => {
-    const language = exportLanguage();
-    $("#exportOutput").textContent = `Building tabular one page CV (${language})...`;
-    const data = await runAction(`/api/actions/build-ultrashort-tabular?lang=${encodeURIComponent(language)}`, "Tabular one page CV built", "Building tabular one page CV...");
-    refreshExportLinks("ultrashort", data);
-    actionLog("#exportOutput", data);
-    openBuiltArtifact(data);
-  };
-  const buildLong = async () => {
-    const language = exportLanguage();
-    await saveExportSettings();
-    $("#exportOutput").textContent = `Building long CV (${language})...`;
-    const data = await runAction(`/api/actions/build-long?lang=${encodeURIComponent(language)}`, "Long CV built", "Building long CV...");
-    refreshExportLinks("long", data);
-    actionLog("#exportOutput", data);
-    openBuiltArtifact(data);
-  };
-  const buildShort = async () => {
-    const language = exportLanguage();
-    $("#exportOutput").textContent = `Building short CV (${language})...`;
-    const data = await runAction(`/api/actions/build-short?lang=${encodeURIComponent(language)}`, "Short CV built", "Building short CV...");
-    refreshExportLinks("short", data);
-    actionLog("#exportOutput", data);
-    openBuiltArtifact(data);
-  };
-  const buildBiosketch = async () => {
-    const language = exportLanguage();
-    $("#exportOutput").textContent = `Building biosketch (${language})...`;
-    const data = await runAction(`/api/actions/build-biosketch?lang=${encodeURIComponent(language)}`, "Biosketch built", "Building biosketch...");
-    refreshExportLinks("biosketch", data);
-    actionLog("#exportOutput", data);
-    openBuiltArtifact(data);
-  };
-  const maintainPubs = async () => {
-    $("#syncOutput").textContent = "Cleaning publication rows and applying journal metrics...";
-    const data = await runAction("/api/actions/maintain-publications", "Publication maintenance complete", "Maintaining publications...");
-    actionLog("#syncOutput", data);
-  };
-  const fetchJournalMetrics = async () => {
-    $("#syncOutput").textContent = "Fetching OpenAlex journal metrics...";
-    const data = await runAction("/api/actions/fetch-journal-metrics", "OpenAlex journal metrics fetched", "Fetching OpenAlex journal metrics...");
-    actionLog("#syncOutput", data);
-    await loadJournalMetrics();
-  };
-  const enrichDoi = async () => {
-    $("#syncOutput").textContent = "Enriching DOI metadata from Crossref, PubMed, and OpenAlex...";
-    const data = await runAction("/api/actions/enrich-doi", "DOI metadata enriched", "Enriching DOI metadata...");
-    actionLog("#syncOutput", data);
-  };
-  const syncOrcid = async () => {
-    $("#syncOutput").textContent = "Syncing ORCID public works...";
-    const data = await runAction("/api/actions/sync-orcid", "ORCID synced", "Syncing ORCID...");
-    actionLog("#syncOutput", data);
+    await loadImportInbox();
+    await loadEnrichmentSettings();
+    await loadConnections();
+    await loadPersonIdentifiers();
+    await loadMetrics();
+    await loadPublications();
+    await loadOnboarding();
   };
   $("#syncZoteroDashboard").addEventListener("click", sync);
-  $("#syncSourcesDashboard").addEventListener("click", syncSources);
-  $("#syncOrcidDashboard").addEventListener("click", syncOrcid);
-  $("#enrichDoiDashboard").addEventListener("click", enrichDoi);
-  $("#maintainPubsDashboard").addEventListener("click", maintainPubs);
-  $("#fetchJournalMetrics").addEventListener("click", fetchJournalMetrics);
-  $("#buildUltraDashboard").addEventListener("click", buildUltra);
-  $("#buildShortDashboard").addEventListener("click", buildShort);
-  $("#buildLongDashboard").addEventListener("click", buildLong);
-  $("#buildBiosketchDashboard").addEventListener("click", buildBiosketch);
+  $("#enrichCvDashboard").addEventListener("click", enrichCv);
   $("#homeLanguageLabel").addEventListener("change", saveExportSettings);
-  await loadSummary();
-  await loadDatabaseInfo();
-  await loadCvImportSettings();
-  await loadConnections();
-  await loadExportSettings();
-  await loadMetrics();
-  await loadCollaborationMap();
-  await loadJournalMetrics();
-  await loadExportProfile("ultrashort");
-  await loadExportProfile("short");
-  await loadBiosketch();
-  await loadEntries();
-  await loadPerson();
-  await loadNarrativeReport();
-  await loadPublications();
+  $("#exportCitationStyle").addEventListener("change", async () => {
+    await saveExportSettings();
+    const label = $("#exportCitationStyle").selectedOptions[0]?.textContent || "Citation style";
+    setStatus(`${label} selected for exports`);
+  });
+  $("#promptExportFormat").addEventListener("change", loadPromptExportPlan);
+  $("#createPromptExportPlan").addEventListener("click", createPromptExportPlan);
+  $("#clearPromptExportPlan").addEventListener("click", clearPromptExportPlan);
+  await loadStartupStep("Database", loadDatabaseInfo);
+  await loadStartupStep("Summary", loadSummary);
+  await loadStartupStep("CV import settings", loadCvImportSettings);
+  await loadStartupStep("Connections", loadConnections);
+  await loadStartupStep("Enrichment settings", loadEnrichmentSettings);
+  await loadStartupStep("Import inbox", loadImportInbox);
+  await loadStartupStep("Export settings", loadExportSettings);
+  await loadStartupStep("Export formats", loadExportFormats);
+  await loadStartupStep("Metrics", loadMetrics);
+  await loadStartupStep("Collaboration map", loadCollaborationMap);
+  await loadStartupStep("Journal metrics", loadJournalMetrics);
+  await loadStartupStep("Ultrashort export profile", () => loadExportProfile("ultrashort"));
+  await loadStartupStep("Short export profile", () => loadExportProfile("short"));
+  await loadStartupStep("Biosketch", loadBiosketch);
+  await loadStartupStep("Entries", loadEntries);
+  await loadStartupStep("Person", loadPerson);
+  await loadStartupStep("Narrative report", loadNarrativeReport);
+  await loadStartupStep("Publications", loadPublications);
+  await loadStartupStep("Onboarding", loadOnboarding);
+  await resumeCloudBackgroundJob();
+  handleOrcidOAuthResult();
+  window.addEventListener("resize", () => {
+    const config = ONBOARDING_STEPS[state.onboarding?.step];
+    if (config) positionOnboardingCoach($(config.target), config);
+  });
+  window.addEventListener("scroll", () => {
+    const config = ONBOARDING_STEPS[state.onboarding?.step];
+    if (config) positionOnboardingCoach($(config.target), config);
+  }, { passive: true });
 }
 
 init().catch((error) => setStatus(error.message));

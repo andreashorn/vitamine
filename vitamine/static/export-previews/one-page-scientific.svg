@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a dense one-page tabular academic CV</title>
+  <rect width="240" height="320" rx="8" fill="#e7ecef"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="44" y="36" width="94" height="8" rx="2" fill="#172033"/>
+  <rect x="44" y="50" width="146" height="4" rx="2" fill="#687386"/>
+  <rect x="44" y="65" width="78" height="5" rx="2" fill="#172033"/>
+  <path d="M44 76h152M44 115h152M44 152h152M44 186h152" stroke="#24364b" stroke-width="2"/>
+  <g fill="#9aa5b4"><rect x="44" y="82" width="31" height="4"/><rect x="82" y="82" width="47" height="4"/><rect x="137" y="82" width="59" height="4"/><rect x="44" y="94" width="31" height="4"/><rect x="82" y="94" width="47" height="4"/><rect x="137" y="94" width="54" height="4"/><rect x="44" y="121" width="31" height="4"/><rect x="82" y="121" width="103" height="4"/><rect x="44" y="133" width="31" height="4"/><rect x="82" y="133" width="114" height="4"/></g>
+  <g fill="#687386"><rect x="44" y="160" width="142" height="4"/><rect x="44" y="171" width="126" height="4"/><rect x="44" y="194" width="152" height="4"/><rect x="52" y="205" width="144" height="4"/><rect x="52" y="216" width="139" height="4"/><rect x="52" y="227" width="146" height="4"/><rect x="52" y="238" width="132" height="4"/></g>
+</svg>

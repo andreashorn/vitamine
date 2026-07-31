@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a compact conventional academic CV</title>
+  <rect width="240" height="320" rx="8" fill="#e9eef2"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="44" y="36" width="110" height="10" rx="2" fill="#19334b"/>
+  <rect x="44" y="52" width="82" height="4" fill="#6c8296"/>
+  <g fill="#2f6f72"><rect x="44" y="76" width="58" height="6"/><rect x="44" y="128" width="72" height="6"/><rect x="44" y="191" width="92" height="6"/><rect x="44" y="244" width="84" height="6"/></g>
+  <g fill="#9aa6b2"><rect x="44" y="89" width="35" height="4"/><rect x="88" y="89" width="108" height="4"/><rect x="44" y="100" width="35" height="4"/><rect x="88" y="100" width="96" height="4"/><rect x="44" y="141" width="35" height="4"/><rect x="88" y="141" width="108" height="4"/><rect x="44" y="152" width="35" height="4"/><rect x="88" y="152" width="101" height="4"/><rect x="44" y="163" width="35" height="4"/><rect x="88" y="163" width="89" height="4"/><rect x="44" y="205" width="152" height="4"/><rect x="44" y="216" width="139" height="4"/><rect x="44" y="258" width="152" height="4"/><rect x="44" y="269" width="145" height="4"/><rect x="44" y="280" width="132" height="4"/></g>
+</svg>

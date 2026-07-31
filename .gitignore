@@ -17,6 +17,9 @@ data/*.sqlite-shm
 data/*.sqlite-wal
 data/*.vitamine-shm
 data/*.vitamine-wal
+*.sqlite-journal
+*.vitamine-journal
+**/Icon?
 .env
 *.gguf
 /data/cv-imports

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Workspace — VitaMine</title>
+  <link rel="stylesheet" href="/assets/workspace.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="VitaMine home">
+      <img src="/assets/vitamine-logo.png" alt="VitaMine">
+    </a>
+    <div class="file-actions">
+      <span id="privacyStatus" class="privacy-status">No database open</span>
+      <button id="openButton" class="button primary" type="button">Open .vitamine</button>
+      <button id="saveButton" class="button" type="button" disabled>Save locally</button>
+      <input id="fileInput" type="file" accept=".vitamine,.sqlite,.db,application/vnd.sqlite3" hidden>
+    </div>
+  </header>
+
+  <main>
+    <section id="welcome" class="welcome">
+      <div class="welcome-copy">
+        <p class="eyebrow">Your VitaMine workspace</p>
+        <h1>Open the academic record you already own.</h1>
+        <p>Select a local <code>.vitamine</code> database. It will be read inside
+        this browser—not uploaded to the server.</p>
+        <button id="welcomeOpenButton" class="button primary large" type="button">Choose a database</button>
+        <p id="engineStatus" class="engine-status">Preparing the local database engine…</p>
+      </div>
+      <div class="local-illustration" aria-hidden="true">
+        <span class="file-shape">.vitamine</span>
+        <span class="orbit one"></span>
+        <span class="orbit two"></span>
+      </div>
+    </section>
+
+    <section id="dashboard" class="dashboard" hidden>
+      <div class="dashboard-heading">
+        <div>
+          <p class="eyebrow">Local workspace</p>
+          <h1 id="personName">Academic profile</h1>
+          <p id="personHeadline" class="headline"></p>
+        </div>
+        <div class="local-badge">
+          <span></span>
+          <div><strong>Local file</strong><small id="fileName"></small></div>
+        </div>
+      </div>
+
+      <nav class="workspace-nav" aria-label="Workspace sections">
+        <button class="nav-button active" type="button" data-view="overview">Overview</button>
+        <button class="nav-button" type="button" data-view="profile">Profile</button>
+        <button class="nav-button" type="button" data-view="publications">Publications</button>
+      </nav>
+
+      <section class="workspace-view active" data-view-panel="overview">
+        <div class="metrics">
+          <article><strong id="publicationCount">0</strong><span>Publications</span></article>
+          <article><strong id="entryCount">0</strong><span>CV entries</span></article>
+          <article><strong id="contributionCount">0</strong><span>Contributions</span></article>
+          <article><strong id="sectionCount">0</strong><span>Active sections</span></article>
+        </div>
+
+        <div class="workspace-grid">
+          <article class="panel">
+            <p class="panel-kicker">Profile foundation</p>
+            <h2>Your database is ready</h2>
+            <p>VitaMine has validated the local file and can read and edit its
+            profile and publication records.</p>
+            <dl class="facts">
+              <div><dt>Database</dt><dd id="databaseFile"></dd></div>
+              <div><dt>SQLite</dt><dd id="sqliteVersion"></dd></div>
+              <div><dt>Size</dt><dd id="databaseSize"></dd></div>
+            </dl>
+          </article>
+
+          <article class="panel next">
+            <p class="panel-kicker">Migration status</p>
+            <h2>The core browser workspace is taking shape.</h2>
+            <ul>
+              <li class="done">Open, validate, and save local databases</li>
+              <li class="done">Edit profile information</li>
+              <li class="done">Create and curate publications</li>
+              <li>CV-entry editing</li>
+              <li>Public-profile selection and publishing</li>
+              <li>CV export tools</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section class="workspace-view" data-view-panel="profile" hidden>
+        <div class="section-heading">
+          <div><p class="panel-kicker">Identity and contact</p><h2>Profile</h2></div>
+          <p>Changes stay inside the open database until you save it locally.</p>
+        </div>
+        <form id="profileForm" class="editor-form panel">
+          <div class="form-grid">
+            <label>Full name<input name="full_name" autocomplete="name"></label>
+            <label>Display name<input name="display_name"></label>
+            <label>Degrees<input name="degrees" placeholder="MD, PhD"></label>
+            <label>Position title<input name="position_title"></label>
+            <label class="span-two">Office address<textarea name="office_address" rows="2"></textarea></label>
+            <label>Work email<input name="work_email" type="email" autocomplete="email"></label>
+            <label>Work phone<input name="work_phone" autocomplete="tel"></label>
+            <label>ORCID iD<input name="orcid_id" placeholder="0000-0000-0000-0000"></label>
+            <label>Institution<input name="own_institution_name"></label>
+            <label>Institution country<input name="own_institution_country"></label>
+          </div>
+          <div class="form-actions">
+            <button class="button primary" type="submit">Apply profile changes</button>
+            <span id="profileMessage" class="inline-message" role="status"></span>
+          </div>
+        </form>
+      </section>
+
+      <section class="workspace-view" data-view-panel="publications" hidden>
+        <div class="section-heading publication-heading">
+          <div><p class="panel-kicker">Research record</p><h2>Publications</h2></div>
+          <div class="publication-actions">
+            <input id="publicationSearch" class="search-input" type="search" placeholder="Search title, author, venue…">
+            <button id="newPublicationButton" class="button primary" type="button">Add publication</button>
+          </div>
+        </div>
+        <div class="publication-layout">
+          <div class="publication-list-panel panel">
+            <div id="publicationList" class="publication-list"></div>
+            <p id="publicationEmpty" class="empty-state" hidden>No matching publications.</p>
+          </div>
+          <form id="publicationForm" class="publication-editor panel" hidden>
+            <input name="id" type="hidden">
+            <div class="editor-title">
+              <div><p class="panel-kicker">Publication record</p><h3 id="publicationEditorTitle">Edit publication</h3></div>
+              <button id="closePublicationButton" class="icon-button" type="button" aria-label="Close editor">×</button>
+            </div>
+            <label>Title<textarea name="title" rows="3" required></textarea></label>
+            <label>Authors<textarea name="authors" rows="3"></textarea></label>
+            <div class="form-grid compact">
+              <label>Year<input name="year"></label>
+              <label>Category
+                <select name="category">
+                  <option value="peer_reviewed">Peer reviewed</option>
+                  <option value="preprints">Preprint</option>
+                  <option value="books_chapters">Book / chapter</option>
+                  <option value="patents">Patent</option>
+                  <option value="poster_presentations">Poster</option>
+                  <option value="manuscripts_in_preparation">In preparation</option>
+                </select>
+              </label>
+              <label>Venue<input name="venue"></label>
+              <label>DOI<input name="doi"></label>
+            </div>
+            <label>URL<input name="url" type="url"></label>
+            <label>Citation<textarea name="raw_citation" rows="4"></textarea></label>
+            <div class="form-actions split">
+              <button class="button primary" type="submit">Apply publication</button>
+              <button id="deletePublicationButton" class="button danger" type="button">Delete</button>
+            </div>
+            <p id="publicationMessage" class="inline-message" role="status"></p>
+          </form>
+        </div>
+      </section>
+
+      <p id="workspaceMessage" class="workspace-message" role="status"></p>
+    </section>
+  </main>
+
+  <script type="module" src="/assets/workspace.js"></script>
+</body>
+</html>

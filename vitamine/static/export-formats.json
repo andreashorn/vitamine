@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "formats": [
+    {
+      "id": "vitamine.one-page-scientific",
+      "name": "Tabular One Page CV",
+      "summary": "A dense, scan-friendly scientific snapshot with education, appointments, major awards or funding, and a tightly selected publication list.",
+      "length": "Very short · target 1 page",
+      "focus": ["selected publications", "appointments", "major distinctions"],
+      "audience": "Introductions, nominations, speaker dossiers, and applications that explicitly ask for a one-page academic CV.",
+      "preview": "/static/export-previews/one-page-scientific.svg",
+      "preinstalled": true,
+      "exporter": "ultrashort",
+      "quality": {
+        "key": "word_ready",
+        "label": "Word-ready baseline",
+        "description": "Built from the existing handmade Word template. This is the reference format for the DOCX-only export work."
+      },
+      "source": {
+        "kind": "vitamine",
+        "title": "Original Vitamine Word template",
+        "url": "",
+        "note": "Original local design; not affiliated with an external institution.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.short-academic",
+      "name": "Short Academic CV",
+      "summary": "A compact conventional academic CV that balances career history with selected scientific output.",
+      "length": "Short · usually 2–4 pages",
+      "focus": ["career overview", "selected publications", "research experience"],
+      "audience": "Academic applications, committee packets, and collaborations where a full dossier would be excessive.",
+      "preview": "/static/export-previews/short-academic.svg",
+      "preinstalled": true,
+      "exporter": "short",
+      "quality": {
+        "key": "experimental",
+        "label": "DOCX needs refinement",
+        "description": "Exports an editable Word draft, but has not yet passed the Tabular One Page quality bar."
+      },
+      "source": {
+        "kind": "guidance",
+        "title": "Oxford Academic Applications",
+        "url": "https://www.careers.ox.ac.uk/academic-applications/",
+        "note": "Structural reference only; Vitamine artwork and layout are original.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.formal-academic",
+      "name": "Formal Academic CV",
+      "summary": "A comprehensive, chronology-heavy record for medical-faculty review, promotion, and institutional dossiers.",
+      "length": "Long · no practical page limit",
+      "focus": ["complete record", "promotion evidence", "scholarship and service"],
+      "audience": "Medical-school promotion, senior faculty review, and archival academic dossiers.",
+      "preview": "/static/export-previews/formal-academic.svg",
+      "preinstalled": true,
+      "exporter": "long",
+      "quality": {
+        "key": "experimental",
+        "label": "Handmade design captured",
+        "description": "A sanitized copy of the handmade Word CV is bundled as the design source. The database-to-template mapping still needs rebuilding."
+      },
+      "source": {
+        "kind": "guidance",
+        "title": "Faculty of Medicine CV Guidelines",
+        "url": "https://fa.hms.harvard.edu/faculty-medicine-cv-guidelines",
+        "note": "Inspired by public medical-faculty guidance. No Harvard name, logo, branding, or endorsement is included in the template.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.nih-biosketch-legacy",
+      "name": "NIH-Style Biosketch Draft",
+      "summary": "A concise scientific profile centred on preparation, appointments, a personal statement, and contributions to science.",
+      "length": "Short · legacy layout",
+      "focus": ["project fit", "contributions to science", "selected products"],
+      "audience": "Internal drafting and reuse of biosketch material.",
+      "preview": "/static/export-previews/nih-biosketch.svg",
+      "preinstalled": true,
+      "exporter": "biosketch",
+      "quality": {
+        "key": "reference_only",
+        "label": "Draft only · not submission-ready",
+        "description": "Current NIH submissions require the Common Form and NIH Supplement through SciENcv. This editable DOCX is retained only as a drafting aid."
+      },
+      "source": {
+        "kind": "official_requirement",
+        "title": "NIH Biographical Sketch Supplement",
+        "url": "https://www.grants.nih.gov/grants-process/write-application/forms-directory/nih-biographical-sketch-supplement",
+        "note": "The bundled sanitized design source is a legacy Word form and must not be represented as current NIH-compliant output.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.dfg-research-cv",
+      "name": "DFG Research CV",
+      "summary": "A restrained four-page research-funding CV with qualitative achievements and a maximum of ten selected works.",
+      "length": "Short · maximum 4 pages",
+      "focus": ["research achievements", "career context", "up to 10 works"],
+      "audience": "German Research Foundation proposals and similar European funding applications.",
+      "preview": "/static/export-previews/dfg-research.svg",
+      "preinstalled": false,
+      "exporter": null,
+      "quality": {
+        "key": "preview",
+        "label": "Local preview package",
+        "description": "Installable in the local library as a design brief. The working Word template has not been implemented yet."
+      },
+      "source": {
+        "kind": "official_requirement",
+        "title": "DFG FAQ on CVs",
+        "url": "https://www.dfg.de/en/research-funding/proposal-funding-process/faq/cv",
+        "note": "Future implementation must use the then-current DFG form and rules.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.erc-track-record",
+      "name": "ERC CV & Track Record",
+      "summary": "A selective, evidence-led CV combining career information with a compact track record and brief context for major outputs.",
+      "length": "Short · maximum 4 pages",
+      "focus": ["research independence", "up to 10 outputs", "track-record narrative"],
+      "audience": "European Research Council applications and other excellence-focused funding calls.",
+      "preview": "/static/export-previews/erc-track-record.svg",
+      "preinstalled": false,
+      "exporter": null,
+      "quality": {
+        "key": "preview",
+        "label": "Local preview package",
+        "description": "Installable in the local library as a design brief. The working Word template has not been implemented yet."
+      },
+      "source": {
+        "kind": "official_requirement",
+        "title": "ERC Work Programme 2026 webinar",
+        "url": "https://erc.europa.eu/news-events/events/webinar-erc-work-programme-2026-part-1",
+        "note": "Future implementation must track the applicable call-year template and submission rules.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.r4ri-narrative",
+      "name": "Narrative Research CV",
+      "summary": "A modular narrative CV that foregrounds contributions to knowledge, people, research culture, and wider society rather than publication counts.",
+      "length": "Medium · call-dependent",
+      "focus": ["research contributions", "leadership and culture", "societal benefit"],
+      "audience": "UKRI-style applications, interdisciplinary teams, and funders using narrative assessment.",
+      "preview": "/static/export-previews/r4ri-narrative.svg",
+      "preinstalled": false,
+      "exporter": null,
+      "quality": {
+        "key": "preview",
+        "label": "Local preview package",
+        "description": "Installable in the local library as a design brief. The working Word template has not been implemented yet."
+      },
+      "source": {
+        "kind": "open_official_template",
+        "title": "UKRI Résumé for Research and Innovation",
+        "url": "https://www.ukri.org/publications/resume-for-research-and-innovation-r4ri-template/",
+        "note": "The official Word template is a reference; Vitamine will not redistribute it without a separate reuse review.",
+        "reviewed_on": "2026-07-28"
+      }
+    },
+    {
+      "id": "vitamine.modern-publication-first",
+      "name": "Modern Publication-First",
+      "summary": "A clean contemporary scientist CV with a narrow profile rail and a wide main column for research themes, projects, and selected publications.",
+      "length": "Medium · usually 3–6 pages",
+      "focus": ["research identity", "selected output", "visual navigation"],
+      "audience": "Lab websites, invited profiles, fellowships, and modern academic job applications.",
+      "preview": "/static/export-previews/modern-publication-first.svg",
+      "preinstalled": false,
+      "exporter": null,
+      "quality": {
+        "key": "preview",
+        "label": "Local preview package",
+        "description": "Installable in the local library as an original design brief. The working Word template has not been implemented yet."
+      },
+      "source": {
+        "kind": "open_design_reference",
+        "title": "RenderCV on Typst Universe",
+        "url": "https://typst.app/universe/package/rendercv",
+        "note": "MIT-licensed layout ecosystem used only for visual research; this Vitamine preview is an original schematic.",
+        "reviewed_on": "2026-07-28"
+      }
+    }
+  ]
+}

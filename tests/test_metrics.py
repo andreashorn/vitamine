@@ -1,0 +1,95 @@
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from vitamine.app import metrics
+from vitamine.paths import create_blank_database
+
+
+class MetricsTests(unittest.TestCase):
+    def test_profile_metrics_exclude_hidden_problem_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metrics.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                con.execute(
+                    """
+                    UPDATE person
+                    SET full_name='Ada Lovelace', display_name='Ada Lovelace'
+                    WHERE id=1
+                    """
+                )
+                con.executemany(
+                    """
+                    INSERT INTO publications (
+                      category, raw_citation, suppress_display, impact_factor,
+                      openalex_cited_by_count, orcid_put_code, authors, year,
+                      openalex_counts_by_year_json
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            "peer_reviewed", "Visible article", 0, 5.2, 10, "1",
+                            "Ada Lovelace, Charles Babbage", "2024",
+                            '[{"year": 2024, "cited_by_count": 4}]',
+                        ),
+                        (
+                            "preprints", "Visible preprint", 0, None, None, None,
+                            "Charles Babbage, Ada Lovelace", "2024", "[]",
+                        ),
+                        (
+                            "peer_reviewed", "Hidden duplicate", 1, 30.0, 999, "2",
+                            "Ada Lovelace, Charles Babbage", "2024",
+                            '[{"year": 2024, "cited_by_count": 999}]',
+                        ),
+                    ],
+                )
+                con.commit()
+
+            with patch("vitamine.app.active_db_path", return_value=path):
+                payload = metrics()
+
+            publications = payload["publications"]
+            self.assertEqual(publications["visible"], 2)
+            self.assertEqual(publications["peer_reviewed"], 1)
+            self.assertEqual(publications["citation_metric_count"], 1)
+            self.assertEqual(publications["openalex_cited_by_total"], 10)
+            self.assertEqual(publications["impact_factor_count"], 1)
+            self.assertEqual(publications["orcid_matched"], 1)
+            self.assertEqual(publications["suppressed"], 1)
+            year_2024 = next(
+                row for row in payload["citation_profile"]["by_year"]
+                if row["year"] == "2024"
+            )
+            self.assertEqual(year_2024["citations"], 4)
+            self.assertEqual(year_2024["first_last_author_citations"], 4)
+            self.assertEqual(year_2024["publications_published"], 2)
+            self.assertEqual(year_2024["impact_factor_sum"], 5.2)
+            self.assertEqual(year_2024["impact_factor_count"], 1)
+
+    def test_dashboard_uses_public_facing_metric_labels(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "vitamine" / "static" / "app.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn('"Total Publications"', script)
+        self.assertIn('"Peer Reviewed Publications"', script)
+        self.assertIn('"Total Citations"', script)
+        self.assertIn('"Publications with Citation Data"', script)
+        self.assertNotIn('metricCard("Short selected"', script)
+        self.assertNotIn('metricCard("Ultrashort"', script)
+        self.assertNotIn('metricCard("Missing year"', script)
+        self.assertNotIn('metricCard("Missing DOI"', script)
+        self.assertIn("Combined journal Impact Factors", script)
+        self.assertIn("First/last-author citations", script)
+        self.assertIn("citationYearDetail", script)
+        document = (
+            Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("citation data refreshes automatically", document)
+
+
+if __name__ == "__main__":
+    unittest.main()

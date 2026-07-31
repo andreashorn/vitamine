@@ -11,22 +11,35 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .i18n import GERMAN_FIELD_PAIRS, fill_german_drafts
+from .citation_styles import CITATION_STYLES, DEFAULT_CITATION_STYLE, validate_citation_style
+from .metadata_text import decode_metadata_text, decode_publication_payload
+from .identifiers import normalize_identifier
+from .deployment import (
+    llm_policy,
+    llm_user_configuration_allowed,
+    managed_llm,
+    skip_llm_onboarding,
+)
 from .paths import (
     BUNDLED_METRICS_CSV,
     DATA,
+    DEFAULT_DB,
     EXAMPLE_DB,
     LOGO,
     METRICS_CSV,
@@ -35,13 +48,40 @@ from .paths import (
     SCRIPTS,
     STATIC,
     active_db_path,
+    bundled_model_path,
     create_blank_database,
+    read_preferences,
     sanitize_database_name,
     set_active_db,
     validate_database,
+    write_preferences,
 )
+from .portrait import MAX_PORTRAIT_UPLOAD_BYTES, normalize_portrait_image
 from .scripts.maintain_publications import maintain
-from .scripts.import_uploaded_cv import import_cv_file
+from .scripts.enrich_publications_by_doi import (
+    authoritative_metadata as authoritative_registry_metadata,
+    crossref_metadata as registry_crossref_metadata,
+    pubmed_metadata as registry_pubmed_metadata,
+    pubmed_pmid as registry_pubmed_pmid,
+)
+from .scripts.import_uploaded_cv import (
+    PERSON_FIELDS as CV_PERSON_FIELDS,
+    llm_json,
+    llm_extract,
+    existing_entry_id as existing_cv_entry_id,
+    normalize_contribution as normalize_cv_contribution,
+    normalize_llm_entry as normalize_cv_entry,
+    normalize_publication as normalize_cv_publication,
+    stage_import_candidates,
+    import_cv_file,
+)
+from .enrichment_guard import (
+    ensure_discovery_rejections_table,
+    forget_rejection,
+    guard_publications,
+    remember_rejection,
+    review_nonpublications,
+)
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -69,7 +109,7 @@ SECTION_LABELS = {
 BIOSKETCH_CONTRIBUTION_LIMIT = 5
 BIOSKETCH_PRODUCTS_PER_CONTRIBUTION_LIMIT = 4
 
-OWN_INSTITUTION = {
+LEGACY_OWN_INSTITUTION = {
     "id": "own-institution",
     "name": "University Hospital Cologne",
     "country": "Germany",
@@ -106,12 +146,14 @@ ENTRY_FIELDS = [
     "language",
 ]
 
+LLM_POLICY = llm_policy()
+
 CV_IMPORT_SETTING_FIELDS = {
-    "provider": "bundled_llama",
+    "provider": str(LLM_POLICY.get("provider") or "bundled_llama"),
     "ollama_url": "http://127.0.0.1:11434",
     "ollama_model": "llama3.1:8b",
-    "api_base_url": "https://api.openai.com/v1",
-    "api_model": "gpt-4.1-mini",
+    "api_base_url": str(LLM_POLICY.get("api_base_url") or "https://api.openai.com/v1"),
+    "api_model": str(LLM_POLICY.get("api_model") or "gpt-4.1-mini"),
     "bundled_llama_model_path": "",
     "bundled_llama_ctx_size": "4096",
 }
@@ -126,6 +168,35 @@ LONG_CV_PUBLICATION_CATEGORIES = {
 }
 
 DEFAULT_LONG_CV_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
+EXPORT_FORMAT_CATALOG = STATIC / "export-formats.json"
+EXPORT_PLAN_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "max_pages",
+        "max_publications",
+        "authorship_preference",
+        "recency_preference",
+        "impact_factor_preference",
+        "selected_publication_ids",
+        "required_publication_ids",
+        "section_strategy",
+        "interpretation",
+        "warnings",
+    ],
+    "properties": {
+        "max_pages": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
+        "max_publications": {"type": "integer", "minimum": 0, "maximum": 50},
+        "authorship_preference": {"type": "string", "enum": ["first_last", "first", "last", "all"]},
+        "recency_preference": {"type": "string", "enum": ["strong", "moderate", "none"]},
+        "impact_factor_preference": {"type": "string", "enum": ["strong", "moderate", "none"]},
+        "selected_publication_ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 50},
+        "required_publication_ids": {"type": "array", "items": {"type": "integer"}, "maxItems": 20},
+        "section_strategy": {"type": "string", "enum": ["complete", "compact", "publications_focused"]},
+        "interpretation": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+    },
+}
 
 
 app = FastAPI(title="VitaMine")
@@ -141,20 +212,94 @@ async def no_cache_for_app_shell(request: Request, call_next):
     return response
 
 
+def ensure_metadata_entities_decoded(con: sqlite3.Connection) -> None:
+    marker = con.execute(
+        "SELECT value FROM app_settings WHERE key='metadata_entities_decoded_v1'"
+    ).fetchone()
+    if marker and marker[0] == "1":
+        return
+    publication_columns = (
+        "authors",
+        "title",
+        "venue",
+        "abstract",
+        "extra",
+        "raw_citation",
+        "short_citation",
+        "quality_note",
+    )
+    for row in con.execute(
+        f"SELECT id, {', '.join(publication_columns)} FROM publications"
+    ).fetchall():
+        values = {
+            column: decode_metadata_text(row[column], strip_markup=column == "abstract")
+            for column in publication_columns
+        }
+        if any(str(row[column] or "") != values[column] for column in publication_columns):
+            con.execute(
+                f"UPDATE publications SET {', '.join(f'{column}=?' for column in publication_columns)} WHERE id=?",
+                (*[values[column] for column in publication_columns], row["id"]),
+            )
+    inbox_rows = con.execute(
+        """
+        SELECT id, payload_json
+        FROM import_inbox_items
+        WHERE target_type='publication'
+        """
+    ).fetchall()
+    for row in inbox_rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        decoded = decode_publication_payload(payload)
+        subtitle = " · ".join(
+            str(decoded.get(field) or "").strip()
+            for field in ("year", "venue", "category")
+            if str(decoded.get(field) or "").strip()
+        )
+        con.execute(
+            """
+            UPDATE import_inbox_items
+            SET title=?, subtitle=?, raw_text=?, payload_json=?
+            WHERE id=?
+            """,
+            (
+                str(decoded.get("title") or "Publication")[:240],
+                subtitle[:500],
+                str(decoded.get("raw_citation") or "")[:4000],
+                json.dumps(decoded, ensure_ascii=False),
+                row["id"],
+            ),
+        )
+    con.execute(
+        """
+        INSERT INTO app_settings (key, value)
+        VALUES ('metadata_entities_decoded_v1', '1')
+        ON CONFLICT(key) DO UPDATE SET value='1'
+        """
+    )
+
+
 def connect() -> sqlite3.Connection:
     db_path = active_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db_path)
+    con = sqlite3.connect(db_path, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 30000")
     ensure_person_columns(con)
     ensure_publication_columns(con)
     ensure_collaboration_tables(con)
     ensure_biosketch_tables(con)
     ensure_narrative_report_table(con)
+    ensure_import_inbox_table(con)
+    ensure_discovery_rejections_table(con)
     ensure_export_settings_table(con)
     ensure_app_settings_table(con)
+    ensure_metadata_entities_decoded(con)
     ensure_journal_metrics_table(con)
+    con.commit()
     return con
 
 
@@ -166,34 +311,435 @@ def rows_dict(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def is_own_institution(name: str | None) -> bool:
-    text = (name or "").casefold()
-    own_tokens = [
-        "university hospital cologne",
-        "universitätsklinikum köln",
-        "universitatsklinikum koln",
-        "university of cologne",
-        "universität zu köln",
-        "universitat zu koln",
-    ]
-    return any(token in text for token in own_tokens)
+def export_format_catalog() -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(EXPORT_FORMAT_CATALOG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail="The bundled export-format catalogue is unavailable.") from exc
+    formats = payload.get("formats") if isinstance(payload, dict) else None
+    if not isinstance(formats, list):
+        raise HTTPException(status_code=500, detail="The bundled export-format catalogue is invalid.")
+    valid: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in formats:
+        if not isinstance(item, dict):
+            continue
+        format_id = str(item.get("id") or "").strip()
+        if not format_id or format_id in seen:
+            continue
+        seen.add(format_id)
+        valid.append(dict(item))
+    return valid
 
 
-def own_institution_from_person(person: dict[str, Any] | None) -> dict[str, Any]:
+def installed_export_format_ids(formats: list[dict[str, Any]] | None = None) -> list[str]:
+    formats = formats or export_format_catalog()
+    allowed = [str(item["id"]) for item in formats]
+    prefs = read_preferences()
+    stored = prefs.get("installed_export_format_ids")
+    if not isinstance(stored, list):
+        return [str(item["id"]) for item in formats if item.get("preinstalled")]
+    selected = {str(item) for item in stored}
+    return [format_id for format_id in allowed if format_id in selected]
+
+
+def write_installed_export_format_ids(format_ids: list[str], formats: list[dict[str, Any]] | None = None) -> list[str]:
+    formats = formats or export_format_catalog()
+    requested = set(format_ids)
+    ordered = [str(item["id"]) for item in formats if str(item["id"]) in requested]
+    prefs = read_preferences()
+    prefs["installed_export_format_ids"] = ordered
+    write_preferences(prefs)
+    return ordered
+
+
+def export_format_by_id(format_id: str, formats: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    formats = formats or export_format_catalog()
+    match = next((item for item in formats if item["id"] == format_id), None)
+    if not match:
+        raise HTTPException(status_code=404, detail="Unknown export format")
+    return match
+
+
+def normalized_institution_name(name: str | None) -> str:
+    return " ".join(str(name or "").casefold().split())
+
+
+def is_own_institution(name: str | None, own_institution: dict[str, Any] | None) -> bool:
+    own_name = normalized_institution_name((own_institution or {}).get("name"))
+    text = normalized_institution_name(name)
+    return bool(own_name and text and (own_name in text or text in own_name))
+
+
+def own_institution_from_person(person: dict[str, Any] | None) -> dict[str, Any] | None:
     person = person or {}
-    def number(value: Any, fallback: float) -> float:
+    def number(value: Any) -> float | None:
         try:
             return float(value)
         except (TypeError, ValueError):
-            return fallback
+            return None
+
+    name = str(person.get("own_institution_name") or "").strip()
+    latitude = number(person.get("own_institution_latitude"))
+    longitude = number(person.get("own_institution_longitude"))
+    if not name or latitude is None or longitude is None:
+        return None
 
     return {
         "id": "own-institution",
-        "name": str(person.get("own_institution_name") or OWN_INSTITUTION["name"]).strip() or OWN_INSTITUTION["name"],
-        "country": str(person.get("own_institution_country") or OWN_INSTITUTION["country"]).strip() or OWN_INSTITUTION["country"],
-        "country_code": str(person.get("own_institution_country_code") or OWN_INSTITUTION["country_code"]).strip() or OWN_INSTITUTION["country_code"],
-        "latitude": number(person.get("own_institution_latitude"), OWN_INSTITUTION["latitude"]),
-        "longitude": number(person.get("own_institution_longitude"), OWN_INSTITUTION["longitude"]),
+        "name": name,
+        "country": str(person.get("own_institution_country") or "").strip(),
+        "country_code": str(person.get("own_institution_country_code") or "").strip(),
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+
+def clean_orcid_id(value: str | None) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"^https?://orcid\.org/", "", text, flags=re.I).strip("/")
+    if not re.match(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$", text, flags=re.I):
+        return ""
+    return text.upper()
+
+
+def fetch_json_url(url: str, *, timeout: int = 20, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "VitaMine/1.0 (local CV editor)",
+            **(headers or {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail=f"Online lookup failed: {exc}") from exc
+
+
+def orcid_date_sort_key(value: dict[str, Any] | None) -> tuple[int, int, int]:
+    value = value or {}
+
+    def part(name: str, default: int) -> int:
+        try:
+            return int((value.get(name) or {}).get("value") or default)
+        except (TypeError, ValueError):
+            return default
+
+    return (part("year", 0), part("month", 0), part("day", 0))
+
+
+def orcid_affiliation_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for group in payload.get("affiliation-group") or []:
+        summaries = group.get("summaries") or []
+        for item in summaries:
+            summary = item.get("employment-summary") or item.get("education-summary") or item.get("qualification-summary")
+            if not isinstance(summary, dict):
+                continue
+            organization = summary.get("organization") or {}
+            address = organization.get("address") or {}
+            name = str(organization.get("name") or "").strip()
+            city = str(address.get("city") or "").strip()
+            country_code = str(address.get("country") or "").strip().upper()
+            if not name and not city:
+                continue
+            disambiguated = organization.get("disambiguated-organization") or {}
+            candidates.append(
+                {
+                    "institution": name,
+                    "city": city,
+                    "region": str(address.get("region") or "").strip(),
+                    "country_code": country_code,
+                    "start_date": summary.get("start-date") or {},
+                    "end_date": summary.get("end-date"),
+                    "ror": (
+                        str(disambiguated.get("disambiguated-organization-identifier") or "").strip()
+                        if str(disambiguated.get("disambiguation-source") or "").casefold() == "ror"
+                        else ""
+                    ),
+                }
+            )
+    return candidates
+
+
+def best_orcid_affiliation(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    return sorted(
+        candidates,
+        key=lambda row: (
+            1 if not row.get("end_date") else 0,
+            orcid_date_sort_key(row.get("start_date")),
+            row.get("institution") or "",
+        ),
+        reverse=True,
+    )[0]
+
+
+def geocode_institution(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    parts = [
+        candidate.get("institution"),
+        candidate.get("city"),
+        candidate.get("region"),
+        candidate.get("country_code"),
+    ]
+    queries = [", ".join(str(part).strip() for part in parts if str(part or "").strip())]
+    if candidate.get("city"):
+        queries.append(", ".join(str(part).strip() for part in [candidate.get("city"), candidate.get("country_code")] if str(part or "").strip()))
+    for query in dict.fromkeys(q for q in queries if q):
+        params = urllib.parse.urlencode({"q": query, "format": "jsonv2", "limit": 1, "addressdetails": 1})
+        payload = fetch_json_url(f"https://nominatim.openstreetmap.org/search?{params}", timeout=20)
+        if not isinstance(payload, list) or not payload:
+            continue
+        hit = payload[0]
+        try:
+            latitude = float(hit.get("lat"))
+            longitude = float(hit.get("lon"))
+        except (TypeError, ValueError):
+            continue
+        address = hit.get("address") or {}
+        return {
+            "latitude": latitude,
+            "longitude": longitude,
+            "country": address.get("country") or "",
+            "country_code": str(address.get("country_code") or candidate.get("country_code") or "").upper(),
+            "geocoded_query": query,
+        }
+    return None
+
+
+def saved_orcid_id(con: sqlite3.Connection) -> str:
+    row = con.execute(
+        """
+        SELECT COALESCE(
+          (SELECT identifier_value FROM person_identifiers WHERE person_id=1 AND lower(platform)='orcid' ORDER BY id LIMIT 1),
+          (SELECT orcid_id FROM person WHERE id=1),
+          ''
+        ) AS orcid_id
+        """
+    ).fetchone()
+    return clean_orcid_id(row["orcid_id"] if row else "")
+
+
+def save_own_institution(con: sqlite3.Connection, values: dict[str, Any]) -> None:
+    row = con.execute("SELECT raw_json FROM person WHERE id=1").fetchone()
+    try:
+        raw = json.loads((row["raw_json"] if row else "") or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    raw.update(
+        {
+            "own_institution_name": values["own_institution_name"],
+            "own_institution_country": values["own_institution_country"],
+            "own_institution_country_code": values["own_institution_country_code"],
+            "own_institution_latitude": values["own_institution_latitude"],
+            "own_institution_longitude": values["own_institution_longitude"],
+        }
+    )
+    con.execute(
+        """
+        INSERT INTO person (
+          id, own_institution_name, own_institution_country, own_institution_country_code,
+          own_institution_latitude, own_institution_longitude, raw_json
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          own_institution_name=excluded.own_institution_name,
+          own_institution_country=excluded.own_institution_country,
+          own_institution_country_code=excluded.own_institution_country_code,
+          own_institution_latitude=excluded.own_institution_latitude,
+          own_institution_longitude=excluded.own_institution_longitude,
+          raw_json=excluded.raw_json
+        """,
+        (
+            values["own_institution_name"],
+            values["own_institution_country"],
+            values["own_institution_country_code"],
+            values["own_institution_latitude"],
+            values["own_institution_longitude"],
+            json.dumps(raw, ensure_ascii=False, indent=2),
+        ),
+    )
+
+
+INSTITUTION_MAPPING_FINGERPRINT_SETTING = "own_institution_mapping_fingerprint"
+INSTITUTION_MAPPING_STATUS_SETTING = "own_institution_mapping_status"
+INSTITUTION_MAPPING_LAST_RUN_SETTING = "own_institution_mapping_last_run"
+
+
+def institution_mapping_fingerprint(person: dict[str, Any] | sqlite3.Row | None) -> str:
+    person = person or {}
+    return "|".join(
+        normalized_institution_name(person[key] if key in person.keys() else "")
+        for key in (
+            "own_institution_name",
+            "own_institution_country",
+            "own_institution_country_code",
+        )
+    )
+
+
+def institution_coordinates_complete(person: dict[str, Any] | sqlite3.Row | None) -> bool:
+    person = person or {}
+    try:
+        float(person["own_institution_latitude"])
+        float(person["own_institution_longitude"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return True
+
+
+def institution_mapping_needed(con: sqlite3.Connection) -> bool:
+    person = con.execute(
+        """
+        SELECT own_institution_name, own_institution_country, own_institution_country_code,
+               own_institution_latitude, own_institution_longitude
+        FROM person WHERE id=1
+        """
+    ).fetchone()
+    if not person:
+        return False
+    has_source = bool(str(person["own_institution_name"] or "").strip() or saved_orcid_id(con))
+    if not has_source:
+        return False
+    if not institution_coordinates_complete(person):
+        return True
+    marker = get_setting(con, INSTITUTION_MAPPING_FINGERPRINT_SETTING)
+    if not marker:
+        # Existing complete coordinates predate automatic mapping and should be
+        # treated as deliberate rather than silently overwritten.
+        return False
+    _kind, separator, mapped_fingerprint = marker.partition(":")
+    return bool(separator and mapped_fingerprint != institution_mapping_fingerprint(person))
+
+
+def _record_institution_mapping_result(
+    db_path: Path,
+    *,
+    status: str,
+    fingerprint: str,
+) -> None:
+    con = sqlite3.connect(db_path, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        ensure_app_settings_table(con)
+        set_setting(con, INSTITUTION_MAPPING_STATUS_SETTING, status)
+        set_setting(con, INSTITUTION_MAPPING_LAST_RUN_SETTING, timestamp_text())
+        set_setting(con, "own_institution_mapping_attempt_fingerprint", fingerprint)
+        con.commit()
+    finally:
+        con.close()
+
+
+def map_institution_automatically(db_path: Path, *, force: bool = False) -> dict[str, Any]:
+    """Map the current institution without overwriting unchanged manual coordinates."""
+    con = sqlite3.connect(db_path, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        ensure_app_settings_table(con)
+        person_row = con.execute(
+            """
+            SELECT own_institution_name, own_institution_country, own_institution_country_code,
+                   own_institution_latitude, own_institution_longitude
+            FROM person WHERE id=1
+            """
+        ).fetchone()
+        person = dict(person_row) if person_row else {}
+        orcid_id = saved_orcid_id(con)
+        fingerprint = institution_mapping_fingerprint(person)
+        if not force and not institution_mapping_needed(con):
+            return {"ok": True, "mapped": False, "reason": "not_needed"}
+    finally:
+        con.close()
+
+    institution_name = str(person.get("own_institution_name") or "").strip()
+    country = str(person.get("own_institution_country") or "").strip()
+    country_code = str(person.get("own_institution_country_code") or "").strip().upper()
+    candidate: dict[str, Any] | None = None
+    geocoded: dict[str, Any] | None = None
+    source = ""
+
+    try:
+        if institution_name:
+            candidate = {
+                "institution": institution_name,
+                "city": "",
+                "region": country,
+                "country_code": country_code,
+            }
+            geocoded = geocode_institution(candidate)
+            source = "saved institution"
+
+        orcid_candidate: dict[str, Any] | None = None
+        if not geocoded and orcid_id:
+            payload = fetch_json_url(
+                f"https://pub.orcid.org/v3.0/{urllib.parse.quote(orcid_id)}/employments"
+            )
+            orcid_candidate = best_orcid_affiliation(orcid_affiliation_candidates(payload))
+            if orcid_candidate:
+                if institution_name:
+                    candidate = {
+                        **orcid_candidate,
+                        "institution": institution_name,
+                        "country_code": country_code or orcid_candidate.get("country_code") or "",
+                    }
+                else:
+                    candidate = orcid_candidate
+                geocoded = geocode_institution(candidate)
+                source = "ORCID public employments"
+    except Exception as exc:
+        _record_institution_mapping_result(
+            db_path,
+            status=f"error:{type(exc).__name__}",
+            fingerprint=fingerprint,
+        )
+        return {"ok": False, "mapped": False, "reason": "lookup_failed"}
+
+    if not candidate or not geocoded:
+        _record_institution_mapping_result(
+            db_path,
+            status="not_found",
+            fingerprint=fingerprint,
+        )
+        return {"ok": True, "mapped": False, "reason": "not_found"}
+
+    values = {
+        "own_institution_name": institution_name or candidate.get("institution") or candidate.get("city") or "",
+        "own_institution_country": geocoded.get("country") or country or candidate.get("country_code") or "",
+        "own_institution_country_code": geocoded.get("country_code") or country_code or candidate.get("country_code") or "",
+        "own_institution_latitude": geocoded["latitude"],
+        "own_institution_longitude": geocoded["longitude"],
+    }
+    con = sqlite3.connect(db_path, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        ensure_app_settings_table(con)
+        current = con.execute(
+            """
+            SELECT own_institution_name, own_institution_country, own_institution_country_code
+            FROM person WHERE id=1
+            """
+        ).fetchone()
+        if institution_mapping_fingerprint(current) != fingerprint or saved_orcid_id(con) != orcid_id:
+            return {"ok": True, "mapped": False, "reason": "source_changed"}
+        save_own_institution(con, values)
+        mapped_fingerprint = institution_mapping_fingerprint(values)
+        set_setting(con, INSTITUTION_MAPPING_FINGERPRINT_SETTING, f"auto:{mapped_fingerprint}")
+        set_setting(con, INSTITUTION_MAPPING_STATUS_SETTING, "mapped")
+        set_setting(con, INSTITUTION_MAPPING_LAST_RUN_SETTING, timestamp_text())
+        set_setting(con, "own_institution_mapping_attempt_fingerprint", mapped_fingerprint)
+        con.commit()
+    finally:
+        con.close()
+    return {
+        "ok": True,
+        "mapped": True,
+        "institution": values,
+        "source": source,
+        "geocoded_query": geocoded.get("geocoded_query") or "",
     }
 
 
@@ -295,6 +841,36 @@ def ensure_journal_metrics_table(con: sqlite3.Connection) -> None:
                     str(row.get("metric_source") or "").strip() or "manual",
                 ),
             )
+
+
+def ensure_import_inbox_table(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS import_inbox_items (
+          id INTEGER PRIMARY KEY,
+          document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+          source TEXT NOT NULL,
+          target_type TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          confidence TEXT NOT NULL DEFAULT 'medium',
+          duplicate_of_type TEXT,
+          duplicate_of_id INTEGER,
+          title TEXT,
+          subtitle TEXT,
+          raw_text TEXT,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          reviewed_at TEXT,
+          review_note TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_import_inbox_items_status
+        ON import_inbox_items(status, target_type, created_at)
+        """
+    )
 
 
 def get_setting(con: sqlite3.Connection, key: str) -> str:
@@ -540,34 +1116,34 @@ def ensure_person_columns(con: sqlite3.Connection) -> None:
         "own_institution_country_code": "TEXT",
         "own_institution_latitude": "REAL",
         "own_institution_longitude": "REAL",
+        "portrait_image": "BLOB",
+        "portrait_mime_type": "TEXT",
+        "portrait_filename": "TEXT",
+        "portrait_width": "INTEGER",
+        "portrait_height": "INTEGER",
     }
     for column, definition in columns.items():
         if column not in existing:
             con.execute(f"ALTER TABLE person ADD COLUMN {column} {definition}")
-    con.execute(
+    row = con.execute(
         """
-        UPDATE person
-        SET own_institution_name=COALESCE(NULLIF(own_institution_name, ''), ?),
-            own_institution_country=COALESCE(NULLIF(own_institution_country, ''), ?),
-            own_institution_country_code=COALESCE(NULLIF(own_institution_country_code, ''), ?),
-            own_institution_latitude=COALESCE(own_institution_latitude, ?),
-            own_institution_longitude=COALESCE(own_institution_longitude, ?)
+        SELECT id, raw_json, own_institution_name, own_institution_country, own_institution_country_code,
+               own_institution_latitude, own_institution_longitude
+        FROM person
         WHERE id=1
-        """,
-        (
-            OWN_INSTITUTION["name"],
-            OWN_INSTITUTION["country"],
-            OWN_INSTITUTION["country_code"],
-            OWN_INSTITUTION["latitude"],
-            OWN_INSTITUTION["longitude"],
-        ),
-    )
-    con.execute(
         """
-        INSERT OR IGNORE INTO person (id, full_name, display_name, raw_json)
-        VALUES (1, '', '', '{}')
-        """
-    )
+    ).fetchone()
+    if not row:
+        con.execute(
+            """
+            INSERT OR IGNORE INTO person (
+              id, full_name, display_name, raw_json
+            )
+            VALUES (1, '', '', '{}')
+            """
+        )
+    elif has_legacy_auto_own_institution(row):
+        clear_legacy_auto_own_institution(con)
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS person_identifiers (
@@ -582,6 +1158,36 @@ def ensure_person_columns(con: sqlite3.Connection) -> None:
           notes TEXT,
           UNIQUE(person_id, platform, identifier_type, identifier_value)
         )
+        """
+    )
+
+
+def has_legacy_auto_own_institution(row: sqlite3.Row) -> bool:
+    try:
+        raw = json.loads(row["raw_json"] or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    if any(str(key).startswith("own_institution_") for key in raw):
+        return False
+    return (
+        row["own_institution_name"] == LEGACY_OWN_INSTITUTION["name"]
+        and row["own_institution_country"] == LEGACY_OWN_INSTITUTION["country"]
+        and row["own_institution_country_code"] == LEGACY_OWN_INSTITUTION["country_code"]
+        and row["own_institution_latitude"] == LEGACY_OWN_INSTITUTION["latitude"]
+        and row["own_institution_longitude"] == LEGACY_OWN_INSTITUTION["longitude"]
+    )
+
+
+def clear_legacy_auto_own_institution(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        UPDATE person
+        SET own_institution_name=NULL,
+            own_institution_country=NULL,
+            own_institution_country_code=NULL,
+            own_institution_latitude=NULL,
+            own_institution_longitude=NULL
+        WHERE id=1
         """
     )
 
@@ -611,6 +1217,7 @@ def ensure_publication_columns(con: sqlite3.Connection) -> None:
         "metadata_enriched_at": "TEXT",
         "openalex_work_id": "TEXT",
         "openalex_cited_by_count": "INTEGER",
+        "openalex_counts_by_year_json": "TEXT",
     }
     for column, definition in columns.items():
         if column not in existing:
@@ -763,6 +1370,177 @@ def normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def inbox_payload(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        item["payload"] = json.loads(item.pop("payload_json") or "{}")
+    except json.JSONDecodeError:
+        item["payload"] = {}
+    return item
+
+
+def pending_inbox_count(con: sqlite3.Connection) -> int:
+    return int(con.execute("SELECT COUNT(*) FROM import_inbox_items WHERE status='pending'").fetchone()[0])
+
+
+def h_index(citations: list[int]) -> int:
+    score = 0
+    for index, count in enumerate(sorted(citations, reverse=True), start=1):
+        if count < index:
+            break
+        score = index
+    return score
+
+
+def mark_inbox_item(con: sqlite3.Connection, item_id: int, status: str, note: str = "") -> None:
+    con.execute(
+        """
+        UPDATE import_inbox_items
+        SET status=?, reviewed_at=datetime('now'), review_note=?
+        WHERE id=?
+        """,
+        (status, note, item_id),
+    )
+
+
+def accept_entry_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    payload = normalize_cv_entry(item["payload"])
+    if not payload:
+        return "skipped", None
+    existing_id = existing_cv_entry_id(con, payload)
+    if existing_id:
+        return "duplicate", existing_id
+    cursor = con.execute(
+        f"""
+        INSERT INTO cv_entries (document_id, {', '.join(ENTRY_FIELDS)})
+        VALUES (?, {', '.join('?' for _ in ENTRY_FIELDS)})
+        """,
+        (item["document_id"], *[payload.get(field) for field in ENTRY_FIELDS]),
+    )
+    return "accepted", int(cursor.lastrowid)
+
+
+def accept_publication_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    payload = normalize_cv_publication(item["payload"])
+    if not payload:
+        return "skipped", None
+    if item.get("source") == "ai_web_discovery" and not normalize_doi(str(payload.get("doi") or "")):
+        return "skipped", None
+    if payload.get("doi"):
+        existing = con.execute(
+            "SELECT id FROM publications WHERE lower(COALESCE(doi, ''))=? LIMIT 1",
+            (str(payload["doi"]).casefold(),),
+        ).fetchone()
+        if existing:
+            return "duplicate", int(existing["id"])
+    if payload.get("pmid"):
+        existing = con.execute("SELECT id FROM publications WHERE pmid=? LIMIT 1", (payload["pmid"],)).fetchone()
+        if existing:
+            return "duplicate", int(existing["id"])
+    existing = con.execute(
+        "SELECT id FROM publications WHERE lower(raw_citation)=? LIMIT 1",
+        (str(payload["raw_citation"]).casefold(),),
+    ).fetchone()
+    if existing:
+        return "duplicate", int(existing["id"])
+    cursor = con.execute(
+        f"""
+        INSERT INTO publications (document_id, source, {', '.join(PUBLICATION_FIELDS)})
+        VALUES (?, ?, {', '.join('?' for _ in PUBLICATION_FIELDS)})
+        """,
+        (item["document_id"], item["source"], *[payload[field] for field in PUBLICATION_FIELDS]),
+    )
+    return "accepted", int(cursor.lastrowid)
+
+
+def inbox_request_ids(payload: dict[str, Any]) -> list[int]:
+    ids: list[int] = []
+    for value in payload.get("ids") or []:
+        try:
+            item_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if item_id > 0:
+            ids.append(item_id)
+    return ids
+
+
+def accept_person_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    payload = item["payload"]
+    fields = {field: str(payload.get(field) or "").strip() for field in CV_PERSON_FIELDS if str(payload.get(field) or "").strip()}
+    if not fields:
+        return "skipped", None
+    con.execute("INSERT OR IGNORE INTO person (id, raw_json) VALUES (1, '{}')")
+    assignments = ", ".join(f"{field}=?" for field in fields)
+    con.execute(f"UPDATE person SET {assignments} WHERE id=1", tuple(fields.values()))
+    return "accepted", 1
+
+
+def accept_narrative_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    payload = item["payload"]
+    title = str(payload.get("title") or "Narrative Report").strip() or "Narrative Report"
+    body = str(payload.get("body") or "").strip()
+    title_de = str(payload.get("title_de") or "").strip()
+    body_de = str(payload.get("body_de") or "").strip()
+    if not body and not body_de:
+        return "skipped", None
+    con.execute(
+        """
+        INSERT INTO narrative_reports (id, title, body, title_de, body_de, updated_at)
+        VALUES (1, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+          title=excluded.title,
+          body=excluded.body,
+          title_de=excluded.title_de,
+          body_de=excluded.body_de,
+          updated_at=excluded.updated_at
+        """,
+        (title, body, title_de, body_de),
+    )
+    return "accepted", 1
+
+
+def accept_contribution_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    contribution = dict(item["payload"])
+    normalized = normalize_cv_contribution(contribution)
+    if not normalized:
+        return "skipped", None
+    existing = con.execute(
+        "SELECT id FROM biosketch_contributions WHERE lower(title)=? AND lower(narrative)=? LIMIT 1",
+        (normalized["title"].casefold(), normalized["narrative"].casefold()),
+    ).fetchone()
+    if existing:
+        return "duplicate", int(existing["id"])
+    cursor = con.execute(
+        """
+        INSERT INTO biosketch_contributions (document_id, ordinal, title, narrative, citations_json)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            item["document_id"],
+            contribution.get("ordinal"),
+            normalized["title"],
+            normalized["narrative"],
+            normalized["citations_json"],
+        ),
+    )
+    return "accepted", int(cursor.lastrowid)
+
+
+def accept_inbox_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    handlers = {
+        "entry": accept_entry_candidate,
+        "publication": accept_publication_candidate,
+        "person": accept_person_candidate,
+        "narrative_report": accept_narrative_candidate,
+        "contribution": accept_contribution_candidate,
+    }
+    handler = handlers.get(str(item["target_type"] or ""))
+    if not handler:
+        return "skipped", None
+    return handler(con, item)
+
+
 def ensure_german_columns(con: sqlite3.Connection) -> None:
     existing = {row[1] for row in con.execute("PRAGMA table_info(cv_entries)").fetchall()}
     for _english, german in GERMAN_FIELD_PAIRS:
@@ -799,11 +1577,13 @@ def summary() -> dict[str, Any]:
                 "SELECT warning_type, count(*) AS count FROM import_warnings GROUP BY warning_type ORDER BY warning_type"
             ).fetchall()
         )
+        inbox_pending = pending_inbox_count(con)
     return {
         "sections": SECTION_LABELS,
         "entries": entries,
         "publications": publications,
         "warnings": warnings,
+        "import_inbox_pending": inbox_pending,
     }
 
 
@@ -819,10 +1599,10 @@ def metrics() -> dict[str, Any]:
                   SUM(CASE WHEN category = 'peer_reviewed' AND COALESCE(suppress_display, 0) = 0 THEN 1 ELSE 0 END) AS peer_reviewed,
                   SUM(CASE WHEN include_short = 1 THEN 1 ELSE 0 END) AS selected_short,
                   SUM(CASE WHEN include_ultrashort = 1 THEN 1 ELSE 0 END) AS selected_ultrashort,
-                  SUM(CASE WHEN impact_factor IS NOT NULL THEN 1 ELSE 0 END) AS impact_factor_count,
-                  SUM(CASE WHEN openalex_cited_by_count IS NOT NULL THEN 1 ELSE 0 END) AS citation_metric_count,
-                  SUM(COALESCE(openalex_cited_by_count, 0)) AS openalex_cited_by_total,
-                  SUM(CASE WHEN orcid_put_code IS NOT NULL AND orcid_put_code != '' THEN 1 ELSE 0 END) AS orcid_matched,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND impact_factor IS NOT NULL THEN 1 ELSE 0 END) AS impact_factor_count,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND openalex_cited_by_count IS NOT NULL THEN 1 ELSE 0 END) AS citation_metric_count,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 THEN COALESCE(openalex_cited_by_count, 0) ELSE 0 END) AS openalex_cited_by_total,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND orcid_put_code IS NOT NULL AND orcid_put_code != '' THEN 1 ELSE 0 END) AS orcid_matched,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 1 THEN 1 ELSE 0 END) AS suppressed,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND (year IS NULL OR year = '') THEN 1 ELSE 0 END) AS missing_year,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND (venue IS NULL OR venue = '') THEN 1 ELSE 0 END) AS missing_venue,
@@ -885,12 +1665,99 @@ def metrics() -> dict[str, Any]:
         )
         for row in impact_factors:
             row["venue"] = display_venue_name(row["venue"])
+        citation_rows = rows_dict(
+            con.execute(
+                """
+                SELECT
+                  COALESCE(openalex_cited_by_count, 0) AS citations,
+                  openalex_counts_by_year_json,
+                  authors,
+                  year,
+                  impact_factor
+                FROM publications
+                WHERE COALESCE(suppress_display, 0) = 0
+                """
+            ).fetchall()
+        )
+        person = con.execute(
+            "SELECT full_name, display_name FROM person WHERE id=1"
+        ).fetchone()
+        name_terms = researcher_name_terms(person)
+        citation_counts = [int(row["citations"] or 0) for row in citation_rows]
+        since_year = time.localtime().tm_year - 5
+        yearly_citations_by_work: list[int] = []
+        citations_by_year: dict[str, int] = {}
+        first_last_citations_by_year: dict[str, int] = {}
+        publications_by_year: dict[str, int] = {}
+        impact_factor_sum_by_year: dict[str, float] = {}
+        impact_factor_count_by_year: dict[str, int] = {}
+        for row in citation_rows:
+            publication_year = str(row.get("year") or "").strip()[:4]
+            if publication_year.isdigit():
+                publications_by_year[publication_year] = publications_by_year.get(publication_year, 0) + 1
+                if row.get("impact_factor") is not None:
+                    impact_factor_sum_by_year[publication_year] = (
+                        impact_factor_sum_by_year.get(publication_year, 0.0)
+                        + float(row["impact_factor"])
+                    )
+                    impact_factor_count_by_year[publication_year] = (
+                        impact_factor_count_by_year.get(publication_year, 0) + 1
+                    )
+            first_or_last_author = authorship_matches(
+                researcher_authorship(row.get("authors"), name_terms),
+                "first_last",
+            )
+            yearly_total = 0
+            try:
+                counts_by_year = json.loads(row.get("openalex_counts_by_year_json") or "[]")
+            except json.JSONDecodeError:
+                counts_by_year = []
+            for item in counts_by_year if isinstance(counts_by_year, list) else []:
+                year = str(item.get("year") or "").strip()
+                if not year.isdigit():
+                    continue
+                citations = int(item.get("cited_by_count") or 0)
+                citations_by_year[year] = citations_by_year.get(year, 0) + citations
+                if first_or_last_author:
+                    first_last_citations_by_year[year] = (
+                        first_last_citations_by_year.get(year, 0) + citations
+                    )
+                if int(year) >= since_year:
+                    yearly_total += citations
+            if yearly_total:
+                yearly_citations_by_work.append(yearly_total)
+        citation_years_received = [
+            {
+                "year": year,
+                "citations": citations,
+                "first_last_author_citations": first_last_citations_by_year.get(year, 0),
+                "publications_published": publications_by_year.get(year, 0),
+                "impact_factor_sum": round(impact_factor_sum_by_year.get(year, 0.0), 2),
+                "impact_factor_count": impact_factor_count_by_year.get(year, 0),
+            }
+            for year, citations in sorted(citations_by_year.items(), key=lambda item: int(item[0]))
+        ]
     return {
         "publications": publication_metrics or {},
         "by_year": by_year,
         "top_venues": top_venues,
         "impact_factors": impact_factors,
         "journal_metric_count": journal_metric_count(),
+        "citation_profile": {
+            "since_year": since_year,
+            "citation_metric_count": len(citation_counts),
+            "all": {
+                "citations": sum(citation_counts),
+                "h_index": h_index(citation_counts),
+                "i10_index": sum(1 for count in citation_counts if count >= 10),
+            },
+            "since_yearly_citations": {
+                "citations": sum(yearly_citations_by_work),
+                "h_index": h_index(yearly_citations_by_work),
+                "i10_index": sum(1 for count in yearly_citations_by_work if count >= 10),
+            },
+            "by_year": citation_years_received,
+        },
     }
 
 
@@ -925,12 +1792,23 @@ def collaboration_map() -> dict[str, Any]:
             ).fetchall()
         )
     own_institution = own_institution_from_person(person)
+    if not own_institution:
+        return {
+            "own": None,
+            "nodes": [],
+            "edges": [],
+            "top_countries": [],
+            "institution_count": 0,
+            "edge_count": 0,
+            "publication_links": 0,
+            "needs_own_institution": True,
+        }
     nodes = [{**own_institution, "own": True, "publication_count": 0, "author_count": 1, "authors": []}]
     edges = []
     country_counts: dict[str, int] = {}
     publication_total = 0
     for row in rows:
-        if is_own_institution(row["institution_name"]):
+        if is_own_institution(row["institution_name"], own_institution):
             continue
         count = int(row["publication_count"] or 0)
         publication_total += count
@@ -964,6 +1842,7 @@ def collaboration_map() -> dict[str, Any]:
         "institution_count": max(len(nodes) - 1, 0),
         "edge_count": len(edges),
         "publication_links": publication_total,
+        "needs_own_institution": False,
     }
 
 
@@ -1033,7 +1912,112 @@ async def update_journal_metrics(request: Request) -> JSONResponse:
 def get_person() -> dict[str, Any]:
     with connect() as con:
         person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
-    return person or {}
+    if not person:
+        return {}
+    portrait = person.pop("portrait_image", None)
+    person["portrait_available"] = bool(portrait)
+    return person
+
+
+@app.get("/api/person/portrait")
+def get_person_portrait() -> Response:
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT portrait_image, portrait_mime_type
+            FROM person
+            WHERE id=1
+            """
+        ).fetchone()
+    if row is None or not row["portrait_image"]:
+        raise HTTPException(status_code=404, detail="No profile picture has been added.")
+    return Response(
+        content=bytes(row["portrait_image"]),
+        media_type=str(row["portrait_mime_type"] or "application/octet-stream"),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.put("/api/person/portrait")
+async def update_person_portrait(file: UploadFile = File(...)) -> dict[str, Any]:
+    data = await file.read(MAX_PORTRAIT_UPLOAD_BYTES + 1)
+    await file.close()
+    try:
+        normalized = normalize_portrait_image(data, filename=file.filename or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    metadata = normalized.metadata
+    with connect() as con:
+        con.execute("INSERT OR IGNORE INTO person (id, raw_json) VALUES (1, '{}')")
+        con.execute(
+            """
+            UPDATE person
+            SET portrait_image=?,
+                portrait_mime_type=?,
+                portrait_filename=?,
+                portrait_width=?,
+                portrait_height=?
+            WHERE id=1
+            """,
+            (
+                normalized.data,
+                metadata.mime_type,
+                metadata.filename,
+                metadata.width,
+                metadata.height,
+            ),
+        )
+        con.commit()
+    return {
+        "ok": True,
+        "portrait_available": True,
+        "portrait_mime_type": metadata.mime_type,
+        "portrait_filename": metadata.filename,
+        "portrait_width": metadata.width,
+        "portrait_height": metadata.height,
+    }
+
+
+@app.delete("/api/person/portrait")
+def delete_person_portrait() -> dict[str, Any]:
+    with connect() as con:
+        con.execute(
+            """
+            UPDATE person
+            SET portrait_image=NULL,
+                portrait_mime_type=NULL,
+                portrait_filename=NULL,
+                portrait_width=NULL,
+                portrait_height=NULL
+            WHERE id=1
+            """
+        )
+        con.commit()
+    return {"ok": True, "portrait_available": False}
+
+
+@app.get("/api/person/institution-mapping-status")
+def institution_mapping_status() -> dict[str, Any]:
+    with connect() as con:
+        person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone()) or {}
+        status = get_setting(con, INSTITUTION_MAPPING_STATUS_SETTING)
+        pending = institution_mapping_needed(con)
+    return {
+        "ok": True,
+        "status": status,
+        "pending": pending,
+        "mapped": bool(own_institution_from_person(person)),
+    }
+
+
+@app.post("/api/person/auto-map-institution")
+def auto_map_institution() -> dict[str, Any]:
+    result = map_institution_automatically(active_db_path().resolve(), force=True)
+    if result.get("mapped"):
+        return result
+    if result.get("reason") == "lookup_failed":
+        raise HTTPException(status_code=502, detail="The institution lookup is temporarily unavailable.")
+    raise HTTPException(status_code=404, detail="No mappable institution could be found.")
 
 
 @app.get("/api/connections")
@@ -1052,6 +2036,7 @@ def get_connections() -> dict[str, Any]:
         api_key = get_setting(con, "zotero_api_key")
         library_type = get_setting(con, "zotero_library_type") or "users"
         library_id = get_setting(con, "zotero_library_id")
+        stored_policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
         return {
             "orcid_id": (identifier["identifier_value"] if identifier else None) or (person["orcid_id"] if person else "") or "",
             "zotero_api_key_set": bool(api_key),
@@ -1062,7 +2047,8 @@ def get_connections() -> dict[str, Any]:
             "zotero_source_mode": get_setting(con, "zotero_source_mode") or "my_publications",
             "zotero_collection_key": get_setting(con, "zotero_collection_key"),
             "zotero_collection_name": get_setting(con, "zotero_collection_name"),
-            "publication_source_policy": get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation",
+            "publication_source_policy": stored_policy,
+            "effective_publication_source_policy": publication_source_policy(con),
         }
 
 
@@ -1131,6 +2117,8 @@ async def update_connections(request: Request) -> dict[str, Any]:
                 set_setting(con, "zotero_library_id", library_id)
                 set_setting(con, "zotero_group_name", group_name)
         con.commit()
+    if orcid_id:
+        schedule_background_refresh(profiles=True)
     return {"ok": True}
 
 
@@ -1235,6 +2223,8 @@ def zotero_status() -> dict[str, Any]:
 @app.get("/api/person/identifiers")
 def get_person_identifiers() -> dict[str, Any]:
     with connect() as con:
+        consolidate_person_identifiers(con)
+        con.commit()
         rows = rows_dict(
             con.execute(
                 """
@@ -1248,10 +2238,79 @@ def get_person_identifiers() -> dict[str, Any]:
     return {"identifiers": rows}
 
 
+def identifier_source_rank(source: str) -> int:
+    key = (source or "").casefold()
+    if "manual" in key or "onboarding" in key:
+        return 4
+    if "orcid" in key:
+        return 3
+    if "verified" in key:
+        return 2
+    return 1
+
+
+def consolidate_person_identifiers(con: sqlite3.Connection) -> int:
+    """Canonicalize profile rows and retain one best record per service.
+
+    A researcher may have only one current profile per canonical service in the
+    UI. Prefer explicit values and authoritative/manual sources; fill missing
+    values from service URLs when their URL format is unambiguous.
+    """
+    rows = rows_dict(
+        con.execute(
+            """
+            SELECT id, platform, identifier_type, identifier_value, url, source, verified_at, notes
+            FROM person_identifiers WHERE person_id=1 ORDER BY id
+            """
+        ).fetchall()
+    )
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for raw in rows:
+        row = normalize_identifier(raw)
+        groups.setdefault(str(row["platform"]).casefold(), []).append(row)
+    removed = 0
+    for candidates in groups.values():
+        winner = max(
+            candidates,
+            key=lambda row: (
+                1 if row.get("identifier_value") else 0,
+                identifier_source_rank(str(row.get("source") or "")),
+                str(row.get("verified_at") or ""),
+                int(row["id"]),
+            ),
+        )
+        losers = [row for row in candidates if row["id"] != winner["id"]]
+        if losers:
+            con.executemany(
+                "DELETE FROM person_identifiers WHERE person_id=1 AND id=?",
+                [(row["id"],) for row in losers],
+            )
+            removed += len(losers)
+        con.execute(
+            """
+            UPDATE person_identifiers
+            SET platform=?, identifier_type=?, identifier_value=?, url=?, source=?, notes=?
+            WHERE person_id=1 AND id=?
+            """,
+            (
+                winner["platform"],
+                winner["identifier_type"],
+                winner.get("identifier_value"),
+                winner["url"],
+                winner["source"],
+                winner.get("notes"),
+                winner["id"],
+            ),
+        )
+    sync_person_orcid_from_identifiers(con)
+    return removed
+
+
 def identifier_payload(payload: dict[str, Any]) -> dict[str, str | None]:
-    platform = str(payload.get("platform") or "").strip()
+    normalized = normalize_identifier(payload)
+    platform = str(normalized.get("platform") or "").strip()
     identifier_type = str(payload.get("identifier_type") or "").strip()
-    identifier_value = str(payload.get("identifier_value") or "").strip() or None
+    identifier_value = str(normalized.get("identifier_value") or "").strip() or None
     url = str(payload.get("url") or "").strip()
     if not platform:
         raise HTTPException(status_code=400, detail="Platform is required")
@@ -1351,6 +2410,7 @@ async def create_person_identifier(request: Request) -> dict[str, Any]:
                 notes=values["notes"] or "Used for ORCID public-work sync.",
             )
             con.commit()
+            schedule_background_refresh(profiles=True)
             return {"ok": True, "id": identifier_id}
         cursor = con.execute(
             """
@@ -1390,6 +2450,7 @@ async def update_person_identifier(identifier_id: int, request: Request) -> dict
                 notes=values["notes"] or "Used for ORCID public-work sync.",
             )
             con.commit()
+            schedule_background_refresh(profiles=True)
             return {"ok": True}
         cursor = con.execute(
             """
@@ -1453,7 +2514,27 @@ async def update_person(request: Request) -> dict[str, Any]:
     ]
     values = {field: payload.get(field) for field in allowed}
     values["raw_json"] = json.dumps(values, ensure_ascii=False, indent=2)
+
+    def coordinate_pair(person: dict[str, Any] | sqlite3.Row | None) -> tuple[float | None, float | None]:
+        person = person or {}
+        numbers: list[float | None] = []
+        for field in ("own_institution_latitude", "own_institution_longitude"):
+            try:
+                value = person[field] if field in person.keys() else None
+                numbers.append(float(value) if str(value or "").strip() else None)
+            except (TypeError, ValueError):
+                numbers.append(None)
+        return numbers[0], numbers[1]
+
     with connect() as con:
+        previous = con.execute(
+            """
+            SELECT own_institution_name, own_institution_country, own_institution_country_code,
+                   own_institution_latitude, own_institution_longitude
+            FROM person WHERE id=1
+            """
+        ).fetchone()
+        previous_marker = get_setting(con, INSTITUTION_MAPPING_FINGERPRINT_SETTING)
         con.execute(
             f"""
             INSERT INTO person (id, {', '.join(allowed)}, raw_json)
@@ -1464,8 +2545,25 @@ async def update_person(request: Request) -> dict[str, Any]:
             """,
             (*[values[field] for field in allowed], values["raw_json"]),
         )
+        current = con.execute(
+            """
+            SELECT own_institution_name, own_institution_country, own_institution_country_code,
+                   own_institution_latitude, own_institution_longitude
+            FROM person WHERE id=1
+            """
+        ).fetchone()
+        coordinates_changed = coordinate_pair(previous) != coordinate_pair(current)
+        if institution_coordinates_complete(current) and (coordinates_changed or not previous_marker):
+            set_setting(
+                con,
+                INSTITUTION_MAPPING_FINGERPRINT_SETTING,
+                f"manual:{institution_mapping_fingerprint(current)}",
+            )
+        mapping_pending = institution_mapping_needed(con)
         con.commit()
-    return {"ok": True}
+    if mapping_pending:
+        schedule_background_refresh(institutions=True)
+    return {"ok": True, "institution_mapping_pending": mapping_pending}
 
 
 @app.get("/api/narrative-report")
@@ -1596,6 +2694,336 @@ def delete_entry(entry_id: int) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/api/import-inbox")
+def list_import_inbox(
+    status: str = "pending",
+    target_type: str = "all",
+    limit: int = 500,
+) -> dict[str, Any]:
+    if status not in {"pending", "accepted", "rejected", "skipped", "all"}:
+        raise HTTPException(status_code=400, detail="Unsupported inbox status")
+    if target_type not in {"all", "entry", "publication", "person", "narrative_report", "contribution"}:
+        raise HTTPException(status_code=400, detail="Unsupported inbox type")
+    clauses = []
+    params: list[Any] = []
+    if status != "all":
+        clauses.append("i.status=?")
+        params.append(status)
+    if target_type != "all":
+        clauses.append("i.target_type=?")
+        params.append(target_type)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(max(1, min(limit, 2000)))
+    with connect() as con:
+        rows = rows_dict(
+            con.execute(
+                f"""
+                SELECT i.*, d.title AS document_title
+                FROM import_inbox_items i
+                LEFT JOIN documents d ON d.id = i.document_id
+                {where}
+                ORDER BY
+                  CASE i.confidence WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+                  i.target_type,
+                  i.id
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        )
+        counts = rows_dict(
+            con.execute(
+                """
+                SELECT status, target_type, COUNT(*) AS count
+                FROM import_inbox_items
+                GROUP BY status, target_type
+                ORDER BY status, target_type
+                """
+            ).fetchall()
+        )
+    return {"items": [inbox_payload(row) for row in rows], "counts": counts}
+
+
+@app.post("/api/import-inbox/accept")
+async def accept_import_inbox(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    ids = inbox_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one inbox item.")
+    accepted = 0
+    publications_accepted = 0
+    person_accepted = False
+    orcid_accepted = False
+    skipped = 0
+    duplicates = 0
+    with connect() as con:
+        placeholders = ", ".join("?" for _ in ids)
+        rows = rows_dict(
+            con.execute(
+                f"SELECT * FROM import_inbox_items WHERE status IN ('pending', 'rejected') AND id IN ({placeholders}) ORDER BY id",
+                ids,
+            ).fetchall()
+        )
+        for row in rows:
+            item = inbox_payload(row)
+            status, target_id = accept_inbox_candidate(con, item)
+            if status == "accepted":
+                accepted += 1
+                if item["target_type"] == "publication":
+                    publications_accepted += 1
+                elif item["target_type"] == "person":
+                    person_accepted = True
+                    orcid_accepted = orcid_accepted or bool(clean_orcid_id(item["payload"].get("orcid_id")))
+                mark_inbox_item(con, int(item["id"]), "accepted", f"Imported as {item['target_type']} {target_id}.")
+            elif status == "duplicate":
+                duplicates += 1
+                mark_inbox_item(con, int(item["id"]), "skipped", f"Skipped duplicate of existing record {target_id}.")
+                if item.get("source") == "ai_web_discovery":
+                    remember_rejection(con, item["target_type"], item["payload"], item["source"], f"Duplicate of existing record {target_id}.")
+            else:
+                skipped += 1
+                mark_inbox_item(con, int(item["id"]), "skipped", "Skipped; candidate did not contain enough usable data.")
+                if item.get("source") == "ai_web_discovery":
+                    remember_rejection(con, item["target_type"], item["payload"], item["source"], "Candidate did not contain enough usable data.")
+        con.commit()
+        pending = pending_inbox_count(con)
+    if publications_accepted or person_accepted:
+        schedule_background_refresh(
+            publications_changed=bool(publications_accepted),
+            profiles=orcid_accepted,
+            institutions=person_accepted,
+        )
+    return {"ok": True, "accepted": accepted, "duplicates": duplicates, "skipped": skipped, "pending": pending}
+
+
+@app.post("/api/import-inbox/reject")
+async def reject_import_inbox(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    ids = inbox_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one inbox item.")
+    with connect() as con:
+        placeholders = ", ".join("?" for _ in ids)
+        rows = con.execute(
+            f"SELECT * FROM import_inbox_items WHERE status='pending' AND id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        for row in rows:
+            item = inbox_payload(dict(row))
+            if item["target_type"] == "publication":
+                remember_rejection(con, item["target_type"], item["payload"], item["source"], "Rejected by user.")
+        cursor = con.execute(
+            f"""
+            UPDATE import_inbox_items
+            SET status='rejected', reviewed_at=datetime('now'), review_note='Rejected by user.'
+            WHERE status='pending' AND id IN ({placeholders})
+            """,
+            ids,
+        )
+        con.commit()
+        pending = pending_inbox_count(con)
+    return {"ok": True, "rejected": cursor.rowcount, "pending": pending}
+
+
+@app.post("/api/import-inbox/restore")
+async def restore_import_inbox(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    ids = inbox_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one inbox item.")
+    with connect() as con:
+        placeholders = ", ".join("?" for _ in ids)
+        rows = con.execute(
+            f"SELECT * FROM import_inbox_items WHERE status='rejected' AND id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        for row in rows:
+            item = inbox_payload(dict(row))
+            if item["target_type"] == "publication":
+                forget_rejection(con, item["target_type"], item["payload"])
+        cursor = con.execute(
+            f"""
+            UPDATE import_inbox_items
+            SET status='pending', reviewed_at=NULL, review_note='Restored by user.'
+            WHERE status='rejected' AND id IN ({placeholders})
+            """,
+            ids,
+        )
+        con.commit()
+        pending = pending_inbox_count(con)
+    return {"ok": True, "restored": cursor.rowcount, "pending": pending}
+
+
+@app.post("/api/import-inbox/resolve-publications")
+async def resolve_import_inbox_publications(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    ids = inbox_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one publication candidate.")
+    resolved = 0
+    existing_count = 0
+    unresolved = 0
+    results: list[dict[str, Any]] = []
+    with connect() as con:
+        placeholders = ", ".join("?" for _ in ids)
+        rows = rows_dict(
+            con.execute(
+                f"""
+                SELECT *
+                FROM import_inbox_items
+                WHERE target_type='publication'
+                  AND status IN ('pending', 'rejected')
+                  AND id IN ({placeholders})
+                ORDER BY id
+                """,
+                ids,
+            ).fetchall()
+        )
+        for row in rows:
+            item = inbox_payload(row)
+            metadata, lookup_kind, lookup_value = resolve_publication_candidate_metadata(item)
+            if not metadata.get("title") and not metadata.get("raw_citation"):
+                unresolved += 1
+                results.append({"id": item["id"], "status": "unresolved", "lookup": lookup_kind, "value": lookup_value})
+                continue
+            normalized = normalize_publication(metadata)
+            duplicate = existing_publication_for_identifier(con, doi=normalized.get("doi") or "", pmid=normalized.get("pmid") or "")
+            duplicate_id = int(duplicate["id"]) if duplicate else None
+            existing_count += 1 if duplicate_id else 0
+            con.execute(
+                """
+                UPDATE import_inbox_items
+                SET status='pending',
+                    confidence='high',
+                    duplicate_of_type=?,
+                    duplicate_of_id=?,
+                    title=?,
+                    subtitle=?,
+                    raw_text=?,
+                    payload_json=?,
+                    reviewed_at=NULL,
+                    review_note=?
+                WHERE id=?
+                """,
+                (
+                    "publication" if duplicate_id else None,
+                    duplicate_id,
+                    (normalized.get("title") or "Publication")[:240],
+                    " · ".join(
+                        part
+                        for part in [
+                            str(normalized.get("year") or "").strip(),
+                            str(normalized.get("venue") or "").strip(),
+                            str(normalized.get("category") or "").strip(),
+                        ]
+                        if part
+                    )[:500],
+                    str(normalized.get("raw_citation") or "")[:4000],
+                    json.dumps(normalized, ensure_ascii=False),
+                    f"Resolved from {lookup_kind}: {lookup_value}"[:1000],
+                    item["id"],
+                ),
+            )
+            resolved += 1
+            results.append(
+                {
+                    "id": item["id"],
+                    "status": "resolved",
+                    "lookup": lookup_kind,
+                    "value": lookup_value,
+                    "title": normalized.get("title"),
+                    "duplicate_of_id": duplicate_id,
+                }
+            )
+            time.sleep(0.05)
+        con.commit()
+        pending = pending_inbox_count(con)
+    return {"ok": True, "resolved": resolved, "existing": existing_count, "unresolved": unresolved, "pending": pending, "results": results}
+
+
+@app.post("/api/import-inbox/reject-duplicates")
+def reject_duplicate_import_inbox() -> dict[str, Any]:
+    with connect() as con:
+        rows = con.execute(
+            """
+            SELECT * FROM import_inbox_items
+            WHERE status='pending' AND duplicate_of_id IS NOT NULL AND source='ai_web_discovery'
+            """
+        ).fetchall()
+        for row in rows:
+            item = inbox_payload(dict(row))
+            remember_rejection(
+                con,
+                item["target_type"],
+                item["payload"],
+                item["source"],
+                f"Rejected as duplicate of existing record {item.get('duplicate_of_id')}.",
+            )
+        cursor = con.execute(
+            """
+            UPDATE import_inbox_items
+            SET status='rejected', reviewed_at=datetime('now'), review_note='Rejected as duplicate-looking candidate.'
+            WHERE status='pending' AND duplicate_of_id IS NOT NULL
+            """
+        )
+        con.commit()
+        pending = pending_inbox_count(con)
+    return {"ok": True, "rejected": cursor.rowcount, "pending": pending}
+
+
+@app.post("/api/import-inbox/accept-high-confidence")
+def accept_high_confidence_import_inbox() -> dict[str, Any]:
+    accepted = 0
+    publications_accepted = 0
+    person_accepted = False
+    orcid_accepted = False
+    skipped = 0
+    duplicates = 0
+    with connect() as con:
+        rows = rows_dict(
+            con.execute(
+                """
+                SELECT *
+                FROM import_inbox_items
+                WHERE status='pending'
+                  AND confidence='high'
+                  AND duplicate_of_id IS NULL
+                ORDER BY id
+                """
+            ).fetchall()
+        )
+        for row in rows:
+            item = inbox_payload(row)
+            if item["target_type"] == "entry" and item["payload"].get("section_key") == "honors":
+                # Honors and prizes are intentionally never swept in by the bulk
+                # action; they require an explicit per-item user selection.
+                continue
+            status, target_id = accept_inbox_candidate(con, item)
+            if status == "accepted":
+                accepted += 1
+                if item["target_type"] == "publication":
+                    publications_accepted += 1
+                elif item["target_type"] == "person":
+                    person_accepted = True
+                    orcid_accepted = orcid_accepted or bool(clean_orcid_id(item["payload"].get("orcid_id")))
+                mark_inbox_item(con, int(item["id"]), "accepted", f"Imported as {item['target_type']} {target_id}.")
+            elif status == "duplicate":
+                duplicates += 1
+                mark_inbox_item(con, int(item["id"]), "skipped", f"Skipped duplicate of existing record {target_id}.")
+            else:
+                skipped += 1
+                mark_inbox_item(con, int(item["id"]), "skipped", "Skipped; candidate did not contain enough usable data.")
+        con.commit()
+        pending = pending_inbox_count(con)
+    if publications_accepted or person_accepted:
+        schedule_background_refresh(
+            publications_changed=bool(publications_accepted),
+            profiles=orcid_accepted,
+            institutions=person_accepted,
+        )
+    return {"ok": True, "accepted": accepted, "duplicates": duplicates, "skipped": skipped, "pending": pending}
+
+
 @app.get("/api/publications")
 def list_publications(
     q: str | None = None,
@@ -1675,11 +3103,7 @@ IDENTIFIER_USER_AGENT = "vitamine/0.1 (publication identifier import)"
 
 
 def clean_metadata_text(value: Any) -> str:
-    if isinstance(value, list):
-        value = value[0] if value else ""
-    text = str(value or "")
-    text = re.sub(r"<[^>]+>", "", text)
-    return re.sub(r"\s+", " ", text).strip()
+    return decode_metadata_text(value, strip_markup=True)
 
 
 def normalize_doi(value: str | None) -> str:
@@ -1712,33 +3136,35 @@ def metadata_json(url: str) -> dict[str, Any] | None:
 
 
 def crossref_publication_metadata(doi: str) -> dict[str, Any]:
-    payload = metadata_json(f"https://api.crossref.org/works/{urllib.parse.quote(doi, safe='')}")
-    message = (payload or {}).get("message") or {}
-    if not message:
+    crossref = registry_crossref_metadata(normalize_doi(doi))
+    if not crossref:
         return {}
-    authors = []
-    for author in message.get("author") or []:
-        name = " ".join(part for part in [author.get("given"), author.get("family")] if part)
-        if name:
-            authors.append(name)
-    year = (
-        year_from_date_parts((message.get("published-print") or {}).get("date-parts"))
-        or year_from_date_parts((message.get("published-online") or {}).get("date-parts"))
-        or year_from_date_parts((message.get("published") or {}).get("date-parts"))
-        or year_from_date_parts((message.get("issued") or {}).get("date-parts"))
+    doi_value = normalize_doi(crossref.get("doi") or doi)
+    pmid = registry_pubmed_pmid(doi_value) if doi_value else ""
+    pubmed = registry_pubmed_metadata(pmid) if pmid else {}
+    metadata = authoritative_registry_metadata(
+        {
+            "title": crossref.get("title") or "",
+            "authors": "",
+            "venue": crossref.get("venue") or "",
+            "year": crossref.get("year") or "",
+            "doi": doi_value,
+            "raw_citation": "",
+        },
+        crossref,
+        pubmed,
     )
-    doi_value = normalize_doi(message.get("DOI") or doi)
     values = {
-        "item_type": clean_metadata_text(message.get("type")) or "journal-article",
+        "item_type": clean_metadata_text(metadata.get("crossref_type")) or "journal-article",
         "category": "peer_reviewed",
-        "authors": ", ".join(authors),
-        "title": clean_metadata_text(message.get("title")),
-        "venue": clean_metadata_text(message.get("container-title")),
-        "year": year,
+        "authors": clean_metadata_text(metadata.get("authors")),
+        "title": clean_metadata_text(metadata.get("title")),
+        "venue": clean_metadata_text(metadata.get("venue")),
+        "year": clean_metadata_text(metadata.get("year")),
         "doi": doi_value,
-        "pmid": pubmed_pmid_for_doi(doi_value) if doi_value else "",
-        "url": clean_metadata_text(message.get("URL")) or (f"https://doi.org/{doi_value}" if doi_value else ""),
-        "abstract": clean_metadata_text(message.get("abstract")),
+        "pmid": pmid,
+        "url": clean_metadata_text(metadata.get("url")) or (f"https://doi.org/{doi_value}" if doi_value else ""),
+        "abstract": clean_metadata_text(crossref.get("abstract")),
         "extra": "",
         "confidence": "high",
         "include_short": 0,
@@ -1830,6 +3256,69 @@ def parse_publication_identifiers(text: str) -> list[dict[str, str]]:
     return identifiers
 
 
+def crossref_title_publication_metadata(title: str) -> dict[str, Any]:
+    clean_title = re.sub(r"\s+", " ", title).strip()
+    if len(clean_title) < 8:
+        return {}
+    url = "https://api.crossref.org/works?" + urllib.parse.urlencode({"query.title": clean_title, "rows": "5"})
+    payload = metadata_json(url)
+    items = (((payload or {}).get("message") or {}).get("items") or [])
+    best: dict[str, Any] | None = None
+    best_score = 0.0
+    title_key = re.sub(r"[^a-z0-9]+", " ", clean_title.casefold()).strip()
+    title_tokens = set(title_key.split())
+    for item in items:
+        candidate_title = clean_metadata_text(item.get("title"))
+        candidate_key = re.sub(r"[^a-z0-9]+", " ", candidate_title.casefold()).strip()
+        candidate_tokens = set(candidate_key.split())
+        if not candidate_tokens:
+            continue
+        overlap = len(title_tokens & candidate_tokens)
+        score = overlap / max(len(title_tokens), len(candidate_tokens), 1)
+        if candidate_key == title_key:
+            score = 1.0
+        if score > best_score:
+            best = item
+            best_score = score
+    if not best or best_score < 0.55:
+        return {}
+    doi = normalize_doi(best.get("DOI"))
+    return crossref_publication_metadata(doi) if doi else {}
+
+
+def publication_candidate_lookup_text(item: dict[str, Any]) -> str:
+    payload = item.get("payload") or {}
+    parts = [
+        item.get("title"),
+        item.get("subtitle"),
+        item.get("raw_text"),
+        payload.get("doi"),
+        payload.get("pmid"),
+        payload.get("title"),
+        payload.get("raw_citation"),
+    ]
+    return "\n".join(str(part) for part in parts if part)
+
+
+def resolve_publication_candidate_metadata(item: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
+    lookup_text = publication_candidate_lookup_text(item)
+    for identifier in parse_publication_identifiers(lookup_text):
+        kind = identifier["kind"]
+        value = identifier["value"]
+        metadata = crossref_publication_metadata(value) if kind == "doi" else pubmed_publication_metadata(value)
+        if metadata.get("title") or metadata.get("raw_citation"):
+            return metadata, kind, value
+    payload = item.get("payload") or {}
+    title = str(payload.get("title") or item.get("title") or "").strip()
+    if not title:
+        raw = str(payload.get("raw_citation") or item.get("raw_text") or "").strip()
+        title = raw.split(". ")[0][:240]
+    metadata = crossref_title_publication_metadata(title)
+    if metadata.get("title") or metadata.get("raw_citation"):
+        return metadata, "title", title
+    return {}, "title", title
+
+
 def existing_publication_for_identifier(con: sqlite3.Connection, doi: str = "", pmid: str = "") -> sqlite3.Row | None:
     doi_key = normalize_doi(doi)
     if doi_key:
@@ -1842,6 +3331,7 @@ def existing_publication_for_identifier(con: sqlite3.Connection, doi: str = "", 
 
 
 def normalize_publication(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = decode_publication_payload(payload)
     title = str(payload.get("title") or "").strip()
     raw_citation = str(payload.get("raw_citation") or "").strip()
     if not title and not raw_citation:
@@ -1888,6 +3378,7 @@ async def create_publication(request: Request) -> dict[str, Any]:
             (document_id, *[payload[field] for field in PUBLICATION_FIELDS]),
         )
         con.commit()
+    schedule_background_refresh(publications_changed=True)
     return {"ok": True, "id": cursor.lastrowid}
 
 
@@ -1958,6 +3449,8 @@ async def import_publication_identifiers(request: Request) -> dict[str, Any]:
             )
             time.sleep(0.05)
         con.commit()
+    if imported:
+        schedule_background_refresh(publications_changed=True)
     return {
         "ok": True,
         "requested": len(identifiers),
@@ -1983,6 +3476,7 @@ async def update_publication(publication_id: int, request: Request) -> dict[str,
         con.commit()
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Publication not found")
+    schedule_background_refresh(publications_changed=True)
     return {"ok": True}
 
 
@@ -2016,13 +3510,46 @@ def validate_export_profile(profile: str) -> dict[str, str]:
     return EXPORT_PROFILES[profile]
 
 
-def horn_authorship(authors: str | None) -> str:
-    parts = [part.strip().lower() for part in (authors or "").split(",") if part.strip()]
+def researcher_name_terms(person: dict[str, Any] | sqlite3.Row | None) -> list[str]:
+    if not person:
+        return []
+    def person_value(key: str) -> str:
+        try:
+            return str(person[key] or "").strip()
+        except (KeyError, IndexError):
+            return ""
+
+    names = [person_value("display_name"), person_value("full_name")]
+    terms: set[str] = set()
+    for name in names:
+        parts = [part for part in re.split(r"\s+", name.casefold()) if part]
+        if not parts:
+            continue
+        terms.add(" ".join(parts))
+        first = parts[0]
+        last = parts[-1]
+        if first and last and first != last:
+            terms.add(f"{first} {last}")
+            terms.add(f"{last} {first}")
+            terms.add(f"{first[0]} {last}")
+            terms.add(f"{last} {first[0]}")
+        if len(last) > 3:
+            terms.add(last)
+    return sorted(terms, key=len, reverse=True)
+
+
+def author_matches_researcher(author: str, terms: list[str]) -> bool:
+    text = re.sub(r"[^a-z0-9]+", " ", author.casefold()).strip()
+    padded = f" {text} "
+    return any(f" {re.sub(r'[^a-z0-9]+', ' ', term).strip()} " in padded for term in terms)
+
+
+def researcher_authorship(authors: str | None, terms: list[str]) -> str:
+    parts = [part.strip() for part in (authors or "").split(",") if part.strip()]
     if not parts:
         return "other"
-    horn_patterns = ("andreas horn", "a horn", "horn a", "horn, a", "horn andreas")
-    first = any(pattern in parts[0] for pattern in horn_patterns)
-    last = any(pattern in parts[-1] for pattern in horn_patterns)
+    first = author_matches_researcher(parts[0], terms)
+    last = author_matches_researcher(parts[-1], terms)
     if first and last:
         return "first_last"
     if first:
@@ -2053,6 +3580,8 @@ def publication_score(row: sqlite3.Row, authorship: str) -> float:
 
 
 def export_publication_rows(con: sqlite3.Connection) -> list[dict[str, Any]]:
+    person = con.execute("SELECT full_name, display_name FROM person WHERE id=1").fetchone()
+    terms = researcher_name_terms(person)
     rows = rows_dict(
         con.execute(
             """
@@ -2068,7 +3597,7 @@ def export_publication_rows(con: sqlite3.Connection) -> list[dict[str, Any]]:
         ).fetchall()
     )
     for row in rows:
-        row["authorship"] = horn_authorship(row.get("authors"))
+        row["authorship"] = researcher_authorship(row.get("authors"), terms)
         row["score"] = publication_score(row, row["authorship"])
     return rows
 
@@ -2091,6 +3620,148 @@ def distinct_publications(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         distinct.append(row)
     return distinct
+
+
+def export_plan_setting_key(format_id: str) -> str:
+    return f"export_prompt_plan:{format_id}"
+
+
+def validate_export_plan(
+    raw: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    prompt: str,
+    format_id: str,
+) -> dict[str, Any]:
+    candidate_by_id = {int(row["id"]): row for row in candidates}
+    try:
+        maximum = max(0, min(50, int(raw.get("max_publications", 10))))
+    except (TypeError, ValueError):
+        maximum = 10
+    authorship_preference = (
+        raw.get("authorship_preference")
+        if raw.get("authorship_preference") in {"first_last", "first", "last", "all"}
+        else "all"
+    )
+    selected: list[int] = []
+    for value in raw.get("selected_publication_ids") or []:
+        try:
+            publication_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if publication_id in candidate_by_id and publication_id not in selected:
+            selected.append(publication_id)
+    required: list[int] = []
+    for value in raw.get("required_publication_ids") or []:
+        try:
+            publication_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if publication_id in candidate_by_id and publication_id not in required:
+            required.append(publication_id)
+    selected = [
+        publication_id
+        for publication_id in selected
+        if publication_id in required
+        or authorship_matches(str(candidate_by_id[publication_id].get("authorship") or "other"), authorship_preference)
+    ]
+    if maximum:
+        selected = required + [publication_id for publication_id in selected if publication_id not in required]
+        ranked = sorted(
+            candidates,
+            key=lambda row: (
+                -float(row.get("score") or 0),
+                -(int(re.search(r"\d{4}", str(row.get("year") or "")).group(0)) if re.search(r"\d{4}", str(row.get("year") or "")) else 0),
+            ),
+        )
+        for row in ranked:
+            publication_id = int(row["id"])
+            if len(selected) >= maximum:
+                break
+            if publication_id in selected:
+                continue
+            if authorship_matches(str(row.get("authorship") or "other"), authorship_preference):
+                selected.append(publication_id)
+        selected = selected[:maximum]
+    else:
+        selected = []
+        required = []
+    if not selected and maximum:
+        def safe_year(row: dict[str, Any]) -> int:
+            match = re.search(r"\d{4}", str(row.get("year") or ""))
+            return int(match.group(0)) if match else 0
+
+        ranked = sorted(candidates, key=lambda row: (-float(row.get("score") or 0), -safe_year(row)))
+        selected = [int(row["id"]) for row in ranked[:maximum]]
+    try:
+        max_pages_value = raw.get("max_pages")
+        max_pages = max(1, min(100, int(max_pages_value))) if max_pages_value is not None else None
+    except (TypeError, ValueError):
+        max_pages = None
+    warnings = [str(item).strip() for item in raw.get("warnings") or [] if str(item).strip()]
+    if required and all(
+        authorship_matches(str(candidate_by_id[publication_id].get("authorship") or "other"), "first_last")
+        for publication_id in required
+    ):
+        warnings = [
+            warning
+            for warning in warnings
+            if not ("required" in warning.casefold() and "not first/last author" in warning.casefold())
+        ]
+    if max_pages:
+        warnings.append(
+            "The page limit is a layout target, not a guarantee: final Word pagination depends on fonts, Word version, and manual edits."
+        )
+    selected_rows = [candidate_by_id[publication_id] for publication_id in selected]
+    return {
+        "format_id": format_id,
+        "prompt": prompt.strip(),
+        "max_pages": max_pages,
+        "max_publications": maximum,
+        "authorship_preference": authorship_preference,
+        "recency_preference": raw.get("recency_preference") if raw.get("recency_preference") in {"strong", "moderate", "none"} else "moderate",
+        "impact_factor_preference": raw.get("impact_factor_preference") if raw.get("impact_factor_preference") in {"strong", "moderate", "none"} else "moderate",
+        "section_strategy": raw.get("section_strategy") if raw.get("section_strategy") in {"complete", "compact", "publications_focused"} else "compact",
+        "interpretation": str(raw.get("interpretation") or "").strip(),
+        "warnings": list(dict.fromkeys(warnings)),
+        "selected_publication_ids": selected,
+        "required_publication_ids": [publication_id for publication_id in required if publication_id in selected],
+        "selected_publications": [
+            {
+                "id": row["id"],
+                "title": row.get("title"),
+                "authors": row.get("authors"),
+                "year": row.get("year"),
+                "venue": row.get("venue"),
+                "impact_factor": row.get("impact_factor"),
+                "authorship": row.get("authorship"),
+            }
+            for row in selected_rows
+        ],
+    }
+
+
+def apply_export_plan(con: sqlite3.Connection, plan: dict[str, Any], exporter: str) -> None:
+    selected = [int(value) for value in plan.get("selected_publication_ids") or []]
+    limit = max(1, min(50, int(plan.get("max_publications") or len(selected) or 10)))
+    profile = "ultrashort" if exporter == "ultrashort" else "short"
+    if exporter in {"short", "ultrashort"}:
+        config = validate_export_profile(profile)
+        con.execute(
+            """
+            INSERT INTO export_settings (profile, publication_limit, authorship_filter)
+            VALUES (?, ?, ?)
+            ON CONFLICT(profile) DO UPDATE SET
+              publication_limit=excluded.publication_limit,
+              authorship_filter=excluded.authorship_filter
+            """,
+            (profile, limit, plan.get("authorship_preference") or "all"),
+        )
+        con.execute(f"UPDATE publications SET {config['flag']}=0, {config['order']}=NULL")
+        for index, publication_id in enumerate(selected[:limit], 1):
+            con.execute(
+                f"UPDATE publications SET {config['flag']}=1, {config['order']}=? WHERE id=?",
+                (index, publication_id),
+            )
 
 
 def compact_publication_citation(row: sqlite3.Row | dict[str, Any]) -> str:
@@ -2369,9 +4040,9 @@ async def suggest_export_profile_publications(profile: str, request: Request) ->
     return {"ok": True, "selected": len(selected_ids)}
 
 
-def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
+def run_script(name: str, *args: str, db_path: Path | None = None) -> subprocess.CompletedProcess[str]:
     pythonpath = os.pathsep.join(part for part in (str(ROOT), os.environ.get("PYTHONPATH", "")) if part)
-    env = {**os.environ, "VITAMINE_DB": str(active_db_path()), "PYTHONPATH": pythonpath}
+    env = {**os.environ, "VITAMINE_DB": str(db_path or active_db_path()), "PYTHONPATH": pythonpath}
     if getattr(sys, "frozen", False):
         command = [sys.executable, "--vitamine-script", name, *args]
     else:
@@ -2386,6 +4057,150 @@ def run_script(name: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+BACKGROUND_REFRESH_LOCK = threading.Lock()
+BACKGROUND_REFRESH_PENDING: dict[Path, dict[str, bool]] = {}
+BACKGROUND_METRICS_MAX_AGE_DAYS = 7
+BACKGROUND_PROFILE_MAX_AGE_DAYS = 30
+
+
+def setting_is_due(con: sqlite3.Connection, key: str, max_age_days: int) -> bool:
+    raw = get_setting(con, key)
+    if not raw:
+        return True
+    try:
+        last_run = time.mktime(time.strptime(raw, "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return True
+    return time.time() - last_run >= max_age_days * 86400
+
+
+def run_background_refresh(db_path: Path) -> None:
+    """Drain refresh requests for one database in a single daemon thread."""
+    while True:
+        with BACKGROUND_REFRESH_LOCK:
+            requested = BACKGROUND_REFRESH_PENDING.pop(db_path, None)
+        if not requested:
+            return
+        profile_due = bool(requested.get("profiles"))
+        publications_changed = bool(requested.get("publications"))
+        institution_requested = bool(requested.get("institutions") or profile_due)
+        profile_succeeded = False
+        metrics_succeeded = False
+        # ORCID's public person record is an authoritative source for URLs and
+        # external identifiers belonging to that ORCID. It is intentionally the
+        # only unattended identifier source; guessed web-search matches belong
+        # in review unless independently corroborated by papers + institution.
+        if institution_requested:
+            # Mapping is fast and directly visible to the user, so do it before
+            # slower publication/profile maintenance in this shared worker.
+            map_institution_automatically(db_path)
+        if profile_due:
+            profile_result = run_script("sync_orcid.py", db_path=db_path)
+            profile_succeeded = profile_result.returncode == 0
+            publications_changed = publications_changed or profile_succeeded
+        if publications_changed:
+            citation_result = run_script("enrich_publications_by_doi.py", "--resolve-missing", db_path=db_path)
+            journal_result = run_script("fetch_journal_metrics.py", db_path=db_path)
+            metrics_succeeded = citation_result.returncode == 0 and journal_result.returncode == 0
+        con = sqlite3.connect(db_path, timeout=30)
+        con.row_factory = sqlite3.Row
+        try:
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                  key TEXT PRIMARY KEY, value TEXT,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            now = timestamp_text()
+            if profile_succeeded:
+                consolidate_person_identifiers(con)
+                con.execute(
+                    """
+                    INSERT INTO app_settings(key, value, updated_at)
+                    VALUES ('profile_identifiers_last_run', ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (now,),
+                )
+            if metrics_succeeded:
+                con.execute(
+                    """
+                    INSERT INTO app_settings(key, value, updated_at)
+                    VALUES ('publication_metrics_last_run', ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (now,),
+                )
+            con.commit()
+        finally:
+            con.close()
+
+
+def schedule_background_refresh(
+    *,
+    publications_changed: bool = False,
+    profiles: bool = False,
+    institutions: bool = False,
+) -> bool:
+    """Coalesce lightweight maintenance without delaying the user's request."""
+    db_path = active_db_path().resolve()
+    with BACKGROUND_REFRESH_LOCK:
+        existing = BACKGROUND_REFRESH_PENDING.setdefault(
+            db_path,
+            {"publications": False, "profiles": False, "institutions": False},
+        )
+        existing["publications"] = existing["publications"] or publications_changed
+        existing["profiles"] = existing["profiles"] or profiles
+        existing["institutions"] = existing["institutions"] or institutions
+        already_running = any(
+            thread.name == f"vitamine-refresh:{db_path}" and thread.is_alive()
+            for thread in threading.enumerate()
+        )
+        if already_running:
+            return False
+        worker = threading.Thread(
+            target=run_background_refresh,
+            args=(db_path,),
+            name=f"vitamine-refresh:{db_path}",
+            daemon=True,
+        )
+        worker.start()
+    return True
+
+
+@app.on_event("startup")
+def schedule_due_background_maintenance() -> None:
+    with connect() as con:
+        institution_due = institution_mapping_needed(con)
+        if os.environ.get("VITAMINE_CLOUD_WORKER") == "1":
+            metrics_due = False
+            profiles_due = False
+        else:
+            has_publications = bool(con.execute("SELECT 1 FROM publications LIMIT 1").fetchone())
+            has_identity = bool(
+                con.execute(
+                    """
+                    SELECT 1 FROM person
+                    WHERE id=1 AND COALESCE(orcid_id, '') != ''
+                    """
+                ).fetchone()
+            )
+            metrics_due = has_publications and setting_is_due(
+                con, "publication_metrics_last_run", BACKGROUND_METRICS_MAX_AGE_DAYS
+            )
+            profiles_due = has_identity and setting_is_due(
+                con, "profile_identifiers_last_run", BACKGROUND_PROFILE_MAX_AGE_DAYS
+            )
+    if metrics_due or profiles_due or institution_due:
+        schedule_background_refresh(
+            publications_changed=metrics_due,
+            profiles=profiles_due,
+            institutions=institution_due,
+        )
+
+
 def build_response(stdout: str, cache_key: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = {"ok": True, "stdout": stdout}
     for line in stdout.splitlines():
@@ -2394,7 +4209,7 @@ def build_response(stdout: str, cache_key: str, extra: dict[str, Any] | None = N
             continue
         key = key.strip()
         value = value.strip()
-        if key in {"html", "markdown", "typst", "pdf", "docx"} and value:
+        if key == "docx" and value:
             payload[key] = f"/{value}?v={cache_key}"
             payload[f"{key}_path"] = value
         elif key == "warning" and value:
@@ -2414,15 +4229,761 @@ PUBLICATION_SOURCE_POLICIES = {
 
 def publication_source_policy(con: sqlite3.Connection) -> str:
     policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
-    return policy if policy in PUBLICATION_SOURCE_POLICIES else "zotero_primary_orcid_validation"
+    if policy not in PUBLICATION_SOURCE_POLICIES:
+        policy = "zotero_primary_orcid_validation"
+    zotero_key = get_setting(con, "zotero_api_key")
+    orcid_row = con.execute(
+        """
+        SELECT
+          COALESCE(
+            (SELECT identifier_value FROM person_identifiers WHERE person_id=1 AND lower(platform)='orcid' ORDER BY id LIMIT 1),
+            (SELECT orcid_id FROM person WHERE id=1),
+            ''
+          ) AS orcid_id
+        """
+    ).fetchone()
+    has_orcid = bool(orcid_row and str(orcid_row["orcid_id"] or "").strip())
+    if not zotero_key and has_orcid and "orcid" in PUBLICATION_SOURCE_POLICIES[policy]:
+        return "orcid_only"
+    if not zotero_key and has_orcid and policy == "zotero_only":
+        return "orcid_only"
+    return policy
 
 
-def run_publication_source(source: str) -> subprocess.CompletedProcess[str]:
+def run_publication_source(source: str, db_path: Path | None = None) -> subprocess.CompletedProcess[str]:
     if source == "zotero":
-        return run_script("sync_zotero.py")
+        return run_script("sync_zotero.py", db_path=db_path)
     if source == "orcid":
-        return run_script("sync_orcid.py")
+        return run_script("sync_orcid.py", db_path=db_path)
     raise ValueError(f"Unknown publication source: {source}")
+
+
+def publication_inbox_payload(row: sqlite3.Row) -> dict[str, Any]:
+    payload = {field: row[field] if field in row.keys() else "" for field in PUBLICATION_FIELDS}
+    for field in ("orcid_put_code", "orcid_source", "orcid_last_modified", "orcid_path"):
+        if field in row.keys():
+            payload[field] = row[field]
+    return decode_publication_payload(payload)
+
+
+def ensure_source_review_document(con: sqlite3.Connection, source: str) -> int:
+    slug = f"{source}_review_candidates"
+    title = f"{source.title()} review candidates"
+    con.execute(
+        """
+        INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
+        VALUES (?, ?, ?, ?, datetime('now'), ?)
+        ON CONFLICT(slug) DO UPDATE SET imported_at=datetime('now'), notes=excluded.notes
+        """,
+        (slug, title, source, f"{source}-review", f"Candidates staged from {source.title()} enrichment."),
+    )
+    return int(con.execute("SELECT id FROM documents WHERE slug=?", (slug,)).fetchone()[0])
+
+
+def stage_publication_payload_from_source(con: sqlite3.Connection, document_id: int, payload: dict[str, Any], source: str) -> None:
+    payload = decode_publication_payload(payload)
+    title = str(payload.get("title") or "Publication")
+    subtitle = " · ".join(
+        part
+        for part in [
+            str(payload.get("year") or "").strip(),
+            str(payload.get("venue") or "").strip(),
+            str(payload.get("category") or "").strip(),
+        ]
+        if part
+    )
+    raw_text = str(payload.get("raw_citation") or "")
+    con.execute(
+        """
+        INSERT INTO import_inbox_items
+          (document_id, source, target_type, status, confidence, title, subtitle, raw_text, payload_json)
+        VALUES (?, ?, 'publication', 'pending', ?, ?, ?, ?, ?)
+        """,
+        (
+            document_id,
+            source,
+            str(payload.get("confidence") or "high"),
+            title[:240],
+            subtitle[:500],
+            raw_text[:4000],
+            json.dumps(payload, ensure_ascii=False),
+        ),
+    )
+
+
+def publication_exists_in_curated_db(con: sqlite3.Connection, payload: dict[str, Any]) -> bool:
+    doi = normalize_doi(str(payload.get("doi") or ""))
+    pmid = str(payload.get("pmid") or "").strip()
+    raw_citation = str(payload.get("raw_citation") or "").strip().casefold()
+    title = str(payload.get("title") or "").strip().casefold()
+    if doi:
+        row = con.execute("SELECT id FROM publications WHERE lower(COALESCE(doi, ''))=? LIMIT 1", (doi,)).fetchone()
+        if row:
+            return True
+    if pmid:
+        row = con.execute("SELECT id FROM publications WHERE pmid=? LIMIT 1", (pmid,)).fetchone()
+        if row:
+            return True
+    if raw_citation:
+        row = con.execute("SELECT id FROM publications WHERE lower(COALESCE(raw_citation, ''))=? LIMIT 1", (raw_citation,)).fetchone()
+        if row:
+            return True
+    if title:
+        row = con.execute("SELECT id FROM publications WHERE lower(COALESCE(title, ''))=? LIMIT 1", (title,)).fetchone()
+        if row:
+            return True
+    return False
+
+
+def publication_inbox_candidate_exists(con: sqlite3.Connection, payload: dict[str, Any]) -> bool:
+    doi = normalize_doi(str(payload.get("doi") or ""))
+    pmid = str(payload.get("pmid") or "").strip()
+    raw_citation = str(payload.get("raw_citation") or "").strip().casefold()
+    title = str(payload.get("title") or "").strip().casefold()
+    rows = con.execute(
+        """
+        SELECT payload_json, raw_text, title
+        FROM import_inbox_items
+        WHERE target_type='publication'
+          AND status IN ('pending', 'rejected')
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            candidate = json.loads(row["payload_json"] or "{}")
+        except json.JSONDecodeError:
+            candidate = {}
+        candidate_doi = normalize_doi(str(candidate.get("doi") or ""))
+        candidate_pmid = str(candidate.get("pmid") or "").strip()
+        candidate_raw = str(candidate.get("raw_citation") or row["raw_text"] or "").strip().casefold()
+        candidate_title = str(candidate.get("title") or row["title"] or "").strip().casefold()
+        if doi and candidate_doi == doi:
+            return True
+        if pmid and candidate_pmid == pmid:
+            return True
+        if raw_citation and candidate_raw == raw_citation:
+            return True
+        if title and candidate_title == title:
+            return True
+    return False
+
+
+def persist_discovered_identifiers(con: sqlite3.Connection, identifiers: list[dict[str, Any]]) -> int:
+    """Copy identifier discoveries out of the isolated source-sync database."""
+    consolidate_person_identifiers(con)
+    added = 0
+    for raw_identifier in identifiers:
+        identifier = normalize_identifier(raw_identifier)
+        platform = str(identifier.get("platform") or "").strip()
+        identifier_type = str(identifier.get("identifier_type") or "").strip()
+        identifier_value = str(identifier.get("identifier_value") or "").strip() or None
+        url = str(identifier.get("url") or "").strip()
+        if not platform or not identifier_type or not url:
+            continue
+        exists = con.execute(
+            """
+            SELECT id, identifier_value, source
+            FROM person_identifiers
+            WHERE person_id=1
+              AND lower(platform)=lower(?)
+            LIMIT 1
+            """,
+            (platform,),
+        ).fetchone()
+        if exists:
+            # A canonical service is a single card. Enrich a URL-only row with a
+            # parsed/explicit value, but never overwrite a stronger manual value.
+            if identifier_value and (
+                not str(exists["identifier_value"] or "").strip()
+                or identifier_source_rank(str(identifier.get("source") or ""))
+                > identifier_source_rank(str(exists["source"] or ""))
+            ):
+                con.execute(
+                    """
+                    UPDATE person_identifiers
+                    SET platform=?, identifier_type=?, identifier_value=?, url=?,
+                        source=?, verified_at=COALESCE(?, datetime('now')), notes=COALESCE(?, notes)
+                    WHERE id=? AND person_id=1
+                    """,
+                    (
+                        platform,
+                        identifier_type,
+                        identifier_value,
+                        url,
+                        str(identifier.get("source") or "").strip() or "orcid",
+                        str(identifier.get("verified_at") or "").strip() or None,
+                        str(identifier.get("notes") or "").strip() or None,
+                        exists["id"],
+                    ),
+                )
+            continue
+        con.execute(
+            """
+            INSERT INTO person_identifiers
+              (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+            VALUES (1, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), ?)
+            """,
+            (
+                platform,
+                identifier_type,
+                identifier_value,
+                url,
+                str(identifier.get("source") or "").strip() or "orcid",
+                str(identifier.get("verified_at") or "").strip() or None,
+                str(identifier.get("notes") or "").strip() or None,
+            ),
+        )
+        added += 1
+    sync_person_orcid_from_identifiers(con)
+    return added
+
+
+def run_publication_source_to_inbox(source: str) -> dict[str, Any]:
+    active_db = active_db_path()
+    temp_identifiers: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix=f"vitamine-{source}-") as tmpdir:
+        temp_db = Path(tmpdir) / active_db.name
+        shutil.copy2(active_db, temp_db)
+        result = run_publication_source(source, db_path=temp_db)
+        temp_rows: list[dict[str, Any]] = []
+        if result.returncode == 0:
+            temp_con = sqlite3.connect(temp_db)
+            temp_con.row_factory = sqlite3.Row
+            try:
+                temp_rows = [
+                    publication_inbox_payload(row)
+                    for row in temp_con.execute(
+                        f"""
+                        SELECT {', '.join(PUBLICATION_FIELDS)},
+                               orcid_put_code, orcid_source, orcid_last_modified, orcid_path
+                        FROM publications
+                        WHERE source=?
+                        ORDER BY id
+                        """,
+                        (source,),
+                    ).fetchall()
+                ]
+                identifier_table = temp_con.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='person_identifiers'"
+                ).fetchone()
+                if identifier_table:
+                    temp_identifiers = [
+                        dict(row)
+                        for row in temp_con.execute(
+                            """
+                            SELECT platform, identifier_type, identifier_value, url, source, verified_at, notes
+                            FROM person_identifiers
+                            WHERE person_id=1
+                            ORDER BY id
+                            """
+                        ).fetchall()
+                    ]
+            finally:
+                temp_con.close()
+    staged = 0
+    identifiers_added = 0
+    guard_stats: dict[str, int] = {}
+    if result.returncode == 0:
+        with connect() as con:
+            approved_rows, guard_stats = guard_publications(con, temp_rows, source)
+            document_id = ensure_source_review_document(con, source)
+            for payload in approved_rows:
+                if publication_exists_in_curated_db(con, payload):
+                    continue
+                if not publication_inbox_candidate_exists(con, payload):
+                    stage_publication_payload_from_source(con, document_id, payload, source)
+                    staged += 1
+            identifiers_added = persist_discovered_identifiers(con, temp_identifiers)
+            con.commit()
+    return {
+        "source": source,
+        "ok": result.returncode == 0,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "staged_new_publications": staged,
+        "publication_guard": guard_stats,
+        "identifiers_added": identifiers_added,
+    }
+
+
+AI_DISCOVERY_MAX_PAGES = 5
+AI_DISCOVERY_MAX_CHARS_PER_PAGE = 45000
+AI_DISCOVERY_MAX_BYTES = 2_000_000
+
+
+class VisibleTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hidden_depth = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg", "canvas"}:
+            self.hidden_depth += 1
+        if tag.lower() in {"p", "div", "li", "tr", "h1", "h2", "h3", "h4", "br"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style", "noscript", "svg", "canvas"} and self.hidden_depth:
+            self.hidden_depth -= 1
+        if tag.lower() in {"p", "div", "li", "tr", "h1", "h2", "h3", "h4"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden_depth:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        text = " ".join(part.strip() for part in self.parts if part.strip())
+        text = re.sub(r"\s*\n\s*", "\n", text)
+        return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def html_to_visible_text(html: str) -> str:
+    parser = VisibleTextParser()
+    parser.feed(html)
+    return parser.text()
+
+
+def fetch_profile_text(url: str) -> tuple[str, str]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "vitamine/0.1 (AI profile discovery)",
+            "Accept": "text/html,text/plain;q=0.9,*/*;q=0.5",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        content_type = response.headers.get("Content-Type", "")
+        raw = response.read(AI_DISCOVERY_MAX_BYTES + 1)
+    if len(raw) > AI_DISCOVERY_MAX_BYTES:
+        raise RuntimeError("profile page was larger than the discovery limit")
+    charset_match = re.search(r"charset=([^;\s]+)", content_type, flags=re.I)
+    charset = charset_match.group(1) if charset_match else "utf-8"
+    decoded = raw.decode(charset, errors="replace")
+    if "html" in content_type.lower() or "<html" in decoded[:1000].lower():
+        return html_to_visible_text(decoded), content_type
+    return re.sub(r"\s+", " ", decoded).strip(), content_type
+
+
+def timestamp_text(timestamp: float | None = None) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp or time.time()))
+
+
+def ai_web_discovery_enabled(con: sqlite3.Connection) -> bool:
+    return get_setting(con, "ai_web_discovery_enabled") == "1"
+
+
+def ai_discovery_source_urls(con: sqlite3.Connection, limit: int = AI_DISCOVERY_MAX_PAGES) -> list[dict[str, str]]:
+    rows = rows_dict(
+        con.execute(
+            """
+            SELECT platform, identifier_type, identifier_value, url
+            FROM person_identifiers
+            WHERE url IS NOT NULL AND url != ''
+            ORDER BY lower(platform), id
+            """
+        ).fetchall()
+    )
+    sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    skip_platforms = {"orcid", "zotero", "pubmed", "crossref", "doi"}
+    for row in rows:
+        platform = str(row.get("platform") or "").strip()
+        url = str(row.get("url") or "").strip()
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        if platform.casefold() in skip_platforms:
+            continue
+        normalized_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path, "", parsed.query, ""))
+        if normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        sources.append(
+            {
+                "platform": platform or parsed.netloc,
+                "identifier_type": str(row.get("identifier_type") or ""),
+                "identifier_value": str(row.get("identifier_value") or ""),
+                "url": normalized_url,
+            }
+        )
+        if len(sources) >= limit:
+            break
+    return sources
+
+
+def ensure_discovery_document(con: sqlite3.Connection, source: dict[str, str]) -> int:
+    slug_base = re.sub(r"[^a-z0-9]+", "-", f"ai-discovery-{source.get('platform')}-{source.get('url')}".casefold()).strip("-")
+    slug = slug_base[:140] or "ai-discovery-profile"
+    title = f"AI profile discovery: {source.get('platform') or source.get('url')}"
+    con.execute(
+        """
+        INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
+        VALUES (?, ?, ?, 'web-profile', datetime('now'), ?)
+        ON CONFLICT(slug) DO UPDATE SET imported_at=datetime('now'), notes=excluded.notes
+        """,
+        (slug, title[:240], source.get("url") or "", "Profile page fetched for AI-assisted candidate discovery."),
+    )
+    return int(con.execute("SELECT id FROM documents WHERE slug=?", (slug,)).fetchone()[0])
+
+
+def discover_ai_profile_candidates() -> dict[str, Any]:
+    with connect() as con:
+        if not ai_web_discovery_enabled(con):
+            return {"ok": True, "enabled": False, "sources_checked": 0, "candidates_staged": 0, "warnings": []}
+        settings = cv_import_settings(con, include_secret=True)
+        sources = ai_discovery_source_urls(con)
+    if not sources:
+        return {"ok": True, "enabled": True, "sources_checked": 0, "candidates_staged": 0, "warnings": ["No profile URLs available for AI discovery."]}
+    if settings.get("provider") == "none":
+        return {"ok": True, "enabled": True, "sources_checked": 0, "candidates_staged": 0, "warnings": ["AI web discovery is enabled, but CV import LLM provider is set to none."]}
+
+    total_staged = 0
+    results: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    with connect() as con:
+        for source in sources:
+            url = source["url"]
+            try:
+                text, content_type = fetch_profile_text(url)
+            except (OSError, RuntimeError, urllib.error.URLError, urllib.error.HTTPError, UnicodeError) as exc:
+                warnings.append(f"{url}: {exc}")
+                results.append({"url": url, "ok": False, "warning": str(exc)})
+                continue
+            if len(text) < 300:
+                warnings.append(f"{url}: profile page did not contain enough visible text.")
+                results.append({"url": url, "ok": False, "warning": "not enough visible text"})
+                continue
+            prompt_text = (
+                "This is a researcher profile page, not necessarily a full CV. "
+                "Extract only concrete CV/publication facts that are explicitly present. "
+                "Treat uncertain items as low confidence.\n\n"
+                f"Source URL: {url}\nContent type: {content_type}\n\n{text[:AI_DISCOVERY_MAX_CHARS_PER_PAGE]}"
+            )
+            llm_data, llm_warning = llm_extract(prompt_text, settings)
+            if llm_warning or not isinstance(llm_data, dict):
+                warning = llm_warning or "LLM returned no structured discovery data."
+                warnings.append(f"{url}: {warning}")
+                results.append({"url": url, "ok": False, "warning": warning})
+                continue
+            document_id = ensure_discovery_document(con, source)
+            guarded_publications, publication_review = guard_publications(
+                con,
+                [row for row in llm_data.get("publications", []) if isinstance(row, dict)],
+                "ai_web_discovery",
+            )
+            guarded_other, other_review = review_nonpublications(
+                con,
+                [row for row in llm_data.get("entries", []) if isinstance(row, dict)],
+                [row for row in llm_data.get("contributions", []) if isinstance(row, dict)],
+                llm_data.get("person") if isinstance(llm_data.get("person"), dict) else {},
+                llm_data.get("narrative_report") if isinstance(llm_data.get("narrative_report"), dict) else None,
+                "ai_web_discovery",
+                settings,
+            )
+            staged = stage_import_candidates(
+                con,
+                document_id,
+                guarded_other["entries"],
+                guarded_publications,
+                guarded_other["contributions"],
+                guarded_other["person"],
+                guarded_other["narrative_report"],
+                "ai_web_discovery",
+            )
+            staged_count = sum(int(staged.get(key) or 0) for key in ("entries", "publications", "contributions", "person", "narrative"))
+            total_staged += staged_count
+            results.append(
+                {
+                    "url": url,
+                    "ok": True,
+                    "staged": staged,
+                    "publication_review": publication_review,
+                    "other_review": other_review,
+                    "candidates_staged": staged_count,
+                    "remembered_rejections": int(staged.get("remembered_rejections") or 0),
+                }
+            )
+            for warning in llm_data.get("warnings") or []:
+                if warning:
+                    warnings.append(f"{url}: {warning}")
+        con.commit()
+        pending = pending_inbox_count(con)
+    return {
+        "ok": True,
+        "enabled": True,
+        "sources_checked": len(sources),
+        "candidates_staged": total_staged,
+        "inbox_pending": pending,
+        "results": results,
+        "warnings": warnings[:20],
+    }
+
+
+def enrich_cv_job(update_last_run: bool = True) -> dict[str, Any]:
+    with connect() as con:
+        policy = publication_source_policy(con)
+    doi_result = run_script("enrich_publications_by_doi.py", "--resolve-missing")
+    if doi_result.returncode != 0:
+        raise RuntimeError(doi_result.stderr[-4000:] or "DOI enrichment failed.")
+    source_results: list[dict[str, Any]] = []
+    for source in PUBLICATION_SOURCE_POLICIES[policy]:
+        source_result = run_publication_source_to_inbox(source)
+        source_results.append(source_result)
+        if not source_result["ok"]:
+            raise RuntimeError(str(source_result.get("stderr") or "")[-4000:] or f"{source} sync failed.")
+    maintenance = maintain()
+    ai_discovery = discover_ai_profile_candidates()
+    with connect() as con:
+        if update_last_run:
+            set_setting(con, "enrichment_last_run", timestamp_text())
+        con.commit()
+        inbox_pending = pending_inbox_count(con)
+        citation_coverage = row_dict(
+            con.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN COALESCE(suppress_display, 0)=0 THEN 1 ELSE 0 END) AS visible_publications,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0)=0
+                            AND openalex_cited_by_count IS NOT NULL THEN 1 ELSE 0 END) AS publications_with_citations,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0)=0
+                           THEN COALESCE(openalex_cited_by_count, 0) ELSE 0 END) AS citation_total
+                FROM publications
+                """
+            ).fetchone()
+        )
+    source_summary: list[dict[str, Any]] = []
+    for row in source_results:
+        try:
+            script_stats = json.loads(str(row.get("stdout") or "{}"))
+        except json.JSONDecodeError:
+            script_stats = {}
+        guard = row.get("publication_guard") or {}
+        source_summary.append(
+            {
+                "source": row.get("source"),
+                "fetched": int(script_stats.get("fetched") or 0),
+                "matched": int(script_stats.get("matched") or 0),
+                "source_upserted": int(script_stats.get("upserted") or 0),
+                "duplicates": int(guard.get("duplicates") or 0),
+                "backfilled": int(guard.get("backfilled") or 0),
+                "rejected": sum(
+                    int(guard.get(key) or 0)
+                    for key in ("remembered", "unresolved", "not_author")
+                ),
+                "identity_review": int(guard.get("identity_review") or 0),
+                "staged": int(row.get("staged_new_publications") or 0),
+            }
+        )
+    enrichment_summary = {
+        "sources": source_summary,
+        "source_records_fetched": sum(row["fetched"] for row in source_summary),
+        "matched_at_source": sum(row["matched"] for row in source_summary),
+        "duplicates": sum(row["duplicates"] for row in source_summary),
+        "backfilled": sum(row["backfilled"] for row in source_summary),
+        "rejected": sum(row["rejected"] for row in source_summary),
+        "identity_review": sum(row["identity_review"] for row in source_summary),
+        "staged_from_sources": sum(row["staged"] for row in source_summary),
+        "staged_from_web": int(ai_discovery.get("candidates_staged") or 0),
+        "inbox_pending": inbox_pending,
+        "citation_coverage": {
+            key: int((citation_coverage or {}).get(key) or 0)
+            for key in ("visible_publications", "publications_with_citations", "citation_total")
+        },
+    }
+    stdout_parts = [
+        *(f"[{row['source']}]\n{row['stdout'].strip()}" for row in source_results if row["stdout"].strip()),
+        f"[doi]\n{doi_result.stdout.strip()}",
+        f"[maintenance]\n{json.dumps(maintenance, indent=2)}",
+        f"[ai-web-discovery]\n{json.dumps(ai_discovery, indent=2)}",
+    ]
+    return {
+        "ok": True,
+        "policy": policy,
+        "results": source_results,
+        "doi_stdout": doi_result.stdout,
+        "maintenance": maintenance,
+        "ai_web_discovery": ai_discovery,
+        "enrichment_summary": enrichment_summary,
+        "inbox_pending": inbox_pending,
+        "stdout": "\n\n".join(part for part in stdout_parts if part.strip()),
+    }
+
+
+@app.get("/api/export-formats")
+def export_formats() -> dict[str, Any]:
+    formats = export_format_catalog()
+    installed = set(installed_export_format_ids(formats))
+    return {
+        "schema_version": 1,
+        "formats": [{**item, "installed": item["id"] in installed} for item in formats],
+    }
+
+
+@app.get("/api/export-formats/{format_id}/prompt-plan")
+def get_export_prompt_plan(format_id: str) -> dict[str, Any]:
+    export_format_by_id(format_id, export_format_catalog())
+    with connect() as con:
+        raw = get_setting(con, export_plan_setting_key(format_id))
+    if not raw:
+        return {"active": False, "plan": None}
+    try:
+        plan = json.loads(raw)
+    except json.JSONDecodeError:
+        plan = None
+    return {"active": bool(plan), "plan": plan}
+
+
+@app.post("/api/export-formats/{format_id}/prompt-plan")
+async def create_export_prompt_plan(format_id: str, request: Request) -> dict[str, Any]:
+    item = export_format_by_id(format_id, export_format_catalog())
+    exporter = str(item.get("exporter") or "")
+    if exporter not in {"long", "short", "ultrashort"}:
+        raise HTTPException(status_code=422, detail="Prompt planning is currently available for the formal, short, and one-page Word exporters.")
+    payload = await request.json()
+    prompt = str(payload.get("prompt") or "").strip()
+    if len(prompt) < 10:
+        raise HTTPException(status_code=400, detail="Describe the export you want in a little more detail.")
+    if len(prompt) > 12000:
+        raise HTTPException(status_code=400, detail="The export instructions are too long; keep them below 12,000 characters.")
+    with connect() as con:
+        candidates = distinct_publications([row for row in export_publication_rows(con) if eligible_export_publication(row)])
+        settings = cv_import_settings(con, include_secret=True)
+    if not candidates:
+        raise HTTPException(status_code=422, detail="There are no eligible peer-reviewed publications to plan with.")
+    compact_candidates = [
+        {
+            "id": row["id"],
+            "title": row.get("title"),
+            "authors": row.get("authors"),
+            "venue": row.get("venue"),
+            "year": row.get("year"),
+            "impact_factor": row.get("impact_factor"),
+            "citations": row.get("openalex_cited_by_count"),
+            "authorship": row.get("authorship"),
+            "baseline_score": row.get("score"),
+        }
+        for row in candidates
+    ]
+    model_prompt = f"""
+You are planning an academic CV export for a scientist.
+Convert the user's natural-language instructions into the strict JSON export plan schema.
+
+Safety and fidelity rules:
+- Select only publication IDs present in CANDIDATE_PUBLICATIONS.
+- Respect explicit maximums as hard limits.
+- Put every publication the user explicitly requires in required_publication_ids and selected_publication_ids.
+- Interpret "first or last author" using the supplied authorship value.
+- Use impact_factor when present. Missing impact factor is unknown, not zero-quality.
+- Balance recency and impact exactly as the user requests; do not invent metadata.
+- Choose a practical section_strategy, but do not claim exact Word pagination.
+- Briefly explain the interpretation and disclose ambiguity in warnings.
+
+FORMAT:
+{json.dumps({"id": item["id"], "name": item["name"], "length": item.get("length"), "focus": item.get("focus")}, ensure_ascii=False)}
+
+USER_INSTRUCTIONS:
+{prompt}
+
+CANDIDATE_PUBLICATIONS:
+{json.dumps(compact_candidates, ensure_ascii=False)}
+""".strip()
+    plan_raw, warning = llm_json(model_prompt, EXPORT_PLAN_SCHEMA, settings)
+    if warning or not isinstance(plan_raw, dict):
+        raise HTTPException(status_code=502, detail=f"The configured LLM could not create an export plan. {warning or ''}".strip())
+    plan = validate_export_plan(plan_raw, candidates, prompt, format_id)
+    if warning:
+        plan["warnings"].append(warning)
+    with connect() as con:
+        if exporter in {"short", "ultrashort"}:
+            profile = "ultrashort" if exporter == "ultrashort" else "short"
+            config = validate_export_profile(profile)
+            previous_settings = row_dict(
+                con.execute("SELECT publication_limit, authorship_filter FROM export_settings WHERE profile=?", (profile,)).fetchone()
+            ) or {"publication_limit": 10, "authorship_filter": "first_last"}
+            previous_rows = con.execute(
+                f"""
+                SELECT id
+                FROM publications
+                WHERE {config['flag']}=1
+                ORDER BY COALESCE({config['order']}, {config['fallback_order']}, 999), id
+                """
+            ).fetchall()
+            existing_raw = get_setting(con, export_plan_setting_key(format_id))
+            try:
+                existing_plan = json.loads(existing_raw) if existing_raw else {}
+            except json.JSONDecodeError:
+                existing_plan = {}
+            original_previous = existing_plan.get("previous_selection") if isinstance(existing_plan, dict) else None
+            plan["previous_selection"] = original_previous if isinstance(original_previous, dict) else {
+                **previous_settings,
+                "publication_ids": [int(row["id"]) for row in previous_rows],
+            }
+        apply_export_plan(con, plan, exporter)
+        set_setting(con, export_plan_setting_key(format_id), json.dumps(plan, ensure_ascii=False))
+        con.commit()
+    return {"ok": True, "active": True, "provider": settings.get("provider"), "plan": plan}
+
+
+@app.delete("/api/export-formats/{format_id}/prompt-plan")
+def clear_export_prompt_plan(format_id: str) -> dict[str, Any]:
+    item = export_format_by_id(format_id, export_format_catalog())
+    with connect() as con:
+        raw = get_setting(con, export_plan_setting_key(format_id))
+        try:
+            plan = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            plan = {}
+        exporter = str(item.get("exporter") or "")
+        previous = plan.get("previous_selection") if isinstance(plan, dict) else None
+        if exporter in {"short", "ultrashort"} and isinstance(previous, dict):
+            profile = "ultrashort" if exporter == "ultrashort" else "short"
+            config = validate_export_profile(profile)
+            con.execute(f"UPDATE publications SET {config['flag']}=0, {config['order']}=NULL")
+            for index, publication_id in enumerate(previous.get("publication_ids") or [], 1):
+                if str(publication_id).isdigit():
+                    con.execute(
+                        f"UPDATE publications SET {config['flag']}=1, {config['order']}=? WHERE id=?",
+                        (index, int(publication_id)),
+                    )
+            con.execute(
+                """
+                INSERT INTO export_settings (profile, publication_limit, authorship_filter)
+                VALUES (?, ?, ?)
+                ON CONFLICT(profile) DO UPDATE SET
+                  publication_limit=excluded.publication_limit,
+                  authorship_filter=excluded.authorship_filter
+                """,
+                (
+                    profile,
+                    max(1, min(50, int(previous.get("publication_limit") or 10))),
+                    previous.get("authorship_filter") if previous.get("authorship_filter") in {"first_last", "first", "last", "all"} else "first_last",
+                ),
+            )
+        con.execute("DELETE FROM app_settings WHERE key=?", (export_plan_setting_key(format_id),))
+        con.commit()
+    return {"ok": True, "active": False}
+
+
+@app.post("/api/export-formats/{format_id}/install")
+def install_export_format(format_id: str) -> dict[str, Any]:
+    formats = export_format_catalog()
+    item = export_format_by_id(format_id, formats)
+    installed = installed_export_format_ids(formats)
+    if format_id not in installed:
+        installed.append(format_id)
+    write_installed_export_format_ids(installed, formats)
+    return {"ok": True, "format_id": item["id"], "installed": True}
+
+
+@app.delete("/api/export-formats/{format_id}/install")
+def uninstall_export_format(format_id: str) -> dict[str, Any]:
+    formats = export_format_catalog()
+    item = export_format_by_id(format_id, formats)
+    installed = [item_id for item_id in installed_export_format_ids(formats) if item_id != format_id]
+    write_installed_export_format_ids(installed, formats)
+    return {"ok": True, "format_id": item["id"], "installed": False}
 
 
 @app.get("/api/export-settings")
@@ -2434,6 +4995,8 @@ def export_settings() -> dict[str, Any]:
             categories = [key for key in LONG_CV_PUBLICATION_CATEGORIES if key in DEFAULT_LONG_CV_PUBLICATION_CATEGORIES]
         return {
             "home_language_label": get_setting(con, "home_language_label") or "Deutsch",
+            "citation_style": validate_citation_style(get_setting(con, "export_citation_style")),
+            "citation_style_options": CITATION_STYLES,
             "long_cv_publication_categories": categories,
             "long_cv_publication_category_options": [
                 {"key": key, "label": label, "default": key in DEFAULT_LONG_CV_PUBLICATION_CATEGORIES}
@@ -2447,25 +5010,263 @@ async def update_export_settings(request: Request) -> dict[str, Any]:
     payload = await request.json()
     label = str(payload.get("home_language_label") or "").strip() or "Deutsch"
     requested_categories = payload.get("long_cv_publication_categories")
+    citation_style = validate_citation_style(str(payload.get("citation_style") or DEFAULT_CITATION_STYLE))
     categories: list[str] = []
     if isinstance(requested_categories, list):
         categories = [str(item) for item in requested_categories if str(item) in LONG_CV_PUBLICATION_CATEGORIES]
     with connect() as con:
         set_setting(con, "home_language_label", label[:40])
+        set_setting(con, "export_citation_style", citation_style)
         if isinstance(requested_categories, list):
             set_setting(con, "long_cv_publication_categories", ",".join(categories))
         con.commit()
-    return {"ok": True, "home_language_label": label[:40], "long_cv_publication_categories": categories}
+    return {
+        "ok": True,
+        "home_language_label": label[:40],
+        "citation_style": citation_style,
+        "long_cv_publication_categories": categories,
+    }
+
+
+@app.get("/api/enrichment-settings")
+def enrichment_settings() -> dict[str, Any]:
+    with connect() as con:
+        return {
+            "ai_web_discovery_enabled": ai_web_discovery_enabled(con),
+            "enrichment_last_run": get_setting(con, "enrichment_last_run") or get_setting(con, "background_enrichment_last_run"),
+        }
+
+
+@app.put("/api/enrichment-settings")
+async def update_enrichment_settings(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    ai_discovery_enabled = "1" if payload.get("ai_web_discovery_enabled") else "0"
+    with connect() as con:
+        set_setting(con, "ai_web_discovery_enabled", ai_discovery_enabled)
+        con.commit()
+    return {
+        "ok": True,
+        "ai_web_discovery_enabled": ai_discovery_enabled == "1",
+    }
+
+
+def database_population_state(con: sqlite3.Connection) -> dict[str, Any]:
+    person = con.execute("SELECT full_name, display_name, work_email FROM person WHERE id=1").fetchone()
+    has_person = bool(person and any(str(person[key] or "").strip() for key in person.keys()))
+    counts = {
+        "entries": int(con.execute("SELECT COUNT(*) FROM cv_entries").fetchone()[0]),
+        "publications": int(con.execute("SELECT COUNT(*) FROM publications").fetchone()[0]),
+        "identifiers": int(con.execute("SELECT COUNT(*) FROM person_identifiers").fetchone()[0]),
+        "inbox": pending_inbox_count(con),
+    }
+    return {"is_empty": not has_person and not any(counts.values()), "has_person": has_person, "counts": counts}
+
+
+def onboarding_payload(con: sqlite3.Connection) -> dict[str, Any]:
+    population = database_population_state(con)
+    enabled = get_setting(con, "onboarding_enabled") == "1"
+    if population["is_empty"] and not enabled:
+        set_setting(con, "onboarding_enabled", "1")
+        enabled = True
+    skipped = {item for item in get_setting(con, "onboarding_skipped_steps").split(",") if item}
+    completed = get_setting(con, "onboarding_completed") == "1"
+    orcid_id = saved_orcid_id(con)
+    zotero_connected = bool(get_setting(con, "zotero_api_key"))
+    enriched = bool(get_setting(con, "enrichment_last_run") or get_setting(con, "background_enrichment_last_run"))
+    step = ""
+    if enabled and not completed:
+        if population["is_empty"] and "import_cv" not in skipped:
+            step = "import_cv"
+        elif not orcid_id and "orcid" not in skipped:
+            step = "orcid"
+        elif not zotero_connected and "zotero" not in skipped:
+            step = "zotero"
+        elif not enriched and "enrich" not in skipped:
+            step = "enrich"
+        elif population["counts"]["inbox"] and "inbox" not in skipped:
+            step = "inbox"
+    return {
+        "step": step,
+        "enabled": enabled,
+        "completed": completed or not step,
+        "skipped": sorted(skipped),
+        "population": population,
+        "orcid_id": orcid_id,
+        "zotero_connected": zotero_connected,
+        "enriched": enriched,
+    }
+
+
+@app.get("/api/onboarding")
+def get_onboarding() -> dict[str, Any]:
+    with connect() as con:
+        settings = cv_import_settings(con, include_secret=False)
+        prefs = cv_import_preferences()
+        configuration_skipped = skip_llm_onboarding()
+        return {
+            **onboarding_payload(con),
+            "llm_configured": configuration_skipped or bool(str(prefs.get("provider") or "").strip()),
+            "llm_provider": settings.get("provider"),
+            "api_key_set": settings.get("api_key_set", False),
+            "llm_managed": managed_llm(),
+            "skip_llm_configuration": configuration_skipped,
+        }
+
+
+@app.post("/api/onboarding/step")
+async def update_onboarding_step(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    step = str(payload.get("step") or "").strip()
+    action = str(payload.get("action") or "skip").strip()
+    allowed = {"import_cv", "orcid", "zotero", "enrich", "inbox"}
+    if step not in allowed:
+        raise HTTPException(status_code=400, detail="Unknown onboarding step.")
+    with connect() as con:
+        skipped = {item for item in get_setting(con, "onboarding_skipped_steps").split(",") if item}
+        if action == "skip":
+            skipped.add(step)
+        elif action == "restore":
+            skipped.discard(step)
+        elif action == "complete":
+            set_setting(con, "onboarding_completed", "1")
+        else:
+            raise HTTPException(status_code=400, detail="Unknown onboarding action.")
+        set_setting(con, "onboarding_skipped_steps", ",".join(sorted(skipped)))
+        con.commit()
+        return {"ok": True, **onboarding_payload(con)}
+
+
+def compact_person_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+@app.post("/api/orcid/discover")
+def discover_orcid() -> dict[str, Any]:
+    with connect() as con:
+        existing = saved_orcid_id(con)
+        if existing:
+            return {"ok": True, "auto_linked": False, "orcid_id": existing, "candidates": []}
+        person = con.execute(
+            "SELECT full_name, display_name, own_institution_name FROM person WHERE id=1"
+        ).fetchone()
+        name = str((person["full_name"] if person else "") or (person["display_name"] if person else "") or "").strip()
+        institution = str((person["own_institution_name"] if person else "") or "").strip()
+        institutions = [
+            str(row["organization"] or "").strip()
+            for row in con.execute(
+                """
+                SELECT organization FROM cv_entries
+                WHERE section_key IN ('academic_appointments', 'hospital_appointments', 'professional_positions', 'education')
+                  AND COALESCE(organization, '') != ''
+                ORDER BY
+                  CASE WHEN COALESCE(end_date, '')='' OR lower(end_date) IN ('present', 'current', 'ongoing') THEN 0 ELSE 1 END,
+                  start_date DESC,
+                  id DESC
+                LIMIT 8
+                """
+            ).fetchall()
+        ]
+        if len(name.split()) < 2:
+            return {"ok": True, "auto_linked": False, "orcid_id": "", "candidates": [], "warning": "Import or enter the person’s full name first."}
+    parts = name.split()
+    query = f'given-names:"{parts[0]}" AND family-name:"{parts[-1]}"'
+    url = (
+        "https://pub.orcid.org/v3.0/expanded-search/?"
+        + urllib.parse.urlencode({"q": query, "start": 0, "rows": 5})
+    )
+    payload = fetch_json_url(url)
+    candidates: list[dict[str, Any]] = []
+    expected_name_parts = compact_person_name(name).split()
+    expected_institutions = [
+        compact_person_name(value)
+        for value in [institution, *institutions]
+        if compact_person_name(value)
+    ]
+    for row in payload.get("expanded-result") or []:
+        orcid_id = clean_orcid_id(str(row.get("orcid-id") or ""))
+        candidate_name = " ".join(
+            part for part in [str(row.get("given-names") or "").strip(), str(row.get("family-names") or "").strip()] if part
+        )
+        institutions = [str(item or "").strip() for item in row.get("institution-name") or [] if str(item or "").strip()]
+        candidate_name_parts = compact_person_name(candidate_name).split()
+        exact_name = bool(
+            expected_name_parts
+            and candidate_name_parts
+            and expected_name_parts[0] == candidate_name_parts[0]
+            and expected_name_parts[-1] == candidate_name_parts[-1]
+        )
+        institution_match = False
+        for expected in expected_institutions:
+            expected_tokens = set(expected.split())
+            for item in institutions:
+                actual = compact_person_name(item)
+                actual_tokens = set(actual.split())
+                overlap = len(expected_tokens & actual_tokens) / min(len(expected_tokens), len(actual_tokens)) if expected_tokens and actual_tokens else 0
+                if expected in actual or actual in expected or overlap >= 0.60:
+                    institution_match = True
+                    break
+            if institution_match:
+                break
+        if orcid_id:
+            candidates.append(
+                {
+                    "orcid_id": orcid_id,
+                    "name": candidate_name,
+                    "institutions": institutions,
+                    "exact_name": exact_name,
+                    "institution_match": institution_match,
+                }
+            )
+    exact = [row for row in candidates if row["exact_name"]]
+    high_confidence = [row for row in exact if row["institution_match"]]
+    chosen = high_confidence[0] if len(high_confidence) == 1 else (exact[0] if len(exact) == 1 and len(candidates) == 1 else None)
+    if chosen:
+        with connect() as con:
+            upsert_person_orcid_identifier(
+                con,
+                chosen["orcid_id"],
+                source="ORCID public search",
+                notes="Automatically linked after exact-name high-confidence onboarding match.",
+            )
+            con.commit()
+        schedule_background_refresh(profiles=True)
+        return {"ok": True, "auto_linked": True, "orcid_id": chosen["orcid_id"], "candidates": candidates}
+    return {"ok": True, "auto_linked": False, "orcid_id": "", "candidates": candidates}
+
+
+@app.post("/api/orcid/link")
+async def link_orcid(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    orcid_id = clean_orcid_id(str(payload.get("orcid_id") or ""))
+    if not re.fullmatch(r"\d{4}-\d{4}-\d{4}-[\dX]{4}", orcid_id, flags=re.I):
+        raise HTTPException(status_code=400, detail="Enter a valid ORCID iD.")
+    with connect() as con:
+        upsert_person_orcid_identifier(con, orcid_id, source="onboarding", notes="Linked during onboarding.")
+        con.commit()
+    schedule_background_refresh(profiles=True)
+    return {"ok": True, "orcid_id": orcid_id}
 
 
 @app.get("/api/database")
 def database_info() -> dict[str, Any]:
     db = active_db_path()
+    with connect() as con:
+        counts = {
+            "entries": int(con.execute("SELECT COUNT(*) FROM cv_entries").fetchone()[0]),
+            "publications": int(con.execute("SELECT COUNT(*) FROM publications").fetchone()[0]),
+            "identifiers": int(con.execute("SELECT COUNT(*) FROM person_identifiers").fetchone()[0]),
+        }
+        person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+        has_person = bool(person and any(str(person[key] or "").strip() for key in ("full_name", "display_name", "work_email")))
     return {
         "active": str(db),
         "active_name": db.name,
         "example": str(EXAMPLE_DB),
+        "default": str(DEFAULT_DB),
         "is_example": db.resolve() == EXAMPLE_DB.resolve(),
+        "is_default": db.resolve() == DEFAULT_DB.resolve(),
+        "is_empty": not has_person and not any(counts.values()),
+        "counts": counts,
         "exists": db.exists(),
     }
 
@@ -2484,12 +5285,42 @@ async def create_database(request: Request) -> dict[str, Any]:
     filename = sanitize_database_name(payload.get("name"))
     path = DATA / filename
     if path.resolve() == EXAMPLE_DB.resolve():
-        raise HTTPException(status_code=400, detail="Choose a different database name")
+        raise HTTPException(status_code=400, detail="The example database name is reserved. Choose a different database name.")
     try:
         create_blank_database(path)
     except FileExistsError:
-        raise HTTPException(status_code=409, detail=f"Database already exists: {filename}") from None
+        raise HTTPException(status_code=409, detail=f"A database with this name already exists: {filename}") from None
     db = set_active_db(path)
+    return database_payload(db)
+
+
+@app.post("/api/database/rename")
+async def rename_database(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    current = active_db_path()
+    filename = sanitize_database_name(payload.get("name"))
+    target = current.with_name(filename)
+    if current.resolve() == EXAMPLE_DB.resolve():
+        raise HTTPException(status_code=400, detail="The bundled example database cannot be renamed.")
+    if target.resolve() == EXAMPLE_DB.resolve():
+        raise HTTPException(status_code=400, detail="The example database name is reserved.")
+    if target.resolve() == current.resolve():
+        return database_payload(current)
+    if target.exists():
+        raise HTTPException(status_code=409, detail=f"A database with this name already exists: {filename}")
+    try:
+        current.replace(target)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not rename database: {exc}") from exc
+    if os.environ.get("VITAMINE_DB"):
+        os.environ["VITAMINE_DB"] = str(target)
+    db = set_active_db(target)
+    with connect() as con:
+        con.execute(
+            "UPDATE documents SET source_path=? WHERE slug='manual_cv_database' AND source_path=?",
+            (str(db), str(current)),
+        )
+        con.commit()
     return database_payload(db)
 
 
@@ -2581,13 +5412,58 @@ async def import_database(file: UploadFile = File(...)) -> dict[str, Any]:
     return database_payload(db)
 
 
+def cv_import_preferences() -> dict[str, Any]:
+    raw = read_preferences().get("cv_import")
+    return raw if isinstance(raw, dict) else {}
+
+
+def write_cv_import_preferences(values: dict[str, Any]) -> None:
+    prefs = read_preferences()
+    current = prefs.get("cv_import")
+    if not isinstance(current, dict):
+        current = {}
+    current.update(values)
+    prefs["cv_import"] = current
+    write_preferences(prefs)
+
+
+def migrate_cv_import_preferences(con: sqlite3.Connection) -> None:
+    if isinstance(read_preferences().get("cv_import"), dict):
+        return
+    migrated: dict[str, Any] = {}
+    for key in CV_IMPORT_SETTING_FIELDS:
+        value = get_setting(con, f"cv_import_{key}")
+        if value:
+            migrated[key] = value
+    api_key = get_setting(con, "cv_import_api_key")
+    if api_key:
+        migrated["api_key"] = api_key
+    if migrated:
+        write_cv_import_preferences(migrated)
+        con.execute("DELETE FROM app_settings WHERE key='cv_import_api_key'")
+        con.commit()
+
+
 def cv_import_settings(con: sqlite3.Connection, include_secret: bool = False) -> dict[str, Any]:
-    settings: dict[str, Any] = {
-        key: get_setting(con, f"cv_import_{key}") or default
-        for key, default in CV_IMPORT_SETTING_FIELDS.items()
-    }
-    api_key = get_setting(con, "cv_import_api_key") or os.environ.get("OPENAI_API_KEY") or ""
+    migrate_cv_import_preferences(con)
+    prefs = cv_import_preferences()
+    if managed_llm():
+        settings = {key: str(default) for key, default in CV_IMPORT_SETTING_FIELDS.items()}
+    else:
+        settings = {
+            key: str(prefs.get(key) or get_setting(con, f"cv_import_{key}") or default)
+            for key, default in CV_IMPORT_SETTING_FIELDS.items()
+        }
+    shared_openai_key = os.environ.get("OPENAI_API_KEY") if settings["provider"] == "openai" else ""
+    api_key = str(
+        shared_openai_key
+        if managed_llm()
+        else (prefs.get("api_key") or shared_openai_key or get_setting(con, "cv_import_api_key") or "")
+    )
+    api_key = normalize_api_key(api_key)
     settings["api_key_set"] = bool(api_key)
+    settings["managed"] = managed_llm()
+    settings["configuration_allowed"] = llm_user_configuration_allowed()
     if include_secret:
         settings["api_key"] = api_key
     return settings
@@ -2601,6 +5477,117 @@ def cv_import_upload_name(filename: str) -> str:
     return f"{stem}{suffix}"
 
 
+def api_http_error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        detail = exc.read().decode("utf-8", errors="replace")
+    except OSError:
+        detail = ""
+    return re.sub(r"\s+", " ", detail).strip()[-1200:] or str(exc.reason)
+
+
+def normalize_api_key(value: str) -> str:
+    text = re.sub(r"\s+", "", str(value or "").strip().strip("\"'"))
+    if text.lower().startswith("bearer"):
+        text = text[6:].strip()
+    return text
+
+
+def looks_like_openai_api_key(value: str) -> bool:
+    return bool(re.fullmatch(r"sk-[A-Za-z0-9_-]+", normalize_api_key(value)))
+
+
+def test_openai_api_connection(settings: dict[str, Any]) -> None:
+    provider = str(settings.get("provider") or "")
+    if provider not in {"openai", "openai_compatible"}:
+        return
+    base = str(settings.get("api_base_url") or "https://api.openai.com/v1").rstrip("/")
+    model = str(settings.get("api_model") or "gpt-4.1-mini").strip()
+    api_key = normalize_api_key(str(settings.get("api_key") or ""))
+    if provider == "openai":
+        base = "https://api.openai.com/v1"
+    if provider == "openai" and not api_key:
+        raise HTTPException(status_code=400, detail="Paste an OpenAI API key before saving OpenAI API settings.")
+    if provider == "openai" and not looks_like_openai_api_key(api_key):
+        raise HTTPException(status_code=400, detail="OpenAI API keys should start with sk-. Clear the key field or paste a valid OpenAI API key.")
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    if provider == "openai":
+        request = urllib.request.Request(
+            f"{base}/models/{urllib.parse.quote(model, safe='')}",
+            headers=headers,
+            method="GET",
+        )
+    else:
+        body = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "temperature": 0,
+            "max_tokens": 8,
+        }
+        request = urllib.request.Request(
+            f"{base}/chat/completions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={**headers, "Content-Type": "application/json"},
+            method="POST",
+        )
+    try:
+        with urllib.request.urlopen(request, timeout=12):
+            return
+    except urllib.error.HTTPError as exc:
+        detail = api_http_error_detail(exc)
+        if exc.code in {401, 403}:
+            raise HTTPException(status_code=400, detail=f"OpenAI API authentication failed ({exc.code}). Check the key and model access. {detail}") from exc
+        raise HTTPException(status_code=400, detail=f"OpenAI API connection test failed ({exc.code}). {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=400, detail=f"OpenAI API connection test failed: {exc}") from exc
+    except TimeoutError as exc:
+        raise HTTPException(status_code=400, detail="OpenAI API connection test timed out.") from exc
+
+
+@app.post("/api/cv-import/test-connection")
+async def test_cv_import_connection(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    if managed_llm():
+        with connect() as con:
+            settings = cv_import_settings(con, include_secret=True)
+        test_openai_api_connection(settings)
+        return {"ok": True, "message": "Managed API connection successful."}
+    provider = str(payload.get("provider") or "none").strip()
+    if provider not in {"none", "bundled_llama", "ollama", "openai", "openai_compatible"}:
+        raise HTTPException(status_code=400, detail="Unsupported CV import provider")
+    with connect() as con:
+        current = cv_import_settings(con, include_secret=True)
+    settings = {
+        **current,
+        **{
+            key: str(payload.get(key) or current.get(key) or default).strip()
+            for key, default in CV_IMPORT_SETTING_FIELDS.items()
+        },
+    }
+    api_key = normalize_api_key(str(payload.get("api_key") or current.get("api_key") or ""))
+    if os.environ.get("VITAMINE_CLOUD_WORKER") == "1" and provider == "openai_compatible":
+        api_key = normalize_api_key(str(payload.get("api_key") or ""))
+    settings["api_key"] = api_key
+    if provider in {"openai", "openai_compatible"}:
+        test_openai_api_connection(settings)
+        return {"ok": True, "message": "API connection successful."}
+    if provider == "ollama":
+        base = str(settings.get("ollama_url") or "http://127.0.0.1:11434").rstrip("/")
+        try:
+            with urllib.request.urlopen(f"{base}/api/tags", timeout=5):
+                return {"ok": True, "message": "Ollama is reachable."}
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise HTTPException(status_code=400, detail=f"Could not connect to Ollama at {base}: {exc}") from exc
+    if provider == "bundled_llama":
+        configured = str(settings.get("bundled_llama_model_path") or "").strip()
+        model_path = Path(configured).expanduser() if configured else bundled_model_path()
+        if model_path and model_path.exists():
+            return {"ok": True, "message": "Bundled local model is ready."}
+        return {"ok": True, "message": "Bundled local model selected; it will be prepared when the import starts."}
+    return {"ok": True, "message": "Heuristic extraction does not require a connection."}
+
+
 @app.get("/api/cv-import/settings")
 def get_cv_import_settings() -> dict[str, Any]:
     with connect() as con:
@@ -2609,20 +5596,35 @@ def get_cv_import_settings() -> dict[str, Any]:
 
 @app.put("/api/cv-import/settings")
 async def update_cv_import_settings(request: Request) -> dict[str, Any]:
+    if not llm_user_configuration_allowed():
+        raise HTTPException(status_code=403, detail="Language-model settings are managed by this VitaMine deployment.")
     payload = await request.json()
     provider = str(payload.get("provider") or "none").strip()
     if provider not in {"none", "bundled_llama", "ollama", "openai", "openai_compatible"}:
         raise HTTPException(status_code=400, detail="Unsupported CV import provider")
     with connect() as con:
-        set_setting(con, "cv_import_provider", provider)
+        current_settings = cv_import_settings(con, include_secret=True)
+        prefs_update: dict[str, Any] = {"provider": provider}
         for key, default in CV_IMPORT_SETTING_FIELDS.items():
             if key == "provider":
                 continue
             value = str(payload.get(key) or default).strip()
-            set_setting(con, f"cv_import_{key}", value)
-        api_key = str(payload.get("api_key") or "").strip()
+            prefs_update[key] = value
+        if provider == "openai":
+            prefs_update["api_base_url"] = "https://api.openai.com/v1"
+        api_key = normalize_api_key(str(payload.get("api_key") or ""))
+        test_settings = {**current_settings, **prefs_update}
         if api_key:
-            set_setting(con, "cv_import_api_key", api_key)
+            if provider == "openai" and not looks_like_openai_api_key(api_key):
+                raise HTTPException(status_code=400, detail="OpenAI API keys should start with sk-. Clear the key field or paste a valid OpenAI API key.")
+            prefs_update["api_key"] = api_key
+            test_settings["api_key"] = api_key
+        elif provider == "openai":
+            test_settings["api_key"] = current_settings.get("api_key") or ""
+        if provider == "openai" or (provider == "openai_compatible" and api_key):
+            test_openai_api_connection(test_settings)
+        write_cv_import_preferences(prefs_update)
+        con.execute("DELETE FROM app_settings WHERE key='cv_import_api_key'")
         con.commit()
         return cv_import_settings(con, include_secret=False)
 
@@ -2639,6 +5641,7 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
     try:
         with connect() as con:
             settings = cv_import_settings(con, include_secret=True)
+            settings["review_mode"] = "inbox"
             for index, file in enumerate(files, start=1):
                 filename = cv_import_upload_name(file.filename or f"uploaded-cv-{index}")
                 upload_path = upload_dir / f"{timestamp}-{index}-{filename}"
@@ -2671,9 +5674,19 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
             "contributions_inserted": sum(int(result.get("contributions_inserted") or 0) for result in results),
             "publications_inserted": sum(int(result.get("publications_inserted") or 0) for result in results),
             "narratives_imported": sum(int(result.get("narrative_imported") or 0) for result in results),
+            "candidates_staged": sum(int(result.get("candidates_staged") or 0) for result in results),
+            "staged": {
+                "entries": sum(int((result.get("staged") or {}).get("entries") or 0) for result in results),
+                "publications": sum(int((result.get("staged") or {}).get("publications") or 0) for result in results),
+                "contributions": sum(int((result.get("staged") or {}).get("contributions") or 0) for result in results),
+                "person": sum(int((result.get("staged") or {}).get("person") or 0) for result in results),
+                "narrative": sum(int((result.get("staged") or {}).get("narrative") or 0) for result in results),
+                "remembered_rejections": sum(int((result.get("staged") or {}).get("remembered_rejections") or 0) for result in results),
+            },
             "person_fields": max([int(result.get("person_fields") or 0) for result in results] or [0]),
             "used_llm": any(bool(result.get("used_llm")) for result in results),
             "provider": results[0].get("provider") if results else "none",
+            "review_mode": any(bool(result.get("review_mode")) for result in results),
             "warnings": warnings,
             "results": results,
         }
@@ -2685,6 +5698,7 @@ def sync_zotero_action() -> JSONResponse:
     result = run_script("sync_zotero.py")
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
+    schedule_background_refresh(publications_changed=True)
     return JSONResponse({"ok": True, "stdout": result.stdout})
 
 
@@ -2713,6 +5727,7 @@ def sync_publication_sources_action() -> JSONResponse:
                 },
                 status_code=500,
             )
+    schedule_background_refresh(publications_changed=True)
     return JSONResponse(
         {
             "ok": True,
@@ -2741,10 +5756,20 @@ def fetch_journal_metrics_action() -> JSONResponse:
 
 @app.post("/api/actions/enrich-doi")
 def enrich_doi_action() -> JSONResponse:
-    result = run_script("enrich_publications_by_doi.py")
+    result = run_script("enrich_publications_by_doi.py", "--resolve-missing")
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     return JSONResponse({"ok": True, "stdout": result.stdout, "report": "/output/doi_enrichment_report.json"})
+
+
+@app.post("/api/actions/enrich-cv")
+def enrich_cv_action() -> JSONResponse:
+    try:
+        payload = enrich_cv_job(update_last_run=True)
+        schedule_background_refresh(publications_changed=True)
+        return JSONResponse(payload)
+    except RuntimeError as exc:
+        return JSONResponse({"ok": False, "stderr": str(exc)[-4000:]}, status_code=500)
 
 
 @app.post("/api/actions/sync-orcid")
@@ -2752,6 +5777,7 @@ def sync_orcid_action() -> JSONResponse:
     result = run_script("sync_orcid.py")
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
+    schedule_background_refresh(publications_changed=True, institutions=True)
     return JSONResponse({"ok": True, "stdout": result.stdout})
 
 
@@ -2768,14 +5794,17 @@ def build_long_action(lang: str = "en") -> JSONResponse:
 @app.post("/api/actions/build-short")
 def build_short_action(lang: str = "en") -> JSONResponse:
     lang = "de" if lang == "de" else "en"
-    curated = run_script("curate_short_cv.py")
-    if curated.returncode != 0:
+    with connect() as con:
+        has_prompt_plan = bool(get_setting(con, export_plan_setting_key("vitamine.short-academic")))
+    curated = None if has_prompt_plan else run_script("curate_short_cv.py")
+    if curated is not None and curated.returncode != 0:
         return JSONResponse({"ok": False, "stderr": curated.stderr[-4000:]}, status_code=500)
     result = run_script("build_short_cv.py", "--lang", lang)
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
-    return JSONResponse(build_response(curated.stdout + result.stdout, cache_key, {"language": lang}))
+    plan_note = "[prompt-plan]\nPreserved prompt-selected publications.\n" if has_prompt_plan else ""
+    return JSONResponse(build_response(plan_note + (curated.stdout if curated else "") + result.stdout, cache_key, {"language": lang}))
 
 
 @app.post("/api/actions/build-ultrashort-tabular")
@@ -2804,6 +5833,24 @@ def build_biosketch_action(lang: str = "en") -> JSONResponse:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
     cache_key = str(int(time.time()))
     return JSONResponse(build_response(imported_stdout + result.stdout, cache_key, {"language": lang}))
+
+
+@app.post("/api/actions/export/{format_id}")
+def build_installed_export_format(format_id: str, lang: str = "en") -> JSONResponse:
+    formats = export_format_catalog()
+    item = export_format_by_id(format_id, formats)
+    if format_id not in installed_export_format_ids(formats):
+        raise HTTPException(status_code=409, detail="Install this format before exporting it.")
+    exporter = item.get("exporter")
+    builders = {
+        "ultrashort": build_ultrashort_tabular_action,
+        "short": build_short_action,
+        "long": build_long_action,
+        "biosketch": build_biosketch_action,
+    }
+    if exporter not in builders:
+        raise HTTPException(status_code=422, detail="This local format is a preview package; its Word exporter is not implemented yet.")
+    return builders[exporter](lang)
 
 
 @app.post("/api/actions/build-harvard")

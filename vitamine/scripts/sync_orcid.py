@@ -6,10 +6,15 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import urllib.parse
 import urllib.request
 
-from maintain_publications import ensure_columns, maintain
+try:
+    from .maintain_publications import ensure_columns, maintain
+except ImportError:
+    from maintain_publications import ensure_columns, maintain
 from vitamine.paths import active_db_path
+from vitamine.identifiers import canonical_platform, normalize_identifier
 
 
 DB = active_db_path()
@@ -101,17 +106,141 @@ def upsert_person_orcid_identifier(con: sqlite3.Connection, orcid_id: str) -> No
     con.execute("UPDATE person SET orcid_id=? WHERE id=1", (orcid_id,))
 
 
+def identifier_platform(identifier_type: str, url: str = "") -> str:
+    key = identifier_type.strip().casefold()
+    host = urllib.parse.urlparse(url).netloc.casefold() if url else ""
+    platform_map = {
+        "researcherid": "Web of Science ResearcherID",
+        "researcher-id": "Web of Science ResearcherID",
+        "scopus-author-id": "Scopus Author ID",
+        "scopus": "Scopus Author ID",
+        "loop-profile": "Loop",
+        "loop": "Loop",
+        "google-scholar": "Google Scholar",
+        "google scholar": "Google Scholar",
+        "researchgate": "ResearchGate",
+        "researcherid": "Web of Science ResearcherID",
+    }
+    if key in platform_map:
+        return platform_map[key]
+    if "scholar.google." in host:
+        return "Google Scholar"
+    if "researchgate.net" in host:
+        return "ResearchGate"
+    if "loop.frontiersin.org" in host:
+        return "Loop"
+    if "webofscience.com" in host or "researcherid.com" in host:
+        return "Web of Science ResearcherID"
+    if "scopus.com" in host:
+        return "Scopus Author ID"
+    return canonical_platform(identifier_type.strip() or host or "Researcher Profile", url)
+
+
+def upsert_person_identifier(
+    con: sqlite3.Connection,
+    platform: str,
+    identifier_type: str,
+    identifier_value: str,
+    url: str,
+    notes: str = "Discovered from public ORCID record.",
+) -> bool:
+    normalized = normalize_identifier(
+        {
+            "platform": platform,
+            "identifier_type": identifier_type,
+            "identifier_value": identifier_value,
+            "url": url,
+        }
+    )
+    platform = str(normalized["platform"] or "").strip()
+    identifier_type = identifier_type.strip() or platform
+    identifier_value = str(normalized.get("identifier_value") or "").strip()
+    url = url.strip()
+    if not platform or not url:
+        return False
+    existing = con.execute(
+        """
+        SELECT id
+        FROM person_identifiers
+        WHERE person_id=1
+          AND lower(platform)=lower(?)
+        ORDER BY id
+        LIMIT 1
+        """,
+        (platform,),
+    ).fetchone()
+    if existing:
+        con.execute(
+            """
+            UPDATE person_identifiers
+            SET platform=?,
+                identifier_type=?,
+                identifier_value=?,
+                url=?,
+                source='orcid-sync',
+                verified_at=datetime('now'),
+                notes=COALESCE(NULLIF(notes, ''), ?)
+            WHERE id=? AND person_id=1
+            """,
+            (platform, identifier_type, identifier_value or None, url, notes, existing["id"]),
+        )
+        return False
+    con.execute(
+        """
+        INSERT INTO person_identifiers
+          (person_id, platform, identifier_type, identifier_value, url, source, verified_at, notes)
+        VALUES (1, ?, ?, ?, ?, 'orcid-sync', datetime('now'), ?)
+        """,
+        (platform, identifier_type, identifier_value or None, url, notes),
+    )
+    return True
+
+
+def fetch_orcid_person(orcid_id: str) -> dict:
+    request = urllib.request.Request(
+        f"https://pub.orcid.org/v3.0/{orcid_id}/person",
+        headers={"Accept": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
+def sync_person_identifiers_from_orcid(con: sqlite3.Connection, orcid_id: str) -> int:
+    payload = fetch_orcid_person(orcid_id)
+    added = 0
+    urls = ((payload.get("researcher-urls") or {}).get("researcher-url") or [])
+    for item in urls:
+        url_value = ((item.get("url") or {}).get("value") or "").strip()
+        name = ((item.get("url-name") or "") or identifier_platform("", url_value)).strip()
+        if upsert_person_identifier(con, identifier_platform(name, url_value), name, "", url_value):
+            added += 1
+    identifiers = ((payload.get("external-identifiers") or {}).get("external-identifier") or [])
+    for item in identifiers:
+        identifier_type = str(item.get("external-id-type") or "").strip()
+        identifier_value = str(item.get("external-id-value") or "").strip()
+        url_value = ((item.get("external-id-url") or {}).get("value") or "").strip()
+        if upsert_person_identifier(
+            con,
+            identifier_platform(identifier_type, url_value),
+            identifier_type,
+            identifier_value,
+            url_value,
+        ):
+            added += 1
+    return added
+
+
 def normalize_doi(value: str | None) -> str:
     text = (value or "").strip().lower()
-    text = re.sub(r"^https?://(dx\\.)?doi\\.org/", "", text)
-    text = re.sub(r"^doi:\\s*", "", text)
+    text = re.sub(r"^https?://(dx\.)?doi\.org/", "", text)
+    text = re.sub(r"^doi:\s*", "", text)
     return text.rstrip(".")
 
 
 def normalize_title(value: str | None) -> str:
     text = (value or "").casefold()
     text = text.replace("‐", "-").replace("‑", "-").replace("–", "-")
-    return re.sub(r"\\W+", " ", text).strip()
+    return re.sub(r"\W+", " ", text).strip()
 
 
 def text_value(node: dict | None, *keys: str) -> str:
@@ -290,6 +419,7 @@ def sync_orcid(orcid_id: str | None = None) -> dict[str, int | str]:
         if not orcid_id:
             raise RuntimeError("Add an ORCID iD in Connections or Person > Identifiers before syncing ORCID.")
         upsert_person_orcid_identifier(con, orcid_id)
+        identifiers_added = sync_person_identifiers_from_orcid(con, orcid_id)
         payload = fetch_orcid_works(orcid_id)
         summaries = work_summaries(payload)
         document_id = ensure_orcid_document(con, orcid_id)
@@ -308,7 +438,15 @@ def sync_orcid(orcid_id: str | None = None) -> dict[str, int | str]:
                 inserted += 1
         con.commit()
     maintenance = maintain()
-    return {"orcid_id": orcid_id, "fetched": len(summaries), "matched": matched, "inserted": inserted, "skipped_new": skipped, **maintenance}
+    return {
+        "orcid_id": orcid_id,
+        "fetched": len(summaries),
+        "matched": matched,
+        "inserted": inserted,
+        "skipped_new": skipped,
+        "identifiers_added": identifiers_added,
+        **maintenance,
+    }
 
 
 if __name__ == "__main__":

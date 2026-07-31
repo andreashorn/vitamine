@@ -28,7 +28,12 @@ CREATE TABLE IF NOT EXISTS person (
   own_institution_country TEXT,
   own_institution_country_code TEXT,
   own_institution_latitude REAL,
-  own_institution_longitude REAL
+  own_institution_longitude REAL,
+  portrait_image BLOB,
+  portrait_mime_type TEXT,
+  portrait_filename TEXT,
+  portrait_width INTEGER,
+  portrait_height INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS person_identifiers (
@@ -131,7 +136,12 @@ CREATE TABLE IF NOT EXISTS publications (
   orcid_put_code TEXT,
   orcid_source TEXT,
   orcid_last_modified TEXT,
-  orcid_path TEXT
+  orcid_path TEXT,
+  metadata_source TEXT,
+  metadata_enriched_at TEXT,
+  openalex_work_id TEXT,
+  openalex_cited_by_count INTEGER,
+  openalex_counts_by_year_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS export_settings (
@@ -244,3 +254,40 @@ CREATE TABLE IF NOT EXISTS import_warnings (
   message TEXT NOT NULL,
   raw_text TEXT
 );
+
+CREATE TABLE IF NOT EXISTS import_inbox_items (
+  id INTEGER PRIMARY KEY,
+  document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
+  source TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  confidence TEXT NOT NULL DEFAULT 'medium',
+  duplicate_of_type TEXT,
+  duplicate_of_id INTEGER,
+  title TEXT,
+  subtitle TEXT,
+  raw_text TEXT,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  reviewed_at TEXT,
+  review_note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_import_inbox_items_status
+ON import_inbox_items(status, target_type, created_at);
+
+CREATE TABLE IF NOT EXISTS discovery_rejections (
+  id INTEGER PRIMARY KEY,
+  fingerprint TEXT NOT NULL UNIQUE,
+  target_type TEXT NOT NULL,
+  normalized_key TEXT NOT NULL,
+  source TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  seen_count INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovery_rejections_type_key
+ON discovery_rejections(target_type, normalized_key);

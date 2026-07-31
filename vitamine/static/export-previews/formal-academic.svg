@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a long formal medical academic CV</title>
+  <rect width="240" height="320" rx="8" fill="#e8eaed"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="69" y="34" width="102" height="7" rx="2" fill="#1b2430"/>
+  <rect x="83" y="47" width="74" height="5" rx="2" fill="#1b2430"/>
+  <g fill="#1b2430"><rect x="44" y="72" width="38" height="5"/><rect x="44" y="99" width="53" height="5"/><rect x="44" y="145" width="75" height="5"/><rect x="44" y="203" width="62" height="5"/><rect x="44" y="251" width="80" height="5"/></g>
+  <g fill="#98a0aa"><rect x="90" y="72" width="93" height="4"/><rect x="44" y="84" width="139" height="4"/><rect x="44" y="111" width="31" height="4"/><rect x="82" y="111" width="52" height="4"/><rect x="143" y="111" width="53" height="4"/><rect x="44" y="122" width="31" height="4"/><rect x="82" y="122" width="52" height="4"/><rect x="143" y="122" width="46" height="4"/><rect x="44" y="157" width="35" height="4"/><rect x="87" y="157" width="109" height="4"/><rect x="44" y="168" width="35" height="4"/><rect x="87" y="168" width="101" height="4"/><rect x="44" y="179" width="35" height="4"/><rect x="87" y="179" width="114" height="4"/><rect x="44" y="215" width="152" height="4"/><rect x="44" y="226" width="144" height="4"/><rect x="44" y="263" width="152" height="4"/><rect x="52" y="274" width="144" height="4"/><rect x="52" y="285" width="134" height="4"/></g>
+</svg>

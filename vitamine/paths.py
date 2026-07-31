@@ -26,9 +26,24 @@ RESOURCE_ROOT = frozen_resource_root() if FROZEN else Path(__file__).resolve().p
 ROOT = RESOURCE_ROOT
 PACKAGE = RESOURCE_ROOT / "vitamine"
 APP_SUPPORT = Path.home() / "Library" / "Application Support" / "VitaMine"
-PREFERENCES = Path.home() / "Library" / "Preferences" / "de.netstim.vitamine.json"
-DATA = (APP_SUPPORT / "data") if FROZEN else (ROOT / "data")
-OUTPUT = (APP_SUPPORT / "output") if FROZEN else (ROOT / "output")
+PREFERENCES = Path(
+    os.environ.get(
+        "VITAMINE_PREFERENCES",
+        Path.home() / "Library" / "Preferences" / "de.netstim.vitamine.json",
+    )
+).expanduser()
+DATA = Path(
+    os.environ.get(
+        "VITAMINE_DATA",
+        (APP_SUPPORT / "data") if FROZEN else (ROOT / "data"),
+    )
+).expanduser()
+OUTPUT = Path(
+    os.environ.get(
+        "VITAMINE_OUTPUT",
+        (APP_SUPPORT / "output") if FROZEN else (ROOT / "output"),
+    )
+).expanduser()
 STATIC = PACKAGE / "static"
 LOGO = PACKAGE / "logo"
 SCRIPTS = PACKAGE / "scripts"
@@ -42,6 +57,7 @@ BUNDLED_EXAMPLE_DB = BUNDLED_DATA / "example.vitamine"
 BUNDLED_LEGACY_EXAMPLE_DB = BUNDLED_DATA / "example.sqlite"
 BUNDLED_METRICS_CSV = BUNDLED_DATA / "journal_metrics.csv"
 EXAMPLE_DB = DATA / "example.vitamine"
+DEFAULT_DB = DATA / "default.vitamine"
 ACTIVE_DB_FILE = DATA / "active_db.txt"
 DEFAULT_WORKSPACE_DB = DATA / "workspace.vitamine"
 METRICS_CSV = DATA / "journal_metrics.csv"
@@ -85,7 +101,10 @@ def active_db_path() -> Path:
             resolved = path.resolve()
             write_preferences({**prefs, "active_db": str(resolved)})
             return resolved
-    return EXAMPLE_DB
+    if not DEFAULT_DB.exists():
+        create_blank_database(DEFAULT_DB)
+    write_preferences({**prefs, "active_db": str(DEFAULT_DB.resolve())})
+    return DEFAULT_DB.resolve()
 
 
 def validate_database(path: Path) -> None:
@@ -168,6 +187,12 @@ def create_blank_database(path: Path) -> Path:
             VALUES
               ('short', 10, 'first_last'),
               ('ultrashort', 10, 'first_last')
+            """
+        )
+        con.execute(
+            """
+            INSERT OR REPLACE INTO app_settings (key, value, updated_at)
+            VALUES ('onboarding_enabled', '1', datetime('now'))
             """
         )
         con.commit()

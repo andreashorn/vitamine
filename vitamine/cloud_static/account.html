@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VitaMine — Academic CV manager</title>
+  <link rel="stylesheet" href="/assets/account.css?v=20260730-institutional-ui">
+  <script src="/assets/account.js?v=20260730-institutional-ui" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <a href="/" class="brand" aria-label="VitaMine home">
+      <img src="/assets/vitamine-logo.png" alt="VitaMine">
+    </a>
+    <div id="accountNav" class="account-nav" hidden>
+      <span id="accountIdentity"></span>
+      <button id="logoutButton" class="text-button" type="button">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="authView" class="auth-layout">
+      <div class="hero">
+        <p class="eyebrow">Academic CV management</p>
+        <h1>Finally, an academic CV manager that works.</h1>
+        <p class="intro">Curate and manage your academic CVs for various
+          occasions, in multiple languages.</p>
+        <p class="quiet">VitaMine is currently welcoming a small circle of early testers.</p>
+      </div>
+
+      <div class="auth-stage">
+        <div class="auth-card">
+          <div id="authChoice">
+            <div class="auth-tabs" role="tablist">
+              <button id="loginTab" class="auth-tab active" type="button">Sign in</button>
+              <button id="inviteTab" class="auth-tab" type="button">Use an invite</button>
+            </div>
+
+            <form id="loginForm" class="auth-form" autocomplete="on">
+              <div>
+                <p class="card-kicker">Welcome back</p>
+                <h2>Your CVs are waiting.</h2>
+              </div>
+              <label>Email
+                <input name="email" type="email" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+              </label>
+              <label>Password
+                <input name="password" type="password" autocomplete="current-password" required>
+              </label>
+              <button class="primary-button" type="submit">Sign in</button>
+              <p class="form-note">Password recovery is not yet available during early access.</p>
+              <p id="loginMessage" class="message" role="status"></p>
+            </form>
+
+            <form id="inviteForm" class="auth-form" hidden>
+              <div>
+                <p class="card-kicker">Early access</p>
+                <h2>Enter your invitation.</h2>
+              </div>
+              <label>Invitation code
+                <input name="code" class="invite-code" autocomplete="one-time-code" placeholder="VITA-••••••-••••••" required>
+              </label>
+              <button class="primary-button" type="submit">Continue</button>
+              <p id="inviteMessage" class="message" role="status"></p>
+            </form>
+          </div>
+
+          <form id="registerForm" class="auth-form" hidden>
+            <div>
+              <p class="card-kicker">You’re invited</p>
+              <h2>Create your VitaMine account.</h2>
+              <p>Your databases will be saved securely to this account as you work.</p>
+            </div>
+            <label>Name <span class="optional">optional</span>
+              <input name="display_name" autocomplete="name">
+            </label>
+            <label>Email
+              <input name="email" type="email" autocomplete="email" required>
+            </label>
+            <label>Password
+              <input name="password" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+            </label>
+            <label>Confirm password
+              <input name="password_confirmation" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+            </label>
+            <button class="primary-button" type="submit">Create account</button>
+            <p class="form-note">Use at least 10 characters. During early access, lost passwords must be reset manually.</p>
+            <p id="registerMessage" class="message" role="status"></p>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section id="libraryView" class="library" hidden>
+      <div class="library-heading">
+        <div>
+          <p class="eyebrow">VitaMine workspace</p>
+          <h1>Your academic CVs</h1>
+          <p>Manage your saved CVs and download a `.vitamine` copy whenever you need one.</p>
+        </div>
+        <div class="new-actions">
+          <button id="newDatabaseButton" class="primary-button" type="button">Start a new CV</button>
+          <button id="uploadDatabaseButton" class="secondary-button" type="button">Upload `.vitamine`</button>
+          <input id="databaseFileInput" type="file" accept=".vitamine,.sqlite,.db,application/vnd.sqlite3" hidden>
+        </div>
+      </div>
+
+      <div class="library-workspace">
+        <section class="cv-library-panel" aria-label="Saved CVs">
+          <div class="section-heading">
+            <div>
+              <h2>CV library</h2>
+              <p>Open a CV to continue working, or keep a local copy for the desktop app.</p>
+            </div>
+          </div>
+          <p id="libraryMessage" class="message library-message" role="status"></p>
+          <div id="databaseGrid" class="database-grid"></div>
+          <div id="emptyLibrary" class="empty-library" hidden>
+            <h2>Start your first CV</h2>
+            <p>Begin with a blank workspace or upload an existing VitaMine database.</p>
+          </div>
+        </section>
+
+        <aside id="profileStatus" class="profile-status" hidden>
+          <div>
+            <p class="eyebrow">Public profile</p>
+            <h2 id="profileStatusTitle">Share your academic profile.</h2>
+            <p id="profileStatusText">Publish an automatically curated bio, metrics, publication list, and collaborator map from one of your CVs.</p>
+          </div>
+          <a id="viewProfileLink" class="secondary-button" href="#" hidden>Manage profile</a>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="profileSetupDialog" class="account-dialog">
+    <form id="profileSetupForm">
+      <div class="account-dialog-heading">
+        <div>
+          <p class="eyebrow">Public profile</p>
+          <h2>Choose your address.</h2>
+        </div>
+        <button id="closeProfileSetup" class="dialog-close" type="button" aria-label="Close">×</button>
+      </div>
+      <p>Your profile will use <strong id="profileDatabaseName"></strong>. You can manage whole public blocks after publishing.</p>
+      <label>Profile address
+        <span class="profile-address-input">
+          <span>vitamine.cloud/</span>
+          <input id="profileSlug" name="slug" pattern="[a-z0-9][a-z0-9-]{1,38}[a-z0-9]" minlength="3" maxlength="40" required>
+        </span>
+      </label>
+      <p class="form-note">Use 3–40 lowercase letters, numbers, or hyphens.</p>
+      <p id="profileSetupMessage" class="message" role="status"></p>
+      <div class="account-dialog-actions">
+        <button id="cancelProfileSetup" class="secondary-button" type="button">Cancel</button>
+        <button class="primary-button" type="submit">Publish profile</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

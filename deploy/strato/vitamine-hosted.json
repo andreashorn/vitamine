@@ -1,0 +1,13 @@
+{
+  "mode": "hosted",
+  "llm": {
+    "managed": true,
+    "allow_user_configuration": false,
+    "provider": "openai",
+    "api_base_url": "https://api.openai.com/v1",
+    "api_model": "gpt-4.1-mini"
+  },
+  "onboarding": {
+    "skip_llm_configuration": true
+  }
+}

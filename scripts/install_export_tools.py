@@ -25,7 +25,6 @@ GITHUB_API = "https://api.github.com/repos"
 TOOLS = {
     "llama-server": "ggml-org/llama.cpp",
     "pandoc": "jgm/pandoc",
-    "typst": "typst/typst",
 }
 BREW_TOOLS = {
     "pdftotext": "poppler",
@@ -60,9 +59,6 @@ def asset_matches(name: str, tool: str, arch: str) -> bool:
     lower = name.lower()
     if tool == "pandoc":
         return lower.endswith(".zip") and f"{arch}-macos" in lower and "wasm" not in lower
-    if tool == "typst":
-        typst_arch = "aarch64" if arch == "arm64" else "x86_64"
-        return lower == f"typst-{typst_arch}-apple-darwin.tar.xz"
     if tool == "llama-server":
         llama_arch = "arm64" if arch == "arm64" else "x64"
         return lower.endswith(".tar.gz") and f"bin-macos-{llama_arch}" in lower

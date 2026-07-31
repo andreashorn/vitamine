@@ -17,8 +17,8 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
-from vitamine.scripts.export_utils import compile_typst_if_available
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
+from vitamine.citation_styles import configured_citation_style, format_publication
 
 DB = active_db_path()
 LANG = "en"
@@ -464,6 +464,10 @@ def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
     paragraph.paragraph_format.space_before = Pt(0)
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.line_spacing = 1.03
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        add_docx_piece(paragraph, alternate, bold_names=True)
+        return
     parts: list[tuple[str, bool, bool, bool]] = []
     authors = citation_cell(row["authors"])
     if authors:
@@ -635,26 +639,9 @@ def build(lang: str = "en") -> dict[str, str]:
     LANG = "de" if lang == "de" else "en"
     OUTPUT.mkdir(parents=True, exist_ok=True)
     stem = output_stem()
-    html_path = OUTPUT / f"{stem}.html"
-    typ_path = OUTPUT / f"{stem}.typ"
-    pdf_path = OUTPUT / f"{stem}.pdf"
     docx_path = OUTPUT / f"{stem}.docx"
-    html_path.write_text(build_html(), encoding="utf-8")
-    typ_path.write_text(build_typst(), encoding="utf-8")
-    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
     docx = build_docx(docx_path)
-    result = {
-        "html": f"output/{output_ref(html_path)}",
-        "typst": f"output/{output_ref(typ_path)}",
-    }
-    if pdf:
-        result["pdf"] = f"output/{output_ref(pdf)}"
-    if docx:
-        result["docx"] = f"output/{output_ref(docx)}"
-    warnings = [item for item in (warning,) if item]
-    if warnings:
-        result["warning"] = " ".join(warnings)
-    return result
+    return {"docx": f"output/{output_ref(docx)}"}
 
 
 if __name__ == "__main__":

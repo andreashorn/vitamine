@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a modern publication-first scientific CV</title>
+  <rect width="240" height="320" rx="8" fill="#e8edef"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="28" y="18" width="58" height="284" rx="2" fill="#1d4f53"/>
+  <circle cx="57" cy="53" r="15" fill="#dbe9e6"/>
+  <g fill="#dbe9e6"><rect x="42" y="79" width="30" height="5"/><rect x="40" y="94" width="34" height="3"/><rect x="40" y="104" width="29" height="3"/><rect x="42" y="130" width="30" height="5"/><rect x="40" y="145" width="34" height="3"/><rect x="40" y="155" width="26" height="3"/><rect x="42" y="181" width="30" height="5"/><rect x="40" y="196" width="34" height="3"/><rect x="40" y="206" width="31" height="3"/></g>
+  <rect x="102" y="36" width="85" height="10" rx="2" fill="#173337"/>
+  <rect x="102" y="52" width="63" height="4" fill="#718487"/>
+  <g fill="#2a6a6e"><rect x="102" y="80" width="70" height="6"/><rect x="102" y="151" width="86" height="6"/><rect x="102" y="222" width="77" height="6"/></g>
+  <g fill="#99a5a7"><rect x="102" y="96" width="94" height="4"/><rect x="102" y="107" width="88" height="4"/><rect x="102" y="118" width="92" height="4"/><rect x="102" y="129" width="78" height="4"/><rect x="102" y="167" width="94" height="4"/><rect x="110" y="178" width="86" height="4"/><rect x="110" y="189" width="82" height="4"/><rect x="110" y="200" width="76" height="4"/><rect x="102" y="238" width="94" height="4"/><rect x="110" y="249" width="86" height="4"/><rect x="110" y="260" width="80" height="4"/><rect x="110" y="271" width="88" height="4"/></g>
+</svg>

@@ -12,9 +12,11 @@ import sqlite3
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
-from vitamine.scripts.export_utils import compile_typst_if_available
 from vitamine.paths import OUTPUT, PACKAGE, ROOT, active_db_path, output_ref
+from vitamine.citation_styles import configured_citation_style, format_publication
 
 DB = active_db_path()
 DEFAULT_TEMPLATE = PACKAGE / "onepage_tabular" / "ultrashort_tabular_template.docx"
@@ -267,8 +269,10 @@ def range_years(start: str | None, end: str | None) -> str:
 
 
 def clear_paragraph(paragraph) -> None:
-    for run in list(paragraph.runs):
-        paragraph._p.remove(run._r)
+    paragraph_properties = paragraph._p.pPr
+    for child in list(paragraph._p):
+        if paragraph_properties is None or child is not paragraph_properties:
+            paragraph._p.remove(child)
 
 
 def add_text(paragraph, parts: list[tuple[str, bool]]) -> None:
@@ -294,6 +298,15 @@ def set_cell(cell, text: str, *, bold: bool = False) -> None:
     set_simple_paragraph(paragraph, text, bold=bold)
     for extra in cell.paragraphs[1:]:
         clear_paragraph(extra)
+
+
+def set_repeat_table_header(row) -> None:
+    row_properties = row._tr.get_or_add_trPr()
+    header = row_properties.find(qn("w:tblHeader"))
+    if header is None:
+        header = OxmlElement("w:tblHeader")
+        row_properties.append(header)
+    header.set(qn("w:val"), "true")
 
 
 def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: bool = False, underline: bool = False) -> None:
@@ -323,30 +336,8 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
 
 def add_publication_docx_text(paragraph, row: sqlite3.Row) -> None:
     clear_paragraph(paragraph)
-    parts: list[tuple[str, bool, bool, bool]] = []
-    authors = citation_text(row["authors"])
-    if authors:
-        parts.append((sentence_part(authors), True, False, False))
-    title = citation_text(row["title"])
-    if title:
-        parts.append((sentence_part(title), False, False, False))
-    venue = citation_text(row["venue"])
-    if venue:
-        venue = venue.title() if venue.isupper() else venue
-        parts.append((sentence_part(venue), False, True, True))
-    year_value = citation_text(row["year"])
-    if year_value:
-        parts.append((sentence_part(year_value), False, False, False))
-    impact = impact_factor_label(row)
-    if impact:
-        parts.append((sentence_part(impact), False, False, False))
-    doi = citation_text(row["doi"])
-    if doi:
-        parts.append((sentence_part(f"doi:{doi}"), False, False, False))
-    for index, (value, bold_names, italic, underline) in enumerate(parts):
-        if index:
-            paragraph.add_run(" ")
-        add_docx_piece(paragraph, value, bold_names=bold_names, italic=italic, underline=underline)
+    compact_citation = publication_citation(row)
+    add_docx_piece(paragraph, compact_citation, bold_names=True)
 
 
 def citation_parts(citation: str, bold_terms: tuple[str, ...]) -> list[tuple[str, bool]]:
@@ -458,6 +449,9 @@ def award_rows(con: sqlite3.Connection) -> list[str]:
 
 
 def publication_citation(row: sqlite3.Row) -> str:
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        return alternate
     if clean(row["short_citation"]):
         return clean(row["short_citation"])
     authors = clean(row["authors"])
@@ -465,6 +459,7 @@ def publication_citation(row: sqlite3.Row) -> str:
         parts = [part.strip() for part in authors.split(",")]
         if len(parts) > 3:
             authors = ", ".join(parts[:3]) + ", et al."
+        authors = authors.rstrip(" .")
     citation_parts_out = [part for part in [authors, clean(row["title"])] if part]
     citation = ". ".join(citation_parts_out)
     if clean(row["venue"]):
@@ -591,23 +586,8 @@ def build_all(template: Path, publication_limit_value: int, lang: str = "en") ->
     LANG = "de" if lang == "de" else "en"
     stem = output_stem()
     docx_path = OUTPUT / f"{stem}.docx"
-    html_path = OUTPUT / f"{stem}.html"
-    typ_path = OUTPUT / f"{stem}.typ"
-    pdf_path = OUTPUT / f"{stem}.pdf"
     build(template, docx_path, publication_limit_value)
-    html_path.write_text(build_html_document(publication_limit_value), encoding="utf-8")
-    typ_path.write_text(build_typst_document(publication_limit_value), encoding="utf-8")
-    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
-    result = {
-        "docx": f"output/{output_ref(docx_path)}",
-        "html": f"output/{output_ref(html_path)}",
-        "typst": f"output/{output_ref(typ_path)}",
-    }
-    if pdf:
-        result["pdf"] = f"output/{output_ref(pdf)}"
-    if warning:
-        result["warning"] = warning
-    return result
+    return {"docx": f"output/{output_ref(docx_path)}"}
 
 
 def build(template: Path, output: Path, publication_limit: int) -> Path:
@@ -622,7 +602,7 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
     shutil.copyfile(template, output)
     doc = Document(output)
     doc.core_properties.author = person["display_name"] or person["full_name"]
-    doc.core_properties.title = "Andreas Horn - Tabular CV"
+    doc.core_properties.title = f"{person['display_name'] or person['full_name']} - Tabular CV"
     doc.core_properties.subject = "One-page tabular CV"
 
     set_simple_paragraph(doc.paragraphs[0], f"Prof. Dr. {person['display_name']}, {person['degrees']}", bold=True)
@@ -634,12 +614,13 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
             ("\nUniversity Hospital Cologne, Germany", False),
         ],
     )
-    set_simple_paragraph(doc.paragraphs[2], "Education and Training", bold=True)
-    set_simple_paragraph(doc.paragraphs[3], "Positions and Scientific Appointments", bold=True)
-    set_simple_paragraph(doc.paragraphs[4], "Awards, Research Funding and Presentations", bold=True)
-    set_simple_paragraph(doc.paragraphs[11], "Selected Publications", bold=True)
+    set_simple_paragraph(doc.paragraphs[2], tr("Education and Training", "Ausbildung"), bold=True)
+    set_simple_paragraph(doc.paragraphs[3], tr("Positions and Scientific Appointments", "Positionen und wissenschaftliche Berufungen"), bold=True)
+    set_simple_paragraph(doc.paragraphs[4], tr("Awards, Research Funding and Presentations", "Auszeichnungen, Forschungsförderung und Vorträge"), bold=True)
+    set_simple_paragraph(doc.paragraphs[11], tr("Selected Publications", "Ausgewählte Publikationen"), bold=True)
 
     education_column_count = len(doc.tables[0].columns)
+    set_repeat_table_header(doc.tables[0].rows[0])
     for row_idx, row in enumerate(edu):
         if education_column_count == 3:
             row_values = (row[0], row[1], row[2])
@@ -647,11 +628,21 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
             row_values = row
         for col_idx, value in enumerate(row_values):
             set_cell(doc.tables[0].cell(row_idx, col_idx), value, bold=(row_idx == 0))
+    for row_idx in range(len(edu), len(doc.tables[0].rows)):
+        for col_idx in range(education_column_count):
+            set_cell(doc.tables[0].cell(row_idx, col_idx), "")
+    set_repeat_table_header(doc.tables[1].rows[0])
     for row_idx, row in enumerate(positions):
         for col_idx, value in enumerate(row):
             set_cell(doc.tables[1].cell(row_idx, col_idx), value, bold=(row_idx == 0))
-    for paragraph, line in zip(doc.paragraphs[5:11], awards):
+    for row_idx in range(len(positions), len(doc.tables[1].rows)):
+        for col_idx in range(len(doc.tables[1].columns)):
+            set_cell(doc.tables[1].cell(row_idx, col_idx), "")
+    award_paragraphs = doc.paragraphs[5:11]
+    for paragraph, line in zip(award_paragraphs, awards):
         add_text(paragraph, split_year_prefix(line))
+    for paragraph in award_paragraphs[len(awards) :]:
+        clear_paragraph(paragraph)
     publication_paragraphs = doc.paragraphs[12 : 12 + publication_limit]
     for paragraph, publication in zip(publication_paragraphs, publications):
         add_publication_docx_text(paragraph, publication)

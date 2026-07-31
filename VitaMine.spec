@@ -3,7 +3,7 @@
 from pathlib import Path
 import shutil
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 ROOT = Path.cwd()
@@ -39,13 +39,15 @@ datas = existing_datas(
         (ROOT / "vitamine" / "logo", "vitamine/logo"),
         (ROOT / "vitamine" / "scripts", "vitamine/scripts"),
         (ROOT / "vitamine" / "onepage_tabular", "vitamine/onepage_tabular"),
+        (ROOT / "vitamine" / "templates", "vitamine/templates"),
         (ROOT / "vitamine" / "schema.sql", "vitamine"),
+        (ROOT / "config" / "vitamine-desktop.json", "config"),
         (ROOT / "data" / "example.vitamine", "data"),
         (ROOT / "data" / "journal_metrics.csv", "data"),
         (MODELS_DIR, "models"),
         (ROOT / "vendor" / "export-tools" / "lib", "lib"),
     ]
-) + optional_tool_data("typst") + optional_tool_data("pandoc")
+) + optional_tool_data("pandoc") + collect_data_files("citeproc") + collect_data_files("citeproc_styles")
 
 binaries = optional_tool_binary("pdftotext") + optional_tool_binary("llama-server")
 
@@ -58,9 +60,10 @@ a = Analysis(
         "vitamine.app",
         "vitamine.paths",
         "vitamine.i18n",
+        "vitamine.enrichment_guard",
         "vitamine.scripts.maintain_publications",
         "vitamine.scripts.import_uploaded_cv",
-    ] + collect_submodules("docx"),
+    ] + collect_submodules("docx") + collect_submodules("citeproc"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

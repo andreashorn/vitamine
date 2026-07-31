@@ -1,0 +1,3 @@
+vitamine/cloud_static/vendor/sqlite/** linguist-vendored=true
+vitamine/cloud_static/vendor/sqlite/index.mjs -diff
+vitamine/cloud_static/vendor/sqlite/sqlite3.wasm binary
