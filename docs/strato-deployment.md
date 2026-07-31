@@ -17,9 +17,11 @@ no API keys, invite codes, cookies, or other credentials.
 - The Let's Encrypt certificate covers both names and renews automatically.
 - `vitamine.cloud` is the long-term canonical application domain for accounts,
   authentication, APIs, OAuth callbacks, private CV workspaces, and operational
-  website pages.
-- `scientific.bio` has been purchased for public academic profiles but is not
-  configured yet. Its intended route is `https://scientific.bio/<username>`.
+  website pages, including public profiles at
+  `https://vitamine.cloud/<username>`.
+- The attempted `scientific.bio` registration failed because the registry
+  reported that the domain was already taken. It is not part of the planned
+  architecture.
 - `vita.space` is not part of the planned architecture because its premium
   registration/transfer pricing is not economical.
 - The older local Dock preview/tunnel is no longer required for normal use now
@@ -201,8 +203,7 @@ virtual hosts or firewall rules casually.
 Relevant repository files:
 
 - `deploy/strato/vitamine-cloud.service`
-- `deploy/strato/apache-vita.space.conf` (legacy prototype template; not the
-  intended public-profile domain)
+- `deploy/strato/apache-vita.space.conf` (legacy prototype template)
 - `deploy/strato/apache-vitamine.cloud.conf`
 - `deploy/strato/requirements-cloud.txt`
 - `deploy/strato/vitamine-cloud.env.example`
@@ -357,21 +358,12 @@ the browser closes.
 
 ## Public profiles
 
-The intended domain split is deliberately narrow:
-
-- `vitamine.cloud` remains the sole application, account, authentication,
-  API, OAuth, and private-workspace origin.
-- `scientific.bio` is a public, read-only presentation origin for profile and
-  embed routes only. It must not receive account cookies or host login/OAuth
-  callbacks.
-- Once configured, `https://scientific.bio/<username>` should be the canonical
-  profile URL. The existing `https://vitamine.cloud/<username>` route should
-  redirect to it, while API and embed compatibility are handled explicitly.
-
-Use one canonical profile URL rather than offering duplicate paid URL choices.
-This avoids split search indexing, ambiguous sharing links, and unnecessary
-cookie/CORS complexity. Custom domains can remain a later paid feature if real
-demand and revenue justify their operational cost.
+`vitamine.cloud` is the canonical origin for the application and public
+profiles. Profile URLs remain `https://vitamine.cloud/<username>`, with embeds
+served from the same origin. This avoids split search indexing, ambiguous
+sharing links, and unnecessary cookie/CORS complexity. A separate profile
+domain is not currently planned; custom domains can remain a later paid feature
+if real demand and revenue justify their operational cost.
 
 Public profiles are opt-in projections of an account CV, not direct access to
 the private `.vitamine` database. An owner publishes a chosen saved CV and

@@ -451,9 +451,9 @@ Evidence: pending
 - [x] Editable public heading independent of the private person record.
 - [x] Keep the profile visually generic, with restrained “Made with VitaMine”
   attribution rather than prominent product branding.
-- [ ] Publish canonical profiles at `scientific.bio/{username}`, keeping
-  `vitamine.cloud` as the sole account/auth/API/OAuth origin and redirecting
-  the old public profile route once the new domain is configured.
+- [x] Keep canonical profiles at `vitamine.cloud/{username}` alongside the
+  account/auth/API/OAuth origin; the attempted `scientific.bio` registration
+  was unavailable.
 - [ ] Preview, unlisted, public, and disabled visibility states.
 - [ ] Reserved usernames, impersonation handling, reporting, and moderation.
 - [ ] SEO and social-card metadata, plus a formal accessibility audit.
@@ -608,8 +608,8 @@ and trust risk for a small group of real testers.
 2. Complete the privacy/terms/imprint and data-flow review.
 3. Add broader rate limits, upload scanning, quotas, and load tests.
 4. Audit accessibility and the main Safari/mobile/browser paths.
-5. Introduce `scientific.bio` canonical profile URLs, moderation basics, and
-   stable embeds while keeping all application/OAuth flows on `vitamine.cloud`.
+5. Add moderation basics and stable embeds for canonical
+   `vitamine.cloud/{username}` profiles.
 6. Add Zotero OAuth and a user-facing connections manager.
 
 ### 4. Scale only in response to evidence
