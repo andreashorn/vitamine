@@ -1,10 +1,16 @@
+import json
+import os
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from vitamine.scripts.enrich_publications_by_doi import (
     author_surnames,
     authoritative_metadata,
     metadata_match_is_safe,
     metadata_resolution_is_confident,
+    write_job_progress,
 )
 
 
@@ -22,6 +28,21 @@ def publication(**overrides):
 
 
 class PublicationEnrichmentTests(unittest.TestCase):
+    def test_cloud_progress_is_atomic_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "progress.json"
+            with patch.dict(os.environ, {"VITAMINE_JOB_PROGRESS_PATH": str(path)}):
+                write_job_progress("Enriching publication 4 of 20", 999)
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {
+                    "phase": "doi_enrichment",
+                    "message": "Enriching publication 4 of 20",
+                    "percent": 60,
+                },
+            )
+            self.assertFalse(path.with_suffix(".json.tmp").exists())
+
     def test_author_surnames_match_full_and_pubmed_inverted_names(self):
         self.assertEqual(
             author_surnames("Bassam Al-Fatly, Siobhan Ewert, Andreas Horn"),

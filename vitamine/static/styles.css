@@ -33,6 +33,8 @@ body {
 }
 
 .topbar {
+  position: relative;
+  z-index: 100;
   min-height: 112px;
   display: flex;
   align-items: center;

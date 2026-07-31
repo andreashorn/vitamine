@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -4721,19 +4721,36 @@ def discover_ai_profile_candidates() -> dict[str, Any]:
     }
 
 
-def enrich_cv_job(update_last_run: bool = True) -> dict[str, Any]:
+def enrich_cv_job(
+    update_last_run: bool = True,
+    progress_callback: Callable[[str, str, int], None] | None = None,
+) -> dict[str, Any]:
+    def report_progress(phase: str, message: str, percent: int) -> None:
+        if progress_callback is not None:
+            progress_callback(phase, message, percent)
+
     with connect() as con:
         policy = publication_source_policy(con)
     doi_result = run_script("enrich_publications_by_doi.py", "--resolve-missing")
     if doi_result.returncode != 0:
         raise RuntimeError(doi_result.stderr[-4000:] or "DOI enrichment failed.")
+    report_progress("sources", "Checking connected publication sources", 62)
     source_results: list[dict[str, Any]] = []
-    for source in PUBLICATION_SOURCE_POLICIES[policy]:
+    sources = PUBLICATION_SOURCE_POLICIES[policy]
+    for index, source in enumerate(sources, start=1):
+        source_label = source.replace("_", " ").title()
+        report_progress(
+            "sources",
+            f"Checking {source_label} ({index} of {len(sources)})",
+            62 + round(((index - 1) / max(1, len(sources))) * 16),
+        )
         source_result = run_publication_source_to_inbox(source)
         source_results.append(source_result)
         if not source_result["ok"]:
             raise RuntimeError(str(source_result.get("stderr") or "")[-4000:] or f"{source} sync failed.")
+    report_progress("maintenance", "Consolidating publication records", 80)
     maintenance = maintain()
+    report_progress("discovery", "Checking additional researcher profiles", 84)
     ai_discovery = discover_ai_profile_candidates()
     with connect() as con:
         if update_last_run:

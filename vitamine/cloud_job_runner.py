@@ -101,7 +101,23 @@ def run_enrichment(progress_path: Path) -> dict[str, Any]:
         "Enriching publications from connected databases and online sources",
         8,
     )
-    result = worker_app.enrich_cv_job(update_last_run=True)
+    previous_progress_path = os.environ.get("VITAMINE_JOB_PROGRESS_PATH")
+    os.environ["VITAMINE_JOB_PROGRESS_PATH"] = str(progress_path)
+    try:
+        result = worker_app.enrich_cv_job(
+            update_last_run=True,
+            progress_callback=lambda phase, message, percent: progress(
+                progress_path,
+                phase,
+                message,
+                percent,
+            ),
+        )
+    finally:
+        if previous_progress_path is None:
+            os.environ.pop("VITAMINE_JOB_PROGRESS_PATH", None)
+        else:
+            os.environ["VITAMINE_JOB_PROGRESS_PATH"] = previous_progress_path
     progress(progress_path, "metrics", "Refreshing journal metrics", 88)
     metrics = worker_app.run_script("fetch_journal_metrics.py")
     if metrics.returncode != 0:

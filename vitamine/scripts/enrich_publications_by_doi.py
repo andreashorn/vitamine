@@ -7,6 +7,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import os
 import re
 import sqlite3
 import time
@@ -30,6 +31,27 @@ USER_AGENT = "vitamine/0.1"
 INSTITUTION_CACHE: dict[str, dict[str, Any]] = {}
 REQUEST_CACHE: dict[str, dict[str, Any] | None] = {}
 ROR_AFFILIATION_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def write_job_progress(message: str, percent: int) -> None:
+    raw_path = os.environ.get("VITAMINE_JOB_PROGRESS_PATH", "").strip()
+    if not raw_path:
+        return
+    path = Path(raw_path)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    payload = {
+        "phase": "doi_enrichment",
+        "message": message,
+        "percent": max(8, min(60, int(percent))),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    except OSError:
+        # Progress reporting must never interrupt metadata enrichment.
+        temporary.unlink(missing_ok=True)
 
 
 def connect() -> sqlite3.Connection:
@@ -973,7 +995,13 @@ def enrich(
             {sql_limit}
             """
         ).fetchall()
-        for row in rows:
+        total_rows = len(rows)
+        for index, row in enumerate(rows, start=1):
+            percent = 8 + round(((index - 1) / max(1, total_rows)) * 52)
+            write_job_progress(
+                f"Enriching publication {index} of {total_rows}",
+                percent,
+            )
             doi = normalize_doi(row["doi"])
             time.sleep(0.05)
             resolver_score = 0.0
@@ -1083,6 +1111,11 @@ def enrich(
                 )
             if not dry_run:
                 con.commit()
+        if total_rows:
+            write_job_progress(
+                f"Enriched metadata for {total_rows} publications",
+                60,
+            )
         if not dry_run:
             con.commit()
     maintenance = maintain() if not dry_run else {}
