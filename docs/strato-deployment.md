@@ -1,6 +1,6 @@
 # VitaMine hosted prototype on Strato
 
-Last updated: 2026-07-30.
+Last updated: 2026-07-31.
 
 This is the project handoff for future Codex sessions. It intentionally contains
 no API keys, invite codes, cookies, or other credentials.
@@ -277,6 +277,19 @@ Verify downloads and workspaces before removing the previous key. Database
 encryption does not make the service zero-knowledge: the application can
 decrypt data while serving the owner, account metadata remains readable, and
 explicitly published profiles remain public.
+
+Migration 5 was deployed on 2026-07-31. Both active CV snapshots were
+authenticated successfully after migration; PostgreSQL contained two encrypted
+snapshots, zero SQLite plaintext headers, and zero rows in the retired private
+projection tables. A post-migration custom-format backup was created and
+verified with `pg_restore --list`.
+
+The data key currently resides in the root-readable service environment. This
+protects an isolated database dump, backup copy, or database-only disclosure,
+but not an attacker who obtains both the server filesystem and its environment
+file. Protecting against complete-host or root compromise would require an
+external key service, manual unlock procedure, or provider-level encrypted
+volume and is outside this application-encryption boundary.
 
 ## Deployment pattern
 
