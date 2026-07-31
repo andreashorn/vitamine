@@ -93,7 +93,7 @@ Evidence: `.github/workflows/ci.yml`, `tests/test_ci_workflow.py`, and the
 README testing instructions; validated with the complete unit-test suite,
 PyYAML parsing, pinned official action revisions, and `git diff --check`.
 
-### AUTO-002 [ ] - Add a privacy-safe repository audit and run it in CI
+### AUTO-002 [x] - Add a privacy-safe repository audit and run it in CI
 
 Risk: low
 
@@ -126,7 +126,10 @@ Stop conditions:
 - A possible real credential or private database is found.
 - Passing the audit would require a broad or unexplained allowlist.
 
-Evidence: pending
+Evidence: `scripts/audit_repository.py`, `tests/test_repository_audit.py`, the
+CI audit step, and README usage/scope notes; validated against tracked and
+non-ignored proposed files, representative forbidden fixtures, the full unit
+test suite, and `git diff --check`.
 
 ### AUTO-003 [ ] - Introduce explicit, versioned cloud database migrations
 

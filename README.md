@@ -56,6 +56,19 @@ python3 -m unittest discover -s tests
 GitHub Actions runs this suite with Python 3.11 for every pull request and every
 push to `main`. The workflow requires no repository secrets.
 
+Before committing, run the privacy-safe repository audit:
+
+```sh
+python3 scripts/audit_repository.py
+```
+
+It checks tracked and non-ignored proposed files for private databases,
+environment files, Finder metadata, private-key material, and several
+high-confidence credential formats. Findings contain only a rule identifier
+and path, never the suspected value. Exact synthetic/example files are
+allowlisted per rule. This is a local guardrail; it complements rather than
+replaces GitHub secret scanning or a dedicated secrets scanner.
+
 ## Build a macOS app
 
 ```sh

@@ -38,5 +38,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --editable .
 
+      - name: Audit proposed repository contents
+        run: python scripts/audit_repository.py
+
       - name: Run the test suite
         run: python -m unittest discover -s tests
