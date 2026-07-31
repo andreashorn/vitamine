@@ -30,6 +30,7 @@ from .i18n import GERMAN_FIELD_PAIRS, fill_german_drafts
 from .citation_styles import CITATION_STYLES, DEFAULT_CITATION_STYLE, validate_citation_style
 from .metadata_text import decode_metadata_text, decode_publication_payload
 from .identifiers import normalize_identifier
+from .profile_resolver import resolve_profiles
 from .deployment import (
     llm_policy,
     llm_user_configuration_allowed,
@@ -73,6 +74,7 @@ from .scripts.import_uploaded_cv import (
     normalize_llm_entry as normalize_cv_entry,
     normalize_publication as normalize_cv_publication,
     stage_import_candidates,
+    store_profile_candidates,
     import_cv_file,
 )
 from .enrichment_guard import (
@@ -4674,6 +4676,36 @@ def ensure_discovery_document(con: sqlite3.Connection, source: dict[str, str]) -
     return int(con.execute("SELECT id FROM documents WHERE slug=?", (slug,)).fetchone()[0])
 
 
+def discover_researcher_profiles() -> dict[str, Any]:
+    """Resolve researcher IDs from identity and publication evidence."""
+    with connect() as con:
+        if not ai_web_discovery_enabled(con):
+            return {"ok": True, "enabled": False, "accepted": 0, "staged": 0, "warnings": []}
+        person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
+        publications = rows_dict(
+            con.execute(
+                "SELECT title, year, doi, authors, venue FROM publications "
+                "WHERE COALESCE(suppress_display, 0)=0 ORDER BY year DESC, id DESC"
+            ).fetchall()
+        )
+        candidates, warnings = resolve_profiles("", person, publications, search_web=True)
+        con.execute(
+            """
+            INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
+            VALUES ('researcher-profile-resolution', 'Researcher profile resolution', '',
+                    'online-profile-index', datetime('now'),
+                    'Profile identifiers resolved from corroborated public identity evidence.')
+            ON CONFLICT(slug) DO UPDATE SET imported_at=datetime('now'), notes=excluded.notes
+            """
+        )
+        document_id = int(
+            con.execute("SELECT id FROM documents WHERE slug='researcher-profile-resolution'").fetchone()[0]
+        )
+        counts = store_profile_candidates(con, document_id, candidates)
+        con.commit()
+    return {"ok": True, "enabled": True, **counts, "warnings": warnings}
+
+
 def discover_ai_profile_candidates() -> dict[str, Any]:
     with connect() as con:
         if not ai_web_discovery_enabled(con):
@@ -4797,6 +4829,7 @@ def enrich_cv_job(
     report_progress("maintenance", "Consolidating publication records", 80)
     maintenance = maintain()
     report_progress("discovery", "Checking additional researcher profiles", 84)
+    profile_resolution = discover_researcher_profiles()
     ai_discovery = discover_ai_profile_candidates()
     with connect() as con:
         if update_last_run:
@@ -4848,6 +4881,8 @@ def enrich_cv_job(
         "rejected": sum(row["rejected"] for row in source_summary),
         "identity_review": sum(row["identity_review"] for row in source_summary),
         "staged_from_sources": sum(row["staged"] for row in source_summary),
+        "profiles_accepted": int(profile_resolution.get("accepted") or 0),
+        "profiles_staged": int(profile_resolution.get("staged") or 0),
         "staged_from_web": int(ai_discovery.get("candidates_staged") or 0),
         "inbox_pending": inbox_pending,
         "citation_coverage": {
@@ -4859,6 +4894,7 @@ def enrich_cv_job(
         *(f"[{row['source']}]\n{row['stdout'].strip()}" for row in source_results if row["stdout"].strip()),
         f"[doi]\n{doi_result.stdout.strip()}",
         f"[maintenance]\n{json.dumps(maintenance, indent=2)}",
+        f"[profile-resolution]\n{json.dumps(profile_resolution, indent=2)}",
         f"[ai-web-discovery]\n{json.dumps(ai_discovery, indent=2)}",
     ]
     return {
@@ -4867,6 +4903,7 @@ def enrich_cv_job(
         "results": source_results,
         "doi_stdout": doi_result.stdout,
         "maintenance": maintenance,
+        "profile_resolution": profile_resolution,
         "ai_web_discovery": ai_discovery,
         "enrichment_summary": enrichment_summary,
         "inbox_pending": inbox_pending,
