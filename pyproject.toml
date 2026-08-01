@@ -14,6 +14,7 @@ dependencies = [
   "python-multipart",
   "pypdf",
   "uvicorn",
+  "webauthn>=2.7,<4",
 ]
 
 [tool.setuptools]

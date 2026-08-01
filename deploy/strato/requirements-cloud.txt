@@ -8,3 +8,4 @@ python-multipart>=0.0.9,<1
 pypdf>=4,<7
 psycopg[binary]>=3.2,<4
 uvicorn>=0.23,<1
+webauthn>=2.7,<4

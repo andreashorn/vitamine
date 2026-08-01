@@ -51,10 +51,13 @@ class CloudAppTests(unittest.TestCase):
             },
         )
         self.environment.start()
+        self.mail_delivery = patch("vitamine.cloud_app.send_verification_email")
+        self.send_verification_email = self.mail_delivery.start()
         self.client = TestClient(app)
 
     def tearDown(self):
         self.client.close()
+        self.mail_delivery.stop()
         self.environment.stop()
         self.directory.cleanup()
 
@@ -77,7 +80,13 @@ class CloudAppTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 200, response.text)
+        self.verify_email(email)
         return response
+
+    def verify_email(self, email):
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("UPDATE members SET email_verified_at=account_created_at WHERE email=?", (email,))
+            con.commit()
 
     def create_account(self, *, email="tester@example.org"):
         _, token = self.redeem()
@@ -93,6 +102,36 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(payload["credited_microusd"], 3_000_000)
         self.assertEqual(payload["charged_microusd"], 0)
         self.assertFalse(payload["enforcement_enabled"])
+
+    def test_new_account_requires_one_time_email_confirmation(self):
+        _, token = self.redeem()
+        response = self.client.post(
+            "/api/account/register",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "email": "confirm@example.org",
+                "password": "correct-horse-battery-staple",
+                "display_name": "Confirm Me",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()["email_verification_required"])
+        self.assertEqual(self.client.get("/api/account/databases").status_code, 403)
+        verification_token = self.send_verification_email.call_args.args[1]
+        verified = self.client.get(
+            "/api/account/verify-email",
+            params={"token": verification_token},
+            follow_redirects=False,
+        )
+        self.assertEqual(verified.status_code, 303)
+        self.assertEqual(verified.headers["location"], "/?email_confirmation=verified")
+        self.assertEqual(self.client.get("/api/account/databases").status_code, 200)
+        reused = self.client.get(
+            "/api/account/verify-email",
+            params={"token": verification_token},
+            follow_redirects=False,
+        )
+        self.assertEqual(reused.headers["location"], "/?email_confirmation=invalid")
 
     def test_workspace_worker_liveness_rejects_a_reused_pid(self):
         row = {"pid": 987654, "port": 58153}
@@ -374,6 +413,7 @@ class CloudAppTests(unittest.TestCase):
                 },
             )
             self.assertEqual(registered.status_code, 200, registered.text)
+            self.verify_email("second@example.org")
             second_workspace = second_client.post("/gateway/workspace/new")
             self.assertEqual(second_workspace.status_code, 200, second_workspace.text)
             second = second_client.post("/api/cloud/jobs/enrich-cv", headers=headers)
@@ -721,6 +761,7 @@ class CloudAppTests(unittest.TestCase):
             },
         )
         self.assertEqual(registered.status_code, 200, registered.text)
+        self.verify_email("other@example.org")
         self.assertEqual(other.post(f"/gateway/databases/{database_id}/open").status_code, 404)
         self.assertEqual(other.get(f"/api/account/databases/{database_id}/download").status_code, 404)
         other.close()
@@ -752,7 +793,12 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertEqual(page.headers["vary"], "Cookie")
         self.assertIn('autocomplete="username"', page.text)
-        self.assertIn("20260801-pinned-scenes", page.text)
+        self.assertIn("20260801-story-final", page.text)
+        self.assertIn("Stop recounting your career from scratch, over and over again.", page.text)
+        self.assertIn('class="vitamine-bottle"', page.text)
+        self.assertIn("Alex Researcher", page.text)
+        self.assertIn("Northbridge University", page.text)
+        self.assertIn("Selected research", page.text)
         self.assertIn('class="library-workspace"', page.text)
         self.assertIn('class="cv-library-panel"', page.text)
         self.assertIn('href="#what-is-vitamine">What is VitaMine?</a>', page.text)
@@ -762,9 +808,14 @@ class CloudAppTests(unittest.TestCase):
         self.assertIn("Map geometry: Natural Earth", page.text)
         self.assertIn("A website you don’t have to maintain.", page.text)
         self.assertIn("Managing your CV should be simple.", page.text)
-        self.assertIn("Test VitaMine for free", page.text)
-        self.assertIn('class="researcher-scene"', page.text)
+        self.assertIn("Let’s do it!", page.text)
+        self.assertIn('class="researcher-vector"', page.text)
+        self.assertIn("For your R01, we need a biosketch", page.text)
+        self.assertIn('class="vitamine-bottle"', page.text)
         self.assertIn("Drop your existing CV here", page.text)
+        self.assertIn("portable SQLite database", page.text)
+        self.assertIn("18 research grants", page.text)
+        self.assertIn("Skills and languages", page.text)
         self.assertIn('class="sync-lines"', page.text)
         self.assertIn('id="citationTicker"', page.text)
         script = self.client.get("/assets/account.js")

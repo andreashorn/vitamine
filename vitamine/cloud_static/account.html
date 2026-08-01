@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine — Academic CV manager</title>
-  <link rel="stylesheet" href="/assets/account.css?v=20260801-pinned-scenes">
-  <script src="/assets/account.js?v=20260801-pinned-scenes" defer></script>
+  <link rel="stylesheet" href="/assets/account.css?v=20260801-story-final">
+  <script src="/assets/account.js?v=20260801-story-final" defer></script>
 </head>
 <body id="top">
   <header class="site-header">
@@ -52,7 +52,8 @@
                 <input name="password" type="password" autocomplete="current-password" required>
               </label>
               <button class="primary-button" type="submit">Sign in</button>
-              <p class="form-note">Password recovery is not yet available during early access.</p>
+              <button id="passkeyLoginButton" class="secondary-button" type="button">Sign in with a passkey</button>
+              <button id="forgotPasswordButton" class="text-button auth-text-button" type="button">Forgot password?</button>
               <p id="loginMessage" class="message" role="status"></p>
             </form>
 
@@ -91,6 +92,42 @@
             <p class="form-note">Use at least 10 characters. During early access, lost passwords must be reset manually.</p>
             <p id="registerMessage" class="message" role="status"></p>
           </form>
+          <div id="verificationPending" class="auth-form" hidden>
+            <div>
+              <p class="card-kicker">Check your inbox</p>
+              <h2>Confirm your email.</h2>
+              <p>We sent a confirmation link to <strong id="verificationEmail"></strong>. The link expires after 24 hours.</p>
+            </div>
+            <button id="resendVerification" class="secondary-button" type="button">Resend confirmation</button>
+            <p id="verificationMessage" class="message" role="status"></p>
+          </div>
+          <form id="passwordResetRequestForm" class="auth-form" hidden>
+            <div>
+              <p class="card-kicker">Password recovery</p>
+              <h2>Reset your password.</h2>
+              <p>Enter your verified email address and we’ll send a one-hour reset link.</p>
+            </div>
+            <label>Email
+              <input name="email" type="email" autocomplete="email" required>
+            </label>
+            <button class="primary-button" type="submit">Send reset link</button>
+            <button class="text-button auth-text-button" data-back-to-login type="button">Back to sign in</button>
+            <p id="passwordResetRequestMessage" class="message" role="status"></p>
+          </form>
+          <form id="passwordResetForm" class="auth-form" hidden>
+            <div>
+              <p class="card-kicker">Choose a new password</p>
+              <h2>Reset your password.</h2>
+            </div>
+            <label>New password
+              <input name="password" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+            </label>
+            <label>Confirm new password
+              <input name="password_confirmation" type="password" minlength="10" maxlength="256" autocomplete="new-password" required>
+            </label>
+            <button class="primary-button" type="submit">Save new password</button>
+            <p id="passwordResetMessage" class="message" role="status"></p>
+          </form>
           </div>
         </div>
       </div>
@@ -106,29 +143,35 @@
         <article id="feature-one" class="feature-chapter feature-problem reveal-item" data-story-step="01">
           <div class="feature-copy">
             <p class="chapter-number">01 · One source of truth</p>
-            <h3>Stop rebuilding your career from scratch.</h3>
+            <h3>Stop recounting your career from scratch, over and over again.</h3>
             <p>Promotion letters, funder biosketches, prize applications and websites all ask for a different version of the same career.</p>
             <p class="feature-answer">Put your data in once. Export it in any format, in any language, as often as you need.</p>
+            <p class="asset-credit">Researcher illustration adapted from <a href="https://undraw.co/illustration/deep-work_muov" target="_blank" rel="noopener">Deep Work by unDraw</a>, used under the unDraw license.</p>
           </div>
           <div class="feature-visual request-visual" aria-hidden="true">
-            <svg class="researcher-scene" viewBox="0 0 620 470" role="presentation">
-              <path class="scene-wall" d="M20 376h580M84 376V152h214v224M112 184h158v112H112z"/>
-              <path class="scene-desk" d="M48 350h520v26H48zm46 26h22v78H94zm420 0h22v78h-22z"/>
-              <path class="scene-chair" d="M276 320h92v95h-92m46-95v134m-35 0h70"/>
-              <path class="scene-hair" d="M321 168c-43 0-68 34-60 81l16 33h91l16-52c7-38-22-62-63-62z"/>
-              <circle class="scene-face" cx="322" cy="219" r="43"/>
-              <path class="scene-body" d="M276 281q46-28 92 0l28 85H247z"/>
-              <path class="scene-arm" d="M278 297q-32 14-59 49m146-48q35 5 58 43"/>
-              <path class="scene-laptop" d="M199 289h137l-15 60H184zm-31 60h178"/>
-              <path class="scene-cup" d="M437 311h35v38h-35zm35 8h12q9 17-12 19"/>
-              <g class="paper-pile pile-left"><path d="M67 338h88v12H67zM74 326h82v12H74zM64 314h91v12H64z"/></g>
-              <g class="paper-pile pile-right"><path d="M474 339h78v11h-78zM468 328h85v11h-85zM479 317h72v11h-72zM470 306h80v11h-80z"/></g>
-              <path class="stress-line" d="M247 178l-17-17m14 41h-26m180-25 18-17m-15 42h27"/>
-            </svg>
-            <div class="request-card request-a" data-scroll-stage="1"><span>Promotion</span><strong>Full mentoring record</strong><small>Include mentees’ successes</small></div>
-            <div class="request-card request-b" data-scroll-stage="2"><span>Funding agency</span><strong>Structured biosketch</strong><small>Use the required headings</small></div>
-            <div class="request-card request-c" data-scroll-stage="3"><span>Prix scientifique</span><strong>2 pages · Français</strong><small>10 publications maximum</small></div>
-            <div class="source-pill" data-scroll-stage="4"><i></i> One VitaMine</div>
+            <div class="request-sky"></div>
+            <div class="desk-scene"><div class="desk-top"></div><div class="desk-leg leg-left"></div><div class="desk-leg leg-right"></div></div>
+            <img class="researcher-vector" src="https://cdn.undraw.co/illustration/deep-work_muov.svg" alt="">
+            <div class="typing-spark spark-one"></div><div class="typing-spark spark-two"></div>
+            <div class="sweat-drop sweat-one"></div><div class="sweat-drop sweat-two"></div><div class="sweat-drop sweat-three"></div>
+            <div class="printer"><div class="printer-slot"></div><span>CV</span><div class="printer-light"></div></div>
+            <div class="printed-cv print-one"><b>CURRICULUM VITAE</b><i></i><i></i><i></i></div>
+            <div class="printed-cv print-two"><b>BIOSKETCH</b><i></i><i></i><i></i></div>
+            <div class="printed-cv print-three"><b>CV</b><i></i><i></i><i></i></div>
+            <div class="request-card request-1" data-request-index="0"><span>NIH</span><strong>For your R01, we need a biosketch in the updated format.</strong></div>
+            <div class="request-card request-2" data-request-index="1"><span>Prize committee</span><strong>Provide a CV in French, two pages maximum.</strong></div>
+            <div class="request-card request-3" data-request-index="2"><span>Faculty affairs</span><strong>Please provide a tabulated CV of maximum one page.</strong></div>
+            <div class="request-card request-4" data-request-index="3"><span>Promotion</span><strong>Include your full mentoring record and your mentees’ successes.</strong></div>
+            <div class="request-card request-5" data-request-index="4"><span>Conference</span><strong>We need a 150-word speaker biography by tomorrow.</strong></div>
+            <div class="request-card request-6" data-request-index="5"><span>Foundation</span><strong>List ten selected papers and explain your contribution to each.</strong></div>
+            <div class="request-card request-7" data-request-index="6"><span>University website</span><strong>Send a short biography, current metrics and five recent publications.</strong></div>
+            <div class="request-card request-8" data-request-index="7"><span>Review committee</span><strong>Separate invited talks, keynotes and conference presentations.</strong></div>
+            <div class="request-card request-9" data-request-index="8"><span>Collaborator</span><strong>Could you send the long version—with DOI links—in Word format?</strong></div>
+            <div class="request-card request-10" data-request-index="9"><span>Deadline reminder</span><strong>Please upload a signed and dated CV before 17:00 today.</strong></div>
+            <div class="paper-avalanche"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="vitamine-energy"><i></i><i></i><i></i></div>
+            <div class="vitamine-bottle"><span class="bottle-cap"></span><span class="bottle-label"><img src="/assets/vitamine-logo.png" alt=""></span></div>
+            <div class="boost-message"><strong>Powered by VitaMine</strong><span>One record. Every CV.</span></div>
           </div>
         </article>
 
@@ -143,10 +186,22 @@
             <div class="drop-zone"><span>Drop your existing CV here</span><small>.docx · .pdf</small></div>
             <div class="import-document"><em>W</em><b>academic-cv.docx</b><span></span><span></span><span></span><span></span></div>
             <div class="extract-stream"><i></i><i></i><i></i><i></i></div>
-            <div class="database-cylinder"><span>V</span><strong>.vitamine</strong><small>portable SQLite</small></div>
+            <div class="database-cylinder">
+              <svg viewBox="0 0 72 72" role="presentation"><ellipse cx="36" cy="17" rx="25" ry="10"/><path d="M11 17v18c0 6 11 10 25 10s25-4 25-10V17M11 35v18c0 6 11 10 25 10s25-4 25-10V35"/><path d="M11 35c0 6 11 10 25 10s25-4 25-10"/></svg>
+              <strong>.vitamine</strong><small>portable SQLite database</small>
+            </div>
             <div class="data-chip chip-a">47 publications</div>
-            <div class="data-chip chip-b">12 positions</div>
+            <div class="data-chip chip-b">12 academic positions</div>
             <div class="data-chip chip-c">9 mentees</div>
+            <div class="data-chip chip-d">18 research grants</div>
+            <div class="data-chip chip-e">26 invited talks</div>
+            <div class="data-chip chip-f">7 awards and honors</div>
+            <div class="data-chip chip-g">14 teaching activities</div>
+            <div class="data-chip chip-h">32 collaborators</div>
+            <div class="data-chip chip-i">11 committee roles</div>
+            <div class="data-chip chip-j">6 professional memberships</div>
+            <div class="data-chip chip-k">Education and training</div>
+            <div class="data-chip chip-l">Skills and languages</div>
           </div>
         </article>
 
@@ -159,7 +214,14 @@
           </div>
           <div class="feature-visual sync-visual" aria-hidden="true">
             <div class="sync-orbit orbit-one"></div><div class="sync-orbit orbit-two"></div>
-            <svg class="sync-lines" viewBox="0 0 520 520" role="presentation"><path data-sync-source="1" pathLength="1" d="M48 260Q145 218 260 260"/><path data-sync-source="2" pathLength="1" d="M260 45Q220 150 260 260"/><path data-sync-source="3" pathLength="1" d="M472 260Q375 218 260 260"/><path data-sync-source="4" pathLength="1" d="M260 475Q220 370 260 260"/></svg>
+            <svg class="sync-lines" viewBox="0 0 520 520" preserveAspectRatio="none" role="presentation">
+              <defs><marker id="syncArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8Z"/></marker></defs>
+              <path id="syncPath1" data-sync-source="1" pathLength="1" d="M64 256C120 232 151 248 186 260"/>
+              <path id="syncPath2" data-sync-source="2" pathLength="1" d="M289 66C270 126 269 160 270 186"/>
+              <path id="syncPath3" data-sync-source="3" pathLength="1" d="M440 283C392 244 360 249 334 260"/>
+              <path id="syncPath4" data-sync-source="4" pathLength="1" d="M225 477C244 419 246 371 250 334"/>
+              <circle data-sync-pulse="1" r="6"/><circle data-sync-pulse="2" r="6"/><circle data-sync-pulse="3" r="6"/><circle data-sync-pulse="4" r="6"/>
+            </svg>
             <div class="sync-core"><div class="cv-document-icon"><b>CV</b><i></i><i></i><i></i><i></i></div><small>Your living CV</small></div>
             <div class="sync-node node-orcid">iD</div>
             <div class="sync-node node-scholar">Scholar</div>
@@ -197,9 +259,15 @@
             <div class="browser-frame">
               <div class="browser-bar"><i></i><span>vitamine.cloud/a-researcher</span></div>
               <div class="profile-preview">
-                <div class="portrait-placeholder">AR</div>
-                <div><small data-profile-row="1">Professor of Neuroscience</small><strong data-profile-row="2">Alex Researcher</strong><p data-profile-row="3">Studying how networks of the human brain shape movement, learning and recovery.</p></div>
-                <nav data-profile-row="4"><b>52</b> Publications <b>18</b> Collaborators <b>9</b> Mentees</nav>
+                <div class="profile-site-nav" data-profile-row="1"><b>AR<span>.</span></b><span>About</span><span>Research</span><span>Publications</span></div>
+                <div class="profile-identity" data-profile-row="2">
+                  <div class="profile-portrait">
+                    <svg viewBox="0 0 120 140" role="presentation"><path class="portrait-bg" d="M7 66C7 24 30 5 62 5c34 0 52 22 52 61v68H7Z"/><path class="portrait-coat" d="M19 137c3-29 17-42 41-42s39 13 43 42Z"/><path class="portrait-shirt" d="m47 96 13 22 14-22Z"/><path class="portrait-neck" d="M49 82h23v24H49Z"/><path class="portrait-face" d="M35 49c0-25 12-36 27-36 20 0 29 15 27 39-2 27-13 43-28 43S35 76 35 49Z"/><path class="portrait-hair" d="M32 56c-5-27 5-48 31-48 24 0 33 19 28 43-8-5-12-15-15-24-10 12-25 19-44 20Z"/><path class="portrait-glasses" d="M39 53h18v12H39Zm26 0h18v12H65Zm-8 5h8"/><path class="portrait-smile" d="M53 77q8 6 16 0"/></svg>
+                  </div>
+                  <div class="profile-intro"><small>Professor of Systems Neuroscience</small><strong>Alex Researcher</strong><span>Northbridge University · Center for Neural Dynamics</span><p>Alex studies how distributed brain networks shape movement, learning and recovery—and how neuromodulation can help restore them.</p><div class="profile-tags"><i>Neural networks</i><i>Movement</i><i>Brain stimulation</i></div></div>
+                </div>
+                <div class="profile-metrics" data-profile-row="3"><span><b>82</b> Publications</span><span><b>4,218</b> Citations</span><span><b>32</b> Collaborators</span><span><b>11</b> Mentees</span></div>
+                <section class="profile-recent" data-profile-row="4"><header><b>Selected research</b><span>View all ↗</span></header><article><time>2026</time><p><b>Network-guided stimulation for motor recovery</b><small>Nature Neuroscience · First author</small></p></article><article><time>2025</time><p><b>Mapping adaptive circuits across the human brain</b><small>Brain · Open access</small></p></article></section>
               </div>
             </div>
             <div class="live-badge"><i></i> Synced</div>
@@ -249,7 +317,7 @@
         <footer id="story-finale" class="story-finale reveal-item">
           <p class="eyebrow">Your career is already impressive.</p>
           <h2>Managing your CV should be simple.</h2>
-          <a href="#top" id="returnToTop" class="story-button">Test VitaMine for free</a>
+          <a href="#top" id="returnToTop" class="story-button">Let’s do it!</a>
         </footer>
       </section>
     </section>
@@ -317,6 +385,16 @@
           </div>
         </div>
         <p class="premium-note">The account debit is currently 2× the underlying OpenAI API cost. Top-ups and payment enforcement are not enabled yet.</p>
+      </section>
+
+      <section class="account-security" aria-labelledby="accountSecurityTitle">
+        <div>
+          <p class="eyebrow">Account security</p>
+          <h2 id="accountSecurityTitle">Passkeys</h2>
+          <p>Use Touch ID, Face ID, Windows Hello, or a security key to sign in without entering your password.</p>
+        </div>
+        <button id="addPasskeyButton" class="secondary-button" type="button">Add a passkey</button>
+        <p id="passkeyMessage" class="message" role="status"></p>
       </section>
     </section>
   </main>

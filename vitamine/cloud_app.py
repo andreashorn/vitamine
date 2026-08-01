@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import html
@@ -11,8 +12,10 @@ import os
 import re
 import secrets
 import shutil
+import smtplib
 import socket
 import sqlite3
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -20,6 +23,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import quote, urlencode
@@ -79,7 +83,12 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 8
+CLOUD_SCHEMA_VERSION = 9
+EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
+PASSWORD_RESET_MAX_AGE = 60 * 60
+PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
+PASSKEY_RP_ID = "vitamine.cloud"
+PASSKEY_ORIGIN = "https://vitamine.cloud"
 INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000
 LOGGER = logging.getLogger("vitamine.cloud")
 
@@ -105,9 +114,46 @@ CREATE TABLE IF NOT EXISTS members (
     password_hash TEXT,
     display_name TEXT NOT NULL DEFAULT '',
     account_created_at TEXT,
+    email_verified_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    token_hash TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token_hash TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS passkey_credentials (
+    credential_id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    public_key BLOB NOT NULL,
+    sign_count INTEGER NOT NULL DEFAULT 0,
+    transports_json TEXT NOT NULL DEFAULT '[]',
+    label TEXT NOT NULL DEFAULT 'Passkey',
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS passkey_challenges (
+    challenge_hash TEXT PRIMARY KEY,
+    member_id TEXT REFERENCES members(id) ON DELETE CASCADE,
+    purpose TEXT NOT NULL CHECK (purpose IN ('register', 'authenticate')),
+    challenge TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS device_credentials (
@@ -332,9 +378,46 @@ CREATE TABLE IF NOT EXISTS members (
     password_hash TEXT,
     display_name TEXT NOT NULL DEFAULT '',
     account_created_at TEXT,
+    email_verified_at TEXT,
     created_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS email_verification_tokens (
+    token_hash TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    token_hash TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS passkey_credentials (
+    credential_id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    public_key BYTEA NOT NULL,
+    sign_count BIGINT NOT NULL DEFAULT 0,
+    transports_json TEXT NOT NULL DEFAULT '[]',
+    label TEXT NOT NULL DEFAULT 'Passkey',
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS passkey_challenges (
+    challenge_hash TEXT PRIMARY KEY,
+    member_id TEXT REFERENCES members(id) ON DELETE CASCADE,
+    purpose TEXT NOT NULL CHECK (purpose IN ('register', 'authenticate')),
+    challenge TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_members_email_unique
@@ -557,6 +640,25 @@ class AccountRegistration(BaseModel):
 class AccountLogin(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
+
+
+class PasskeyEmail(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class PasskeyResponse(BaseModel):
+    challenge_id: str = Field(min_length=20, max_length=200)
+    credential: dict[str, Any]
+    label: str = Field(default="Passkey", max_length=80)
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class PasswordResetCompletion(BaseModel):
+    token: str = Field(min_length=20, max_length=200)
+    password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
 
 
 class DatabaseRename(BaseModel):
@@ -1186,6 +1288,76 @@ def migration_008_premium_account_costs(con: GatewayConnection) -> None:
         )
 
 
+def migration_009_verified_email_and_passkeys(con: GatewayConnection) -> None:
+    if cloud_table_exists(con, "members"):
+        if con.backend == "postgres":
+            con.execute("ALTER TABLE members ADD COLUMN IF NOT EXISTS email_verified_at TEXT")
+            con.execute(
+                "UPDATE members SET email_verified_at=COALESCE(account_created_at, created_at) "
+                "WHERE email IS NOT NULL AND email_verified_at IS NULL"
+            )
+        else:
+            member_columns = sqlite_column_names(con, "members")
+            if "email_verified_at" not in member_columns:
+                con.execute("ALTER TABLE members ADD COLUMN email_verified_at TEXT")
+            if {"email", "account_created_at", "created_at"}.issubset(member_columns):
+                con.execute(
+                    "UPDATE members SET email_verified_at=COALESCE(account_created_at, created_at) "
+                    "WHERE email IS NOT NULL AND email_verified_at IS NULL"
+                )
+    blob_type = "BYTEA" if con.backend == "postgres" else "BLOB"
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS email_verification_tokens (
+            token_hash TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            token_hash TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS passkey_credentials (
+            credential_id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            public_key {blob_type} NOT NULL,
+            sign_count BIGINT NOT NULL DEFAULT 0,
+            transports_json TEXT NOT NULL DEFAULT '[]',
+            label TEXT NOT NULL DEFAULT 'Passkey',
+            created_at TEXT NOT NULL,
+            last_used_at TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS passkey_challenges (
+            challenge_hash TEXT PRIMARY KEY,
+            member_id TEXT REFERENCES members(id) ON DELETE CASCADE,
+            purpose TEXT NOT NULL CHECK (purpose IN ('register', 'authenticate')),
+            challenge TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_passkeys_member ON passkey_credentials(member_id)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_passkey_challenges_expiry ON passkey_challenges(expires_at)")
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1195,6 +1367,7 @@ CLOUD_MIGRATIONS = (
     (6, migration_006_background_job_support_ids),
     (7, migration_007_llm_usage_ledger),
     (8, migration_008_premium_account_costs),
+    (9, migration_009_verified_email_and_passkeys),
 )
 
 
@@ -1310,7 +1483,134 @@ def account_member(
     member = authenticated_member(authorization, session_cookie)
     if not str(member["email"] or "").strip() or not str(member["password_hash"] or "").strip():
         raise HTTPException(status_code=403, detail="Create your VitaMine account before storing databases.")
+    if not str(member["email_verified_at"] or "").strip():
+        raise HTTPException(status_code=403, detail="Confirm your email address before using VitaMine.")
     return member
+
+
+def public_app_url() -> str:
+    return os.environ.get("VITAMINE_PUBLIC_URL", PASSKEY_ORIGIN).rstrip("/")
+
+
+def smtp_configuration() -> dict[str, Any]:
+    return {
+        "host": os.environ.get("VITAMINE_SMTP_HOST", "").strip(),
+        "port": int(os.environ.get("VITAMINE_SMTP_PORT", "465")),
+        "username": os.environ.get("VITAMINE_SMTP_USERNAME", "").strip(),
+        "password": os.environ.get("VITAMINE_SMTP_PASSWORD", ""),
+        "from_address": os.environ.get("VITAMINE_SMTP_FROM", "hello@vitamine.cloud").strip(),
+        "use_tls": os.environ.get("VITAMINE_SMTP_USE_TLS", "true").lower() not in {"0", "false", "no"},
+    }
+
+
+def send_transactional_email(message: EmailMessage) -> None:
+    config = smtp_configuration()
+    if not config["host"] or not config["username"] or not config["password"]:
+        raise RuntimeError("Outbound email is not configured.")
+    message["From"] = f"VitaMine <{config['from_address']}>"
+    context = ssl.create_default_context()
+    if config["use_tls"] and config["port"] == 465:
+        with smtplib.SMTP_SSL(config["host"], config["port"], context=context, timeout=20) as client:
+            client.login(config["username"], config["password"])
+            client.send_message(message)
+    else:
+        with smtplib.SMTP(config["host"], config["port"], timeout=20) as client:
+            if config["use_tls"]:
+                client.starttls(context=context)
+            client.login(config["username"], config["password"])
+            client.send_message(message)
+
+
+def send_verification_email(email: str, token: str) -> None:
+    link = f"{public_app_url()}/api/account/verify-email?token={quote(token)}"
+    message = EmailMessage()
+    message["Subject"] = "Confirm your VitaMine email address"
+    message["To"] = email
+    message.set_content(
+        "Welcome to VitaMine. Confirm your email address using this link:\n\n"
+        f"{link}\n\nThis link expires in 24 hours. If you did not create this account, ignore this message."
+    )
+    send_transactional_email(message)
+
+
+def send_password_reset_email(email: str, token: str) -> None:
+    link = f"{public_app_url()}/?password_reset={quote(token)}"
+    message = EmailMessage()
+    message["Subject"] = "Reset your VitaMine password"
+    message["To"] = email
+    message.set_content(
+        "Use this link to choose a new VitaMine password:\n\n"
+        f"{link}\n\nThis link expires in one hour. If you did not request a reset, ignore this message."
+    )
+    send_transactional_email(message)
+
+
+def create_email_verification(con: GatewayConnection, member_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    con.execute("DELETE FROM email_verification_tokens WHERE member_id=? OR expires_at<?", (member_id, now.isoformat()))
+    con.execute(
+        "INSERT INTO email_verification_tokens(token_hash, member_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        (secret_hash(token), member_id, (now + timedelta(seconds=EMAIL_VERIFICATION_MAX_AGE)).isoformat(), now.isoformat()),
+    )
+    return token
+
+
+def create_password_reset(con: GatewayConnection, member_id: str) -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    con.execute("DELETE FROM password_reset_tokens WHERE member_id=? OR expires_at<?", (member_id, now.isoformat()))
+    con.execute(
+        "INSERT INTO password_reset_tokens(token_hash, member_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        (secret_hash(token), member_id, (now + timedelta(seconds=PASSWORD_RESET_MAX_AGE)).isoformat(), now.isoformat()),
+    )
+    return token
+
+
+def passkey_settings() -> tuple[str, str]:
+    origin = public_app_url()
+    host = origin.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+    rp_id = os.environ.get("VITAMINE_PASSKEY_RP_ID", PASSKEY_RP_ID).strip() or host
+    return rp_id, origin
+
+
+def base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def unbase64url(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def store_passkey_challenge(
+    con: GatewayConnection, member_id: str | None, purpose: str, challenge: bytes
+) -> str:
+    challenge_id = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    con.execute("DELETE FROM passkey_challenges WHERE expires_at<?", (now.isoformat(),))
+    con.execute(
+        """
+        INSERT INTO passkey_challenges
+          (challenge_hash, member_id, purpose, challenge, expires_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            secret_hash(challenge_id), member_id, purpose, base64url(challenge),
+            (now + timedelta(seconds=PASSKEY_CHALLENGE_MAX_AGE)).isoformat(), now.isoformat(),
+        ),
+    )
+    return challenge_id
+
+
+def consume_passkey_challenge(con: GatewayConnection, challenge_id: str, purpose: str) -> Any:
+    row = con.execute(
+        "SELECT * FROM passkey_challenges WHERE challenge_hash=? AND purpose=? AND expires_at>? FOR UPDATE",
+        (secret_hash(challenge_id), purpose, utc_now()),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=400, detail="This passkey request expired. Please try again.")
+    con.execute("DELETE FROM passkey_challenges WHERE challenge_hash=?", (row["challenge_hash"],))
+    return row
 
 
 def issue_device_credential(con: GatewayConnection, member_id: str) -> str:
@@ -3825,16 +4125,63 @@ def register_account(
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="This invitation already belongs to an account.")
+            verification_token = create_email_verification(con, member["id"])
     except Exception as exc:
         if not is_unique_violation(exc):
             raise
         raise HTTPException(status_code=409, detail="An account with that email address already exists.") from exc
     database_id = promote_current_workspace(member["id"])
+    try:
+        send_verification_email(email, verification_token)
+    except Exception:
+        LOGGER.exception("email_verification_delivery_failed member_id=%s", member["id"])
+        raise HTTPException(
+            status_code=503,
+            detail="Your account was created, but the confirmation email could not be sent. Please use resend confirmation.",
+        )
     return {
         "ok": True,
         "account": {"email": email, "display_name": display_name},
         "promoted_database_id": database_id,
+        "email_verification_required": True,
     }
+
+
+@app.get("/api/account/verify-email")
+def verify_account_email(token: str) -> RedirectResponse:
+    now = utc_now()
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT * FROM email_verification_tokens
+            WHERE token_hash=? AND used_at IS NULL AND expires_at>?
+            FOR UPDATE
+            """,
+            (secret_hash(token), now),
+        ).fetchone()
+        if row is None:
+            return RedirectResponse("/?email_confirmation=invalid", status_code=303)
+        con.execute("UPDATE members SET email_verified_at=? WHERE id=?", (now, row["member_id"]))
+        con.execute("UPDATE email_verification_tokens SET used_at=? WHERE token_hash=?", (now, row["token_hash"]))
+    return RedirectResponse("/?email_confirmation=verified", status_code=303)
+
+
+@app.post("/api/account/resend-verification")
+def resend_account_verification(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, bool]:
+    member = authenticated_member(authorization, request.cookies.get(SESSION_COOKIE))
+    if member["email_verified_at"]:
+        return {"ok": True}
+    with connect() as con:
+        token = create_email_verification(con, member["id"])
+    try:
+        send_verification_email(str(member["email"]), token)
+    except Exception:
+        LOGGER.exception("email_verification_delivery_failed member_id=%s", member["id"])
+        raise HTTPException(status_code=503, detail="The confirmation email could not be sent.")
+    return {"ok": True}
 
 
 @app.post("/api/account/login")
@@ -3857,9 +4204,232 @@ def login_account(payload: AccountLogin, request: Request) -> JSONResponse:
     with connect() as con:
         token = issue_device_credential(con, member["id"])
         con.execute("UPDATE members SET last_seen_at=? WHERE id=?", (utc_now(), member["id"]))
+    response = JSONResponse(
+        {
+            "ok": bool(member["email_verified_at"]),
+            "email_verification_required": not bool(member["email_verified_at"]),
+            "email": member["email"],
+        }
+    )
+    set_session_cookie(response, request, token)
+    return response
+
+
+@app.post("/api/account/password-reset/request")
+def request_password_reset(payload: PasswordResetRequest) -> dict[str, bool]:
+    email = normalize_email(payload.email)
+    token: str | None = None
+    with connect() as con:
+        member = con.execute(
+            "SELECT * FROM members WHERE email=? AND revoked_at IS NULL AND email_verified_at IS NOT NULL",
+            (email,),
+        ).fetchone()
+        if member is not None:
+            recent = con.execute(
+                "SELECT created_at FROM password_reset_tokens WHERE member_id=? ORDER BY created_at DESC LIMIT 1",
+                (member["id"],),
+            ).fetchone()
+            cutoff = datetime.now(timezone.utc) - timedelta(minutes=2)
+            if recent is None or datetime.fromisoformat(recent["created_at"]) < cutoff:
+                token = create_password_reset(con, member["id"])
+    if token is not None:
+        try:
+            send_password_reset_email(email, token)
+        except Exception:
+            LOGGER.exception("password_reset_delivery_failed")
+    # Always return the same response so this endpoint cannot enumerate accounts.
+    return {"ok": True}
+
+
+@app.post("/api/account/password-reset/complete")
+def complete_password_reset(payload: PasswordResetCompletion) -> JSONResponse:
+    now = utc_now()
+    workspace = None
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT * FROM password_reset_tokens
+            WHERE token_hash=? AND used_at IS NULL AND expires_at>?
+            FOR UPDATE
+            """,
+            (secret_hash(payload.token), now),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=400, detail="This password-reset link is invalid or expired.")
+        con.execute("UPDATE members SET password_hash=?, last_seen_at=? WHERE id=?", (hash_password(payload.password), now, row["member_id"]))
+        con.execute("UPDATE password_reset_tokens SET used_at=? WHERE token_hash=?", (now, row["token_hash"]))
+        con.execute("UPDATE device_credentials SET revoked_at=? WHERE member_id=? AND revoked_at IS NULL", (now, row["member_id"]))
+        workspace = con.execute("SELECT * FROM workspace_sessions WHERE member_id=?", (row["member_id"],)).fetchone()
+    if workspace:
+        if workspace["database_id"] and Path(workspace["db_path"]).exists() and not workspace_has_active_job(workspace):
+            persist_workspace_snapshot(workspace)
+        stop_workspace(workspace)
+        with connect() as con:
+            con.execute("DELETE FROM workspace_sessions WHERE id=?", (workspace["id"],))
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(WORKSPACE_COOKIE, path="/")
+    return response
+
+
+@app.post("/api/account/passkeys/register/options")
+def passkey_registration_options(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    from webauthn import generate_registration_options, options_to_json
+    from webauthn.helpers.structs import (
+        AuthenticatorSelectionCriteria,
+        PublicKeyCredentialDescriptor,
+        ResidentKeyRequirement,
+        UserVerificationRequirement,
+    )
+
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    with connect() as con:
+        credentials = con.execute(
+            "SELECT credential_id FROM passkey_credentials WHERE member_id=?", (member["id"],)
+        ).fetchall()
+        options = generate_registration_options(
+            rp_id=passkey_settings()[0],
+            rp_name="VitaMine",
+            user_id=str(member["id"]).encode("utf-8"),
+            user_name=str(member["email"]),
+            user_display_name=str(member["display_name"] or member["email"]),
+            exclude_credentials=[
+                PublicKeyCredentialDescriptor(id=unbase64url(row["credential_id"])) for row in credentials
+            ],
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.PREFERRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+            ),
+        )
+        challenge_id = store_passkey_challenge(con, member["id"], "register", options.challenge)
+    return {"challenge_id": challenge_id, "options": json.loads(options_to_json(options))}
+
+
+@app.post("/api/account/passkeys/register/complete")
+def complete_passkey_registration(
+    payload: PasskeyResponse,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, bool]:
+    from webauthn import verify_registration_response
+
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    with connect() as con:
+        challenge = consume_passkey_challenge(con, payload.challenge_id, "register")
+        if challenge["member_id"] != member["id"]:
+            raise HTTPException(status_code=403, detail="This passkey request belongs to another account.")
+        try:
+            verified = verify_registration_response(
+                credential=payload.credential,
+                expected_challenge=unbase64url(challenge["challenge"]),
+                expected_rp_id=passkey_settings()[0],
+                expected_origin=passkey_settings()[1],
+                require_user_verification=True,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Passkey registration could not be verified.") from exc
+        credential_id = base64url(verified.credential_id)
+        transports = payload.credential.get("response", {}).get("transports", [])
+        try:
+            con.execute(
+                """
+                INSERT INTO passkey_credentials
+                  (credential_id, member_id, public_key, sign_count, transports_json, label, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    credential_id, member["id"], verified.credential_public_key,
+                    int(verified.sign_count), json.dumps(transports), payload.label.strip() or "Passkey", utc_now(),
+                ),
+            )
+        except Exception as exc:
+            if not is_unique_violation(exc):
+                raise
+            raise HTTPException(status_code=409, detail="This passkey is already registered.") from exc
+    return {"ok": True}
+
+
+@app.post("/api/account/passkeys/login/options")
+def passkey_login_options(payload: PasskeyEmail, request: Request) -> dict[str, Any]:
+    from webauthn import generate_authentication_options, options_to_json
+    from webauthn.helpers.structs import PublicKeyCredentialDescriptor, UserVerificationRequirement
+
+    email = normalize_email(payload.email)
+    with connect() as con:
+        enforce_login_rate_limit(con, request, email)
+        member = con.execute(
+            "SELECT * FROM members WHERE email=? AND revoked_at IS NULL AND email_verified_at IS NOT NULL",
+            (email,),
+        ).fetchone()
+        credentials = [] if member is None else con.execute(
+            "SELECT * FROM passkey_credentials WHERE member_id=?", (member["id"],)
+        ).fetchall()
+        if not credentials:
+            raise HTTPException(status_code=404, detail="No passkey is registered for this account.")
+        options = generate_authentication_options(
+            rp_id=passkey_settings()[0],
+            allow_credentials=[
+                PublicKeyCredentialDescriptor(id=unbase64url(row["credential_id"])) for row in credentials
+            ],
+            user_verification=UserVerificationRequirement.REQUIRED,
+        )
+        challenge_id = store_passkey_challenge(con, member["id"], "authenticate", options.challenge)
+    return {"challenge_id": challenge_id, "options": json.loads(options_to_json(options))}
+
+
+@app.post("/api/account/passkeys/login/complete")
+def complete_passkey_login(payload: PasskeyResponse, request: Request) -> JSONResponse:
+    from webauthn import verify_authentication_response
+
+    credential_id = str(payload.credential.get("id", ""))
+    with connect() as con:
+        challenge = consume_passkey_challenge(con, payload.challenge_id, "authenticate")
+        credential = con.execute(
+            "SELECT * FROM passkey_credentials WHERE credential_id=? AND member_id=? FOR UPDATE",
+            (credential_id, challenge["member_id"]),
+        ).fetchone()
+        if credential is None:
+            raise HTTPException(status_code=401, detail="This passkey is not registered.")
+        try:
+            verified = verify_authentication_response(
+                credential=payload.credential,
+                expected_challenge=unbase64url(challenge["challenge"]),
+                expected_rp_id=passkey_settings()[0],
+                expected_origin=passkey_settings()[1],
+                credential_public_key=bytes(credential["public_key"]),
+                credential_current_sign_count=int(credential["sign_count"]),
+                require_user_verification=True,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail="Passkey sign-in could not be verified.") from exc
+        now = utc_now()
+        con.execute(
+            "UPDATE passkey_credentials SET sign_count=?, last_used_at=? WHERE credential_id=?",
+            (int(verified.new_sign_count), now, credential_id),
+        )
+        token = issue_device_credential(con, challenge["member_id"])
+        con.execute("UPDATE members SET last_seen_at=? WHERE id=?", (now, challenge["member_id"]))
     response = JSONResponse({"ok": True})
     set_session_cookie(response, request, token)
     return response
+
+
+@app.get("/api/account/passkeys")
+def list_passkeys(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    with connect() as con:
+        rows = con.execute(
+            "SELECT credential_id, label, created_at, last_used_at FROM passkey_credentials "
+            "WHERE member_id=? ORDER BY created_at",
+            (member["id"],),
+        ).fetchall()
+    return {"passkeys": [dict(row) for row in rows]}
 
 
 @app.post("/api/account/logout")
@@ -3910,6 +4480,7 @@ def session(request: Request, authorization: str | None = Header(default=None)) 
     return {
         "member_id": member["id"],
         "account": bool(member["email"] and member["password_hash"]),
+        "email_verified": bool(member["email_verified_at"]),
         "email": member["email"] or "",
         "display_name": member["display_name"] or "",
         "database_count": int(database_count),

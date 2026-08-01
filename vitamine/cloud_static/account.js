@@ -11,6 +11,18 @@ const elements = {
   loginForm: $("#loginForm"),
   inviteForm: $("#inviteForm"),
   registerForm: $("#registerForm"),
+  verificationPending: $("#verificationPending"),
+  verificationEmail: $("#verificationEmail"),
+  verificationMessage: $("#verificationMessage"),
+  resendVerification: $("#resendVerification"),
+  passkeyLoginButton: $("#passkeyLoginButton"),
+  forgotPasswordButton: $("#forgotPasswordButton"),
+  passwordResetRequestForm: $("#passwordResetRequestForm"),
+  passwordResetRequestMessage: $("#passwordResetRequestMessage"),
+  passwordResetForm: $("#passwordResetForm"),
+  passwordResetMessage: $("#passwordResetMessage"),
+  addPasskeyButton: $("#addPasskeyButton"),
+  passkeyMessage: $("#passkeyMessage"),
   loginMessage: $("#loginMessage"),
   inviteMessage: $("#inviteMessage"),
   registerMessage: $("#registerMessage"),
@@ -99,10 +111,79 @@ function showRegistration() {
   elements.registerForm.elements.email.focus();
 }
 
+function showVerificationPending(email) {
+  elements.authChoice.hidden = true;
+  elements.registerForm.hidden = true;
+  elements.verificationPending.hidden = false;
+  elements.verificationEmail.textContent = email;
+}
+
+function showPasswordResetRequest() {
+  elements.authChoice.hidden = true;
+  elements.registerForm.hidden = true;
+  elements.verificationPending.hidden = true;
+  elements.passwordResetForm.hidden = true;
+  elements.passwordResetRequestForm.hidden = false;
+  const loginEmail = elements.loginForm.elements.namedItem("email")?.value || "";
+  elements.passwordResetRequestForm.elements.namedItem("email").value = loginEmail;
+  elements.passwordResetRequestForm.elements.namedItem("email").focus();
+}
+
+function returnToLogin() {
+  elements.passwordResetRequestForm.hidden = true;
+  elements.passwordResetForm.hidden = true;
+  elements.verificationPending.hidden = true;
+  elements.registerForm.hidden = true;
+  elements.authChoice.hidden = false;
+  showAuthTab("login");
+}
+
 function showAuth() {
   elements.accountNav.hidden = true;
   elements.libraryView.hidden = true;
   elements.authView.hidden = false;
+}
+
+function bytesFromBase64url(value) {
+  const base64 = String(value).replaceAll("-", "+").replaceAll("_", "/");
+  const binary = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, "="));
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function base64urlFromBytes(value) {
+  const bytes = new Uint8Array(value || []);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function browserCredentialOptions(options) {
+  const converted = structuredClone(options);
+  converted.challenge = bytesFromBase64url(converted.challenge);
+  if (converted.user?.id) converted.user.id = bytesFromBase64url(converted.user.id);
+  for (const descriptor of converted.excludeCredentials || []) descriptor.id = bytesFromBase64url(descriptor.id);
+  for (const descriptor of converted.allowCredentials || []) descriptor.id = bytesFromBase64url(descriptor.id);
+  return converted;
+}
+
+function credentialPayload(credential) {
+  const response = credential.response;
+  const payload = {
+    id: credential.id,
+    rawId: base64urlFromBytes(credential.rawId),
+    type: credential.type,
+    response: { clientDataJSON: base64urlFromBytes(response.clientDataJSON) },
+    clientExtensionResults: credential.getClientExtensionResults(),
+  };
+  if (response.attestationObject) {
+    payload.response.attestationObject = base64urlFromBytes(response.attestationObject);
+    payload.response.transports = response.getTransports?.() || [];
+  } else {
+    payload.response.authenticatorData = base64urlFromBytes(response.authenticatorData);
+    payload.response.signature = base64urlFromBytes(response.signature);
+    payload.response.userHandle = response.userHandle ? base64urlFromBytes(response.userHandle) : null;
+  }
+  return payload;
 }
 
 function formatSize(bytes) {
@@ -395,7 +476,7 @@ elements.registerForm.addEventListener("submit", async (event) => {
   }
   setBusy(elements.registerForm, true);
   try {
-    await api("/api/account/register", {
+    const result = await api("/api/account/register", {
       method: "POST",
       body: JSON.stringify({
         display_name: values.get("display_name"),
@@ -403,11 +484,71 @@ elements.registerForm.addEventListener("submit", async (event) => {
         password,
       }),
     });
-    await loadLibrary();
+    showVerificationPending(result.account.email);
   } catch (error) {
     elements.registerMessage.textContent = error.message;
   } finally {
     setBusy(elements.registerForm, false);
+  }
+});
+
+elements.resendVerification.addEventListener("click", async () => {
+  elements.resendVerification.disabled = true;
+  elements.verificationMessage.textContent = "";
+  try {
+    await api("/api/account/resend-verification", { method: "POST" });
+    elements.verificationMessage.textContent = "A new confirmation email was sent.";
+  } catch (error) {
+    elements.verificationMessage.textContent = error.message;
+  } finally {
+    elements.resendVerification.disabled = false;
+  }
+});
+
+elements.forgotPasswordButton.addEventListener("click", showPasswordResetRequest);
+document.querySelectorAll("[data-back-to-login]").forEach((button) => button.addEventListener("click", returnToLogin));
+
+elements.passwordResetRequestForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = String(elements.passwordResetRequestForm.elements.namedItem("email")?.value || "").trim();
+  setBusy(elements.passwordResetRequestForm, true);
+  elements.passwordResetRequestMessage.textContent = "";
+  try {
+    await api("/api/account/password-reset/request", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    elements.passwordResetRequestMessage.textContent = "If that verified account exists, a reset link is on its way.";
+  } catch (error) {
+    elements.passwordResetRequestMessage.textContent = error.message;
+  } finally {
+    setBusy(elements.passwordResetRequestForm, false);
+  }
+});
+
+elements.passwordResetForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const values = new FormData(elements.passwordResetForm);
+  const password = String(values.get("password") || "");
+  elements.passwordResetMessage.textContent = "";
+  if (password !== values.get("password_confirmation")) {
+    elements.passwordResetMessage.textContent = "The passwords do not match.";
+    return;
+  }
+  setBusy(elements.passwordResetForm, true);
+  try {
+    const token = new URL(window.location.href).searchParams.get("password_reset") || "";
+    await api("/api/account/password-reset/complete", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    });
+    window.history.replaceState(null, "", "/");
+    returnToLogin();
+    elements.loginMessage.textContent = "Password changed. Sign in with your new password.";
+  } catch (error) {
+    elements.passwordResetMessage.textContent = error.message;
+  } finally {
+    setBusy(elements.passwordResetForm, false);
   }
 });
 
@@ -420,15 +561,70 @@ elements.loginForm.addEventListener("submit", async (event) => {
   setBusy(elements.loginForm, true);
   elements.loginMessage.textContent = "";
   try {
-    await api("/api/account/login", {
+    const result = await api("/api/account/login", {
       method: "POST",
       body: JSON.stringify({ email, password }),
+    });
+    if (result.email_verification_required) showVerificationPending(result.email);
+    else await loadLibrary();
+  } catch (error) {
+    elements.loginMessage.textContent = error.message;
+  } finally {
+    setBusy(elements.loginForm, false);
+  }
+});
+
+elements.passkeyLoginButton.addEventListener("click", async () => {
+  const email = String(elements.loginForm.elements.namedItem("email")?.value || "").trim();
+  elements.loginMessage.textContent = "";
+  if (!email) {
+    elements.loginMessage.textContent = "Enter your email address first.";
+    return;
+  }
+  if (!window.PublicKeyCredential) {
+    elements.loginMessage.textContent = "Passkeys are not supported by this browser.";
+    return;
+  }
+  setBusy(elements.loginForm, true);
+  try {
+    const request = await api("/api/account/passkeys/login/options", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+    const credential = await navigator.credentials.get({ publicKey: browserCredentialOptions(request.options) });
+    if (!credential) throw new Error("Passkey sign-in was cancelled.");
+    await api("/api/account/passkeys/login/complete", {
+      method: "POST",
+      body: JSON.stringify({ challenge_id: request.challenge_id, credential: credentialPayload(credential) }),
     });
     await loadLibrary();
   } catch (error) {
     elements.loginMessage.textContent = error.message;
   } finally {
     setBusy(elements.loginForm, false);
+  }
+});
+
+elements.addPasskeyButton.addEventListener("click", async () => {
+  elements.passkeyMessage.textContent = "";
+  if (!window.PublicKeyCredential) {
+    elements.passkeyMessage.textContent = "Passkeys are not supported by this browser.";
+    return;
+  }
+  elements.addPasskeyButton.disabled = true;
+  try {
+    const request = await api("/api/account/passkeys/register/options", { method: "POST" });
+    const credential = await navigator.credentials.create({ publicKey: browserCredentialOptions(request.options) });
+    if (!credential) throw new Error("Passkey creation was cancelled.");
+    await api("/api/account/passkeys/register/complete", {
+      method: "POST",
+      body: JSON.stringify({ challenge_id: request.challenge_id, credential: credentialPayload(credential) }),
+    });
+    elements.passkeyMessage.textContent = "Passkey added. You can now use it to sign in.";
+  } catch (error) {
+    elements.passkeyMessage.textContent = error.message;
+  } finally {
+    elements.addPasskeyButton.disabled = false;
   }
 });
 
@@ -542,19 +738,72 @@ function initializeFeatureStory() {
     scrollFrame = null;
     if (reducedMotion) return;
     const problemProgress = scrollProgress(problemChapter);
-    problemChapter?.querySelectorAll("[data-scroll-stage]").forEach((item) => {
-      const stage = Number(item.dataset.scrollStage);
-      const localProgress = stagedProgress(problemProgress, (stage - 1) * .2);
-      item.style.opacity = String(localProgress);
-      item.style.transform = `translateY(${(1 - localProgress) * 48}px) scale(${.94 + (.06 * localProgress)})`;
+    const problemVisual = problemChapter?.querySelector(".request-visual");
+    const visualWidth = problemVisual?.clientWidth || 620;
+    const requestTargets = [
+      [-.34, .08], [.06, .12], [-.14, .22], [.26, .25], [-.37, .34],
+      [.17, .38], [-.03, .46], [.32, .5], [-.24, .56], [.09, .61],
+    ];
+    problemChapter?.querySelectorAll("[data-request-index]").forEach((item) => {
+      const index = Number(item.dataset.requestIndex);
+      const localProgress = stagedProgress(problemProgress, .02 + (index * .06), .13);
+      const resolveProgress = stagedProgress(problemProgress, .68 + (index * .025), .14);
+      const easedDrop = 1 - ((1 - localProgress) ** 3);
+      const [xRatio, yRatio] = requestTargets[index];
+      const xLimit = Math.max(0, (visualWidth - item.offsetWidth) / 2 - 10);
+      const x = Math.max(-xLimit, Math.min(xLimit, xRatio * visualWidth));
+      const y = -190 + (easedDrop * (190 + (yRatio * 500)));
+      item.style.opacity = String(localProgress * (1 - resolveProgress));
+      item.style.filter = `blur(${resolveProgress * 8}px)`;
+      item.style.transform = `translate(calc(-50% + ${x}px), ${y - (resolveProgress * 70)}px) rotate(${(index % 2 ? 1 : -1) * (2 + (index % 3))}deg) scale(${1 - (resolveProgress * .35)})`;
     });
-    problemChapter?.querySelectorAll(".paper-pile").forEach((pile, index) => {
-      const pileProgress = stagedProgress(problemProgress, .12 + (index * .1), .55);
-      pile.style.transform = `scaleY(${.55 + (.45 * pileProgress)})`;
-      pile.style.transformOrigin = "bottom";
+    const boostProgress = stagedProgress(problemProgress, .64, .18);
+    problemChapter?.querySelectorAll(".sweat-drop").forEach((drop, index) => {
+      const localProgress = stagedProgress(problemProgress, .18 + (index * .1), .22);
+      drop.style.opacity = String(Math.sin(localProgress * Math.PI) * (1 - boostProgress));
+      drop.style.transform = `translateY(${localProgress * 22}px) rotate(25deg)`;
     });
-    const stressLines = problemChapter?.querySelector(".stress-line");
-    if (stressLines) stressLines.style.opacity = String(stagedProgress(problemProgress, .35, .25));
+    problemChapter?.querySelectorAll(".typing-spark").forEach((spark, index) => {
+      spark.style.opacity = String(.25 + (.75 * Math.abs(Math.sin((problemProgress * (45 + (boostProgress * 65))) + index))));
+    });
+    problemChapter?.querySelectorAll(".printed-cv").forEach((paper, index) => {
+      const localProgress = stagedProgress(problemProgress, .12 + (index * .18), .2);
+      const resolveProgress = stagedProgress(problemProgress, .75 + (index * .035), .14);
+      paper.style.opacity = String(localProgress * (1 - resolveProgress));
+      paper.style.filter = `blur(${resolveProgress * 7}px)`;
+      paper.style.transform = `translate(${-95 - (index * 58)}px, ${(localProgress * 76) - (resolveProgress * 55)}px) rotate(${(index - 1) * 5}deg) scale(${1 - (resolveProgress * .3)})`;
+    });
+    problemChapter?.querySelectorAll(".paper-avalanche i").forEach((paper, index) => {
+      const localProgress = stagedProgress(problemProgress, .52 + (index * .025), .16);
+      const resolveProgress = stagedProgress(problemProgress, .7 + (index * .025), .16);
+      paper.style.opacity = String(localProgress * (1 - resolveProgress));
+      paper.style.bottom = `${-105 + (localProgress * (70 + ((index % 3) * 22)))}px`;
+      paper.style.filter = `blur(${resolveProgress * 8}px)`;
+      const rotation = [-9, 7, -4, 8, -7, 5][index] || 0;
+      paper.style.transform = `translateY(${-resolveProgress * 60}px) rotate(${rotation}deg) scale(${1 - (resolveProgress * .35)})`;
+    });
+    const researcher = problemChapter?.querySelector(".researcher-vector");
+    if (researcher) {
+      researcher.style.filter = `drop-shadow(0 0 ${boostProgress * 24}px rgba(43,184,139,${boostProgress * .7}))`;
+      researcher.style.transform = `translateY(${Math.sin(problemProgress * (70 + boostProgress * 80)) * Math.min(problemProgress, .7) * 1.5}px) scale(${1 + (boostProgress * .025)})`;
+    }
+    const bottle = problemChapter?.querySelector(".vitamine-bottle");
+    const drinkProgress = stagedProgress(problemProgress, .55, .14);
+    if (bottle) {
+      bottle.style.opacity = String(Math.sin(Math.min(1, drinkProgress) * Math.PI) || (drinkProgress < 1 ? drinkProgress : 0));
+      bottle.style.transform = `translate(${-drinkProgress * visualWidth * .36}px, ${-drinkProgress * 82}px) rotate(${-8 - (drinkProgress * 58)}deg) scale(${1 - (drinkProgress * .18)})`;
+    }
+    problemChapter?.querySelectorAll(".vitamine-energy i").forEach((ring, index) => {
+      const ringProgress = stagedProgress(problemProgress, .63 + (index * .035), .18);
+      ring.style.opacity = String(Math.sin(ringProgress * Math.PI) * .8);
+      ring.style.transform = `scale(${.65 + (ringProgress * .55)})`;
+    });
+    const boostMessage = problemChapter?.querySelector(".boost-message");
+    if (boostMessage) {
+      const messageProgress = stagedProgress(problemProgress, .88, .1);
+      boostMessage.style.opacity = String(messageProgress);
+      boostMessage.style.transform = `translateY(${(1 - messageProgress) * 18}px)`;
+    }
 
     const importProgress = scrollProgress(importChapter);
     const importDocument = importChapter?.querySelector(".import-document");
@@ -570,9 +819,9 @@ function initializeFeatureStory() {
       dot.style.transform = `translateX(${localProgress * 170}px) scale(${.7 + (.3 * localProgress)})`;
     });
     importChapter?.querySelectorAll(".data-chip").forEach((chip, index) => {
-      const localProgress = stagedProgress(importProgress, .58 + (index * .07), .18);
+      const localProgress = stagedProgress(importProgress, .5 + (index * .035), .22);
       chip.style.opacity = String(localProgress);
-      chip.style.transform = `translateY(${(1 - localProgress) * 22}px)`;
+      chip.style.transform = `translateY(${(1 - localProgress) * 26}px) scale(${.9 + (.1 * localProgress)})`;
     });
     const database = importChapter?.querySelector(".database-cylinder");
     if (database) {
@@ -582,10 +831,26 @@ function initializeFeatureStory() {
     }
 
     const syncProgress = scrollProgress(syncChapter);
+    const syncStarts = [0, .13, .06, .21];
     syncChapter?.querySelectorAll(".sync-lines [data-sync-source]").forEach((line) => {
       const source = Number(line.dataset.syncSource);
-      const localProgress = stagedProgress(syncProgress, (source - 1) * .18, .3);
+      const localProgress = stagedProgress(syncProgress, syncStarts[source - 1], .42);
       line.style.strokeDashoffset = String(1 - localProgress);
+      line.style.strokeWidth = String(2.5 + (Math.sin(localProgress * Math.PI * 5) * .65));
+    });
+    syncChapter?.querySelectorAll("[data-sync-pulse]").forEach((pulse) => {
+      const source = Number(pulse.dataset.syncPulse);
+      const path = syncChapter.querySelector(`#syncPath${source}`);
+      const localProgress = stagedProgress(syncProgress, syncStarts[source - 1] + .05, .4);
+      if (!path || localProgress <= 0 || localProgress >= 1) {
+        pulse.style.opacity = "0";
+        return;
+      }
+      const point = path.getPointAtLength(path.getTotalLength() * localProgress);
+      pulse.setAttribute("cx", String(point.x));
+      pulse.setAttribute("cy", String(point.y));
+      pulse.style.opacity = String(Math.min(1, Math.sin(localProgress * Math.PI) * 1.8));
+      pulse.setAttribute("r", String(5 + (Math.sin(localProgress * Math.PI * 4) * 1.2)));
     });
     syncChapter?.querySelectorAll(".cv-document-icon i").forEach((line, index) => {
       const localProgress = stagedProgress(syncProgress, .18 + (index * .16), .22);
@@ -655,6 +920,9 @@ function initializeFeatureStory() {
     revealItems.forEach((item) => item.classList.add("is-visible"));
     if (prompt) prompt.textContent = promptText;
     document.querySelectorAll("[data-scroll-stage], .data-chip, [data-profile-row]").forEach((item) => { item.style.opacity = "1"; item.style.transform = "none"; });
+    document.querySelectorAll("[data-request-index], .sweat-drop, .paper-avalanche i").forEach((item) => { item.style.opacity = "0"; });
+    const boostMessage = $(".boost-message");
+    if (boostMessage) boostMessage.style.opacity = "1";
     const importDocument = $(".import-document");
     if (importDocument) { importDocument.style.opacity = "1"; importDocument.style.transform = "none"; }
     document.querySelectorAll(".sync-lines path, .chart-line").forEach((line) => { line.style.strokeDashoffset = "0"; });
@@ -684,8 +952,23 @@ function initializeFeatureStory() {
 
   $("#returnToTop")?.addEventListener("click", (event) => {
     event.preventDefault();
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    const root = document.documentElement;
+    root.classList.add("returning-home");
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    const returnHome = () => {
+      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+      root.scrollTop = 0;
+      document.body.scrollTop = 0;
+    };
+    returnHome();
+    window.requestAnimationFrame(() => {
+      returnHome();
+      window.requestAnimationFrame(returnHome);
+    });
+    window.setTimeout(() => {
+      returnHome();
+      root.classList.remove("returning-home");
+    }, 450);
   });
 }
 
@@ -693,14 +976,31 @@ initializeFeatureStory();
 
 (async function initialize() {
   showAuth();
+  const initialUrl = new URL(window.location.href);
+  const confirmation = initialUrl.searchParams.get("email_confirmation");
+  if (initialUrl.searchParams.get("password_reset")) {
+    elements.authChoice.hidden = true;
+    elements.registerForm.hidden = true;
+    elements.verificationPending.hidden = true;
+    elements.passwordResetRequestForm.hidden = true;
+    elements.passwordResetForm.hidden = false;
+    elements.passwordResetForm.elements.namedItem("password").focus();
+    return;
+  }
   try {
     const session = await api("/api/session");
     if (session.account) {
-      await loadLibrary();
+      if (session.email_verified) {
+        await loadLibrary();
+        if (confirmation === "verified") elements.libraryMessage.textContent = "Email address confirmed.";
+      } else {
+        showVerificationPending(session.email);
+      }
     } else {
       showRegistration();
     }
   } catch {
     showAuthTab("login");
+    if (confirmation === "invalid") elements.loginMessage.textContent = "That confirmation link is invalid or expired.";
   }
 })();
