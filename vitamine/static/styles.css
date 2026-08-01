@@ -1994,6 +1994,20 @@ label.invalid input {
   line-height: 1.3;
 }
 
+.contentProfileBadge {
+  display: inline-flex;
+  width: fit-content;
+  margin-top: 7px;
+  border: 1px solid #9dbbb6;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #edf7f5;
+  color: #215f57;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
 .formatCardBody {
   min-width: 0;
   display: flex;

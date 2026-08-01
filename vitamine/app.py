@@ -173,6 +173,24 @@ LONG_CV_PUBLICATION_CATEGORIES = {
 
 DEFAULT_LONG_CV_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
 EXPORT_FORMAT_CATALOG = STATIC / "export-formats.json"
+EXPORT_CONTENT_PROFILES = {
+    "long": {
+        "label": "Long CV",
+        "description": "Uses the comprehensive CV content selection.",
+    },
+    "short": {
+        "label": "Short CV",
+        "description": "Uses the selected-content Short CV routine.",
+    },
+    "one_page": {
+        "label": "One-page CV",
+        "description": "Uses the tightly selected one-page CV routine.",
+    },
+    "biosketch": {
+        "label": "Biosketch",
+        "description": "Uses biosketch-specific statements and contributions to science.",
+    },
+}
 EXPORT_PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
@@ -331,8 +349,19 @@ def export_format_catalog() -> list[dict[str, Any]]:
         format_id = str(item.get("id") or "").strip()
         if not format_id or format_id in seen:
             continue
+        content_profile = str(item.get("content_profile") or "").strip()
+        if content_profile not in EXPORT_CONTENT_PROFILES:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Export format {format_id} does not declare one of the four supported content profiles.",
+            )
         seen.add(format_id)
-        valid.append(dict(item))
+        valid.append({
+            **item,
+            "content_profile": content_profile,
+            "content_profile_label": EXPORT_CONTENT_PROFILES[content_profile]["label"],
+            "content_profile_description": EXPORT_CONTENT_PROFILES[content_profile]["description"],
+        })
     return valid
 
 
@@ -3790,11 +3819,11 @@ def validate_export_plan(
     }
 
 
-def apply_export_plan(con: sqlite3.Connection, plan: dict[str, Any], exporter: str) -> None:
+def apply_export_plan(con: sqlite3.Connection, plan: dict[str, Any], content_profile: str) -> None:
     selected = [int(value) for value in plan.get("selected_publication_ids") or []]
     limit = max(1, min(50, int(plan.get("max_publications") or len(selected) or 10)))
-    profile = "ultrashort" if exporter == "ultrashort" else "short"
-    if exporter in {"short", "ultrashort"}:
+    profile = "ultrashort" if content_profile == "one_page" else "short"
+    if content_profile in {"short", "one_page"}:
         config = validate_export_profile(profile)
         con.execute(
             """
@@ -4918,7 +4947,7 @@ def export_formats() -> dict[str, Any]:
     formats = export_format_catalog()
     installed = set(installed_export_format_ids(formats))
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "formats": [{**item, "installed": item["id"] in installed} for item in formats],
     }
 
@@ -4941,7 +4970,8 @@ def get_export_prompt_plan(format_id: str) -> dict[str, Any]:
 async def create_export_prompt_plan(format_id: str, request: Request) -> dict[str, Any]:
     item = export_format_by_id(format_id, export_format_catalog())
     exporter = str(item.get("exporter") or "")
-    if exporter not in {"long", "short", "ultrashort"}:
+    content_profile = str(item["content_profile"])
+    if not exporter or content_profile not in {"long", "short", "one_page"}:
         raise HTTPException(status_code=422, detail="Prompt planning is currently available for the formal, short, and one-page Word exporters.")
     payload = await request.json()
     prompt = str(payload.get("prompt") or "").strip()
@@ -4983,7 +5013,7 @@ Safety and fidelity rules:
 - Briefly explain the interpretation and disclose ambiguity in warnings.
 
 FORMAT:
-{json.dumps({"id": item["id"], "name": item["name"], "length": item.get("length"), "focus": item.get("focus")}, ensure_ascii=False)}
+{json.dumps({"id": item["id"], "name": item["name"], "content_profile": content_profile, "length": item.get("length"), "focus": item.get("focus")}, ensure_ascii=False)}
 
 USER_INSTRUCTIONS:
 {prompt}
@@ -4998,8 +5028,8 @@ CANDIDATE_PUBLICATIONS:
     if warning:
         plan["warnings"].append(warning)
     with connect() as con:
-        if exporter in {"short", "ultrashort"}:
-            profile = "ultrashort" if exporter == "ultrashort" else "short"
+        if content_profile in {"short", "one_page"}:
+            profile = "ultrashort" if content_profile == "one_page" else "short"
             config = validate_export_profile(profile)
             previous_settings = row_dict(
                 con.execute("SELECT publication_limit, authorship_filter FROM export_settings WHERE profile=?", (profile,)).fetchone()
@@ -5022,7 +5052,7 @@ CANDIDATE_PUBLICATIONS:
                 **previous_settings,
                 "publication_ids": [int(row["id"]) for row in previous_rows],
             }
-        apply_export_plan(con, plan, exporter)
+        apply_export_plan(con, plan, content_profile)
         set_setting(con, export_plan_setting_key(format_id), json.dumps(plan, ensure_ascii=False))
         con.commit()
     return {"ok": True, "active": True, "provider": settings.get("provider"), "plan": plan}
@@ -5037,10 +5067,10 @@ def clear_export_prompt_plan(format_id: str) -> dict[str, Any]:
             plan = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
             plan = {}
-        exporter = str(item.get("exporter") or "")
+        content_profile = str(item["content_profile"])
         previous = plan.get("previous_selection") if isinstance(plan, dict) else None
-        if exporter in {"short", "ultrashort"} and isinstance(previous, dict):
-            profile = "ultrashort" if exporter == "ultrashort" else "short"
+        if content_profile in {"short", "one_page"} and isinstance(previous, dict):
+            profile = "ultrashort" if content_profile == "one_page" else "short"
             config = validate_export_profile(profile)
             con.execute(f"UPDATE publications SET {config['flag']}=0, {config['order']}=NULL")
             for index, publication_id in enumerate(previous.get("publication_ids") or [], 1):
@@ -5946,15 +5976,16 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
     if format_id not in installed_export_format_ids(formats):
         raise HTTPException(status_code=409, detail="Install this format before exporting it.")
     exporter = item.get("exporter")
+    content_profile = item["content_profile"]
     builders = {
-        "ultrashort": build_ultrashort_tabular_action,
+        "one_page": build_ultrashort_tabular_action,
         "short": build_short_action,
         "long": build_long_action,
         "biosketch": build_biosketch_action,
     }
-    if exporter not in builders:
+    if not exporter:
         raise HTTPException(status_code=422, detail="This local format is a preview package; its Word exporter is not implemented yet.")
-    return builders[exporter](lang)
+    return builders[content_profile](lang)
 
 
 @app.post("/api/actions/build-harvard")

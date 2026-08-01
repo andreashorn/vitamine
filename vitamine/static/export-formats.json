@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "formats": [
     {
       "id": "vitamine.one-page-scientific",
@@ -10,6 +10,7 @@
       "audience": "Introductions, nominations, speaker dossiers, and applications that explicitly ask for a one-page academic CV.",
       "preview": "/static/export-previews/one-page-scientific.svg",
       "preinstalled": true,
+      "content_profile": "one_page",
       "exporter": "ultrashort",
       "quality": {
         "key": "word_ready",
@@ -33,6 +34,7 @@
       "audience": "Academic applications, committee packets, and collaborations where a full dossier would be excessive.",
       "preview": "/static/export-previews/short-academic.svg",
       "preinstalled": true,
+      "content_profile": "short",
       "exporter": "short",
       "quality": {
         "key": "experimental",
@@ -56,6 +58,7 @@
       "audience": "Medical-school promotion, senior faculty review, and archival academic dossiers.",
       "preview": "/static/export-previews/formal-academic.svg",
       "preinstalled": true,
+      "content_profile": "long",
       "exporter": "long",
       "quality": {
         "key": "word_ready",
@@ -79,6 +82,7 @@
       "audience": "Internal drafting and reuse of biosketch material.",
       "preview": "/static/export-previews/nih-biosketch.svg",
       "preinstalled": true,
+      "content_profile": "biosketch",
       "exporter": "biosketch",
       "quality": {
         "key": "reference_only",
@@ -102,6 +106,7 @@
       "audience": "German Research Foundation proposals and similar European funding applications.",
       "preview": "/static/export-previews/dfg-research.svg",
       "preinstalled": false,
+      "content_profile": "short",
       "exporter": null,
       "quality": {
         "key": "preview",
@@ -125,6 +130,7 @@
       "audience": "European Research Council applications and other excellence-focused funding calls.",
       "preview": "/static/export-previews/erc-track-record.svg",
       "preinstalled": false,
+      "content_profile": "short",
       "exporter": null,
       "quality": {
         "key": "preview",
@@ -148,6 +154,7 @@
       "audience": "UKRI-style applications, interdisciplinary teams, and funders using narrative assessment.",
       "preview": "/static/export-previews/r4ri-narrative.svg",
       "preinstalled": false,
+      "content_profile": "short",
       "exporter": null,
       "quality": {
         "key": "preview",
@@ -171,6 +178,7 @@
       "audience": "Lab websites, invited profiles, fellowships, and modern academic job applications.",
       "preview": "/static/export-previews/modern-publication-first.svg",
       "preinstalled": false,
+      "content_profile": "long",
       "exporter": null,
       "quality": {
         "key": "preview",

@@ -2218,7 +2218,7 @@ async function loadExportFormats() {
 }
 
 function promptCapableFormats() {
-  return state.exportFormats.filter((format) => format.installed && ["long", "short", "ultrashort"].includes(format.exporter));
+  return state.exportFormats.filter((format) => format.installed && format.exporter && ["long", "short", "one_page"].includes(format.content_profile));
 }
 
 function renderPromptExportFormats() {
@@ -2312,14 +2312,15 @@ async function clearPromptExportPlan() {
 }
 
 function renderLongPublicationCategories(settings = {}) {
-  const container = $("#longPublicationCategories");
-  if (!container) return;
+  const containers = $$(".longPublicationCategories");
+  if (!containers.length) return;
   const options = settings.long_cv_publication_category_options || [];
   const selected = new Set(settings.long_cv_publication_categories || []);
-  container.innerHTML = options.map((option) => `<label>
+  const markup = options.map((option) => `<label>
     <input type="checkbox" class="longPublicationCategory" value="${escapeHtml(option.key)}" ${selected.has(option.key) ? "checked" : ""}>
     ${escapeHtml(option.label)}
   </label>`).join("");
+  containers.forEach((container) => { container.innerHTML = markup; });
   $$(".longPublicationCategory").forEach((input) => {
     input.addEventListener("change", () => {
       state.exportSettings.long_cv_publication_categories = selectedLongPublicationCategories();
@@ -2356,6 +2357,7 @@ function exportFormatMatches(format, query) {
     format.name,
     format.summary,
     format.length,
+    format.content_profile_label,
     format.audience,
     ...(format.focus || []),
   ].join(" ").toLowerCase();
@@ -2367,6 +2369,12 @@ function exportFormatCard(format) {
   const source = format.source || {};
   const artifact = state.exportArtifacts[format.id] || {};
   const focus = (format.focus || []).map((item) => `<span>${escapeHtml(item)}</span>`).join("");
+  const profileLabel = format.content_profile_label || ({
+    long: "Long CV",
+    short: "Short CV",
+    one_page: "One-page CV",
+    biosketch: "Biosketch",
+  }[format.content_profile] || "");
   const sourceLink = String(source.url || "").startsWith("https://")
     ? `<a class="formatSourceLink" href="${escapeHtml(source.url)}" target="_blank" rel="noopener">Format guidance</a>`
     : "";
@@ -2383,10 +2391,10 @@ function exportFormatCard(format) {
   } else {
     actions = `<button class="formatActionButton formatInstallButton" data-format-id="${escapeHtml(format.id)}" type="button">Add format</button>`;
   }
-  const longOptions = format.installed && format.exporter === "long"
+  const longOptions = format.installed && format.content_profile === "long"
     ? `<details class="formatCardOptions">
         <summary>Content options</summary>
-        <div id="longPublicationCategories" class="checkboxStack compact"></div>
+        <div class="checkboxStack compact longPublicationCategories"></div>
       </details>`
     : "";
   return `<article class="formatCard ${format.installed ? "installed" : ""}">
@@ -2402,6 +2410,7 @@ function exportFormatCard(format) {
         ${format.preinstalled ? '<span class="defaultBadge">Included</span>' : ""}
       </div>
       <span class="formatLength">${escapeHtml(format.length || "")}</span>
+      <span class="contentProfileBadge" title="${escapeHtml(format.content_profile_description || "Controls which CV content-selection routine is used.")}">${escapeHtml(profileLabel)} content</span>
       <p>${escapeHtml(format.summary || "")}</p>
       <div class="formatFocus" aria-label="Focus">${focus}</div>
       ${longOptions}
@@ -2473,16 +2482,16 @@ async function buildExportFormat(formatId) {
   const format = state.exportFormats.find((item) => item.id === formatId);
   if (!format) return;
   const language = exportLanguage();
-  if (format.exporter === "long") await saveExportSettings();
+  if (format.content_profile === "long") await saveExportSettings();
   const legacyPaths = {
-    ultrashort: "/api/actions/build-ultrashort-tabular",
+    one_page: "/api/actions/build-ultrashort-tabular",
     short: "/api/actions/build-short",
     long: "/api/actions/build-long",
     biosketch: "/api/actions/build-biosketch",
   };
   const actionPath = state.exportFormatsApiAvailable
     ? `/api/actions/export/${encodeURIComponent(formatId)}`
-    : legacyPaths[format.exporter];
+    : legacyPaths[format.content_profile];
   if (!actionPath) return;
   $("#exportResult").hidden = false;
   $("#exportResultTitle").textContent = `Creating ${format.name}…`;
