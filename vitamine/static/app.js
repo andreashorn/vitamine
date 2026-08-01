@@ -2384,7 +2384,7 @@ function exportFormatCard(format) {
     const buildButton = format.exporter
       ? `<button class="formatActionButton formatBuildButton" data-format-id="${escapeHtml(format.id)}" type="button">${buildLabel}</button>`
       : `<button type="button" disabled title="The Word exporter has not been implemented yet">Export coming later</button>`;
-    const artifactLink = artifact.docx
+    const artifactLink = artifact.docx && !state.cloud.enabled
       ? `<a href="${escapeHtml(artifact.docx)}" title="${escapeHtml(artifact.docx_path || "")}" target="_blank" rel="noopener">Open last export</a>`
       : "";
     actions = `${buildButton}${artifactLink}<button class="formatActionButton quietButton formatRemoveButton" data-format-id="${escapeHtml(format.id)}" type="button">Remove</button>`;
@@ -2495,7 +2495,9 @@ async function buildExportFormat(formatId) {
   if (!actionPath) return;
   $("#exportResult").hidden = false;
   $("#exportResultTitle").textContent = `Creating ${format.name}…`;
-  $("#exportOutput").textContent = "The Word document will open when it is ready.";
+  $("#exportOutput").textContent = state.cloud.enabled
+    ? "The Word document will download when it is ready."
+    : "The Word document will open when it is ready.";
   $("#exportResultLink").hidden = true;
   let data;
   try {
@@ -2514,13 +2516,23 @@ async function buildExportFormat(formatId) {
   $("#exportResultTitle").textContent = `${format.name} is ready`;
   $("#exportOutput").textContent = data.docx_path ? data.docx_path.split("/").pop() : "Word document created";
   $("#exportResultLink").href = data.docx;
-  $("#exportResultLink").hidden = false;
+  $("#exportResultLink").hidden = state.cloud.enabled;
   openBuiltArtifact(data);
 }
 
 function openBuiltArtifact(data) {
   const href = data.docx;
   if (!href) return;
+  if (state.cloud.enabled) {
+    const download = document.createElement("a");
+    download.href = href;
+    download.download = data.docx_path?.split("/").pop() || "vitamine-export.docx";
+    download.hidden = true;
+    document.body.appendChild(download);
+    download.click();
+    download.remove();
+    return;
+  }
   window.open(href, "_blank", "noopener,width=980,height=760,left=0,top=0");
 }
 
