@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine — Academic CV manager</title>
-  <link rel="stylesheet" href="/assets/account.css?v=20260801-brand-size">
-  <script src="/assets/account.js?v=20260801-story-final" defer></script>
+  <link rel="stylesheet" href="/assets/account.css?v=20260801-paypal-beta">
+  <script src="/assets/account.js?v=20260801-paypal-beta" defer></script>
 </head>
 <body id="top">
   <header class="site-header">
@@ -372,8 +372,14 @@
           <div class="premium-balance">
             <span>Current balance</span>
             <strong id="premiumBalance">$—</strong>
+            <a id="paypalTopupLink" class="paypal-topup-button" href="#" target="_blank" rel="noopener" hidden>Add $5 with PayPal</a>
           </div>
         </div>
+        <div id="paypalTopupConfirm" class="paypal-topup-confirm" hidden>
+          <p>After sending the PayPal payment, confirm it here to add the credit immediately.</p>
+          <button id="paypalTopupConfirmButton" class="secondary-button" type="button">I've paid — add $5</button>
+        </div>
+        <p id="paypalTopupMessage" class="message" role="status"></p>
         <div class="premium-history">
           <div>
             <h3>Last 30 days</h3>
@@ -384,7 +390,7 @@
             <div id="premiumRecent" class="premium-recent"></div>
           </div>
         </div>
-        <p class="premium-note">The account debit is currently 2× the underlying OpenAI API cost. Top-ups and payment enforcement are not enabled yet.</p>
+        <p class="premium-note">The account debit is currently 2× the underlying OpenAI API cost. PayPal top-ups in this trusted beta are credited from your confirmation.</p>
       </section>
 
       <section class="account-security" aria-labelledby="accountSecurityTitle">

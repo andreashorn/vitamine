@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import parse_qs, quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 import httpx
 from cryptography.fernet import Fernet
@@ -85,13 +85,14 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 10
+CLOUD_SCHEMA_VERSION = 11
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
 PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
 PASSKEY_RP_ID = "vitamine.cloud"
 PASSKEY_ORIGIN = "https://vitamine.cloud"
 INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000
+PAYPAL_BETA_TOPUP_MICROUSD = 5_000_000
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -277,6 +278,19 @@ CREATE TABLE IF NOT EXISTS premium_account_transactions (
 
 CREATE INDEX IF NOT EXISTS idx_premium_transactions_member_created
 ON premium_account_transactions(member_id, created_at);
+
+CREATE TABLE IF NOT EXISTS paypal_beta_topups (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    claim_key_hash TEXT NOT NULL UNIQUE,
+    amount_microusd INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    confirmation_mode TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paypal_beta_topups_member_created
+ON paypal_beta_topups(member_id, created_at);
 
 CREATE TABLE IF NOT EXISTS hosted_cv_people (
     cv_id TEXT PRIMARY KEY REFERENCES account_databases(id) ON DELETE CASCADE,
@@ -553,6 +567,19 @@ CREATE TABLE IF NOT EXISTS premium_account_transactions (
 CREATE INDEX IF NOT EXISTS idx_premium_transactions_member_created
 ON premium_account_transactions(member_id, created_at);
 
+CREATE TABLE IF NOT EXISTS paypal_beta_topups (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    claim_key_hash TEXT NOT NULL UNIQUE,
+    amount_microusd BIGINT NOT NULL,
+    currency TEXT NOT NULL,
+    confirmation_mode TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paypal_beta_topups_member_created
+ON paypal_beta_topups(member_id, created_at);
+
 CREATE TABLE IF NOT EXISTS hosted_cv_people (
     cv_id TEXT PRIMARY KEY REFERENCES account_databases(id) ON DELETE CASCADE,
     full_name TEXT,
@@ -707,6 +734,10 @@ class PasswordResetRequest(BaseModel):
 class PasswordResetCompletion(BaseModel):
     token: str = Field(min_length=20, max_length=200)
     password: str = Field(min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+
+class PaypalBetaTopupClaim(BaseModel):
+    acknowledged_paid: bool
 
 
 class DatabaseRename(BaseModel):
@@ -1632,6 +1663,27 @@ def migration_010_zotero_oauth(con: GatewayConnection) -> None:
     )
 
 
+def migration_011_paypal_beta_topups(con: GatewayConnection) -> None:
+    amount_type = "BIGINT" if con.backend == "postgres" else "INTEGER"
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS paypal_beta_topups (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            claim_key_hash TEXT NOT NULL UNIQUE,
+            amount_microusd {amount_type} NOT NULL,
+            currency TEXT NOT NULL,
+            confirmation_mode TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_paypal_beta_topups_member_created "
+        "ON paypal_beta_topups(member_id, created_at)"
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1643,6 +1695,7 @@ CLOUD_MIGRATIONS = (
     (8, migration_008_premium_account_costs),
     (9, migration_009_verified_email_and_passkeys),
     (10, migration_010_zotero_oauth),
+    (11, migration_011_paypal_beta_topups),
 )
 
 
@@ -2537,6 +2590,37 @@ def normalize_idempotency_key(value: str | None) -> str | None:
             detail="Idempotency-Key must contain 8–200 letters, numbers, dots, colons, underscores, or hyphens.",
         )
     return key
+
+
+def paypal_beta_topup_config() -> dict[str, Any]:
+    payment_url = os.getenv("VITAMINE_PAYPAL_BETA_TOPUP_URL", "").strip()
+    parsed = urlparse(payment_url) if payment_url else None
+    enabled = bool(
+        parsed
+        and parsed.scheme == "https"
+        and (parsed.hostname or "").lower() in {"paypal.me", "www.paypal.com"}
+    )
+    return {
+        "enabled": enabled,
+        "payment_url": payment_url if enabled else "",
+        "amount_microusd": PAYPAL_BETA_TOPUP_MICROUSD,
+        "currency": "USD",
+        "confirmation_mode": "trusted_beta_self_attested",
+    }
+
+
+def premium_balance_microusd(con: GatewayConnection, member_id: str) -> int:
+    credit_row = con.execute(
+        "SELECT COALESCE(SUM(amount_microusd), 0) AS total "
+        "FROM premium_account_transactions WHERE member_id=?",
+        (member_id,),
+    ).fetchone()
+    usage_row = con.execute(
+        "SELECT COALESCE(SUM(charged_cost_microusd), 0) AS total "
+        "FROM llm_usage_events WHERE member_id=?",
+        (member_id,),
+    ).fetchone()
+    return int(credit_row["total"] or 0) - int(usage_row["total"] or 0)
 
 
 def background_job_fingerprint(kind: str, payload: dict[str, Any]) -> str:
@@ -4253,6 +4337,71 @@ def premium_account_summary(
         "daily": daily,
         "recent": recent,
         "enforcement_enabled": False,
+        "top_up": paypal_beta_topup_config(),
+    }
+
+
+@app.post("/api/account/premium-account/paypal-beta-topup")
+def confirm_paypal_beta_topup(
+    payload: PaypalBetaTopupClaim,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> dict[str, Any]:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    config = paypal_beta_topup_config()
+    if not config["enabled"]:
+        raise HTTPException(status_code=503, detail="PayPal beta top-ups are not currently available.")
+    if not payload.acknowledged_paid:
+        raise HTTPException(status_code=422, detail="Confirm that you sent the PayPal payment first.")
+    normalized_key = normalize_idempotency_key(idempotency_key)
+    if normalized_key is None:
+        raise HTTPException(status_code=400, detail="An Idempotency-Key is required.")
+    claim_key_hash = hashlib.sha256(
+        f"{member['id']}:{normalized_key}".encode("utf-8")
+    ).hexdigest()
+    claim_id = f"paypal-beta:{claim_key_hash}"
+    transaction_id = f"paypal-credit:{claim_key_hash}"
+    now = utc_now()
+    with connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        existing = con.execute(
+            "SELECT id FROM paypal_beta_topups WHERE claim_key_hash=?",
+            (claim_key_hash,),
+        ).fetchone()
+        if existing is None:
+            con.execute(
+                """
+                INSERT INTO paypal_beta_topups
+                  (id, member_id, claim_key_hash, amount_microusd, currency,
+                   confirmation_mode, created_at)
+                VALUES (?, ?, ?, ?, 'USD', 'trusted_beta_self_attested', ?)
+                """,
+                (claim_id, member["id"], claim_key_hash, PAYPAL_BETA_TOPUP_MICROUSD, now),
+            )
+            con.execute(
+                """
+                INSERT INTO premium_account_transactions
+                  (id, member_id, amount_microusd, kind, note, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    transaction_id,
+                    member["id"],
+                    PAYPAL_BETA_TOPUP_MICROUSD,
+                    "paypal_beta_topup",
+                    "Trusted-beta PayPal top-up (self-attested)",
+                    now,
+                ),
+            )
+        balance = premium_balance_microusd(con, member["id"])
+    return {
+        "ok": True,
+        "credited": existing is None,
+        "amount_microusd": PAYPAL_BETA_TOPUP_MICROUSD,
+        "currency": "USD",
+        "balance_microusd": balance,
+        "confirmation_mode": "trusted_beta_self_attested",
     }
 
 

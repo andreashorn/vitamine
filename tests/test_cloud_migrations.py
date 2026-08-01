@@ -74,6 +74,8 @@ class CloudMigrationTests(unittest.TestCase):
             }
         self.assertIn("background_jobs", tables)
         self.assertIn("llm_usage_events", tables)
+        self.assertIn("premium_account_transactions", tables)
+        self.assertIn("paypal_beta_topups", tables)
         self.assertIn("orcid_oauth_connections", tables)
         self.assertIn("zotero_oauth_requests", tables)
         self.assertIn("zotero_oauth_connections", tables)

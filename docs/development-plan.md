@@ -428,6 +428,8 @@ Evidence: pending
   account's own spending limit.
 - [x] Measure managed-LLM token usage and versioned API cost per account, with
   a visible non-enforcing Premium Features Account balance for the pilot.
+- [x] Offer invited testers a fixed, self-attested $5 PayPal top-up with
+  idempotent crediting and an append-only central audit record.
 - [ ] Tell users clearly when their uploaded CV content is sent to OpenAI and
   obtain the appropriate consent.
 - [ ] Enforce per-account and per-job quotas or balance limits; accounting and

@@ -479,8 +479,8 @@ Summarize credit, underlying cost, account debit, and balance for every opaque
 account ID with the same environment wrapper and
 `-m vitamine.scripts.manage_cloud premium-accounts`.
 
-Token counts are operational measurements only. VitaMine does not assign
-payment transactions or enforce quotas from this table during the pilot.
+Token counts are operational measurements only. VitaMine does not enforce
+quotas from this table during the pilot.
 
 Schema migration 8 adds the unencrypted central Premium Features Account
 ledger. Each existing and new account receives a $3.00 early-access credit.
@@ -495,10 +495,19 @@ remain visibly unpriced rather than receiving a guessed charge.
 These accounting tables are deliberately not application-encrypted: they
 contain opaque account/CV/job identifiers, model names, token counts, prices,
 and timestamps, but no prompts, CV text, model output, filename, or credential.
-The account library shows the user their balance, cumulative debit, underlying
-API cost, recent operations, and a 30-day spending chart. Negative balances do
-not prevent imports, enrichment, or other premium features until payment and
-enforcement are designed explicitly.
+The account library emphasizes the user's current balance and also shows recent
+operations and a 30-day spending chart. Negative balances do not prevent
+imports, enrichment, or other premium features during the pilot.
+
+Schema migration 11 adds an append-only audit table for the trusted-beta
+PayPal top-up flow. Set `VITAMINE_PAYPAL_BETA_TOPUP_URL` to a complete HTTPS
+PayPal.Me payment link to enable the authenticated UI; leaving it empty keeps
+the feature hidden. The fixed $5 top-up is intentionally self-attested: after
+opening PayPal, the tester selects “I've paid” and receives credit immediately.
+VitaMine does not call PayPal or independently verify settlement. Each browser
+confirmation uses an idempotency key, so a retry cannot credit the same claim
+twice. The audit table labels the confirmation mode explicitly and stores only
+the opaque account ID, hashed claim key, amount, currency, and timestamp.
 
 ## Public profiles
 

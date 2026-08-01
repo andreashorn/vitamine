@@ -44,12 +44,17 @@ const elements = {
   profileSetupMessage: $("#profileSetupMessage"),
   closeProfileSetup: $("#closeProfileSetup"),
   premiumBalance: $("#premiumBalance"),
+  paypalTopupLink: $("#paypalTopupLink"),
+  paypalTopupConfirm: $("#paypalTopupConfirm"),
+  paypalTopupConfirmButton: $("#paypalTopupConfirmButton"),
+  paypalTopupMessage: $("#paypalTopupMessage"),
   premiumChart: $("#premiumChart"),
   premiumRecent: $("#premiumRecent"),
 };
 let libraryPollTimer = null;
 let libraryPayload = null;
 let profileDatabase = null;
+let paypalTopupClaimKey = null;
 
 function apiErrorMessage(payload, status) {
   const detail = payload?.detail;
@@ -220,6 +225,15 @@ function premiumOperationLabel(value) {
 function renderPremiumAccount(payload) {
   elements.premiumBalance.textContent = formatUsd(payload.balance_microusd);
   elements.premiumBalance.classList.toggle("negative", Number(payload.balance_microusd) < 0);
+  const topUp = payload.top_up || {};
+  elements.paypalTopupLink.hidden = !topUp.enabled;
+  if (topUp.enabled) {
+    elements.paypalTopupLink.href = topUp.payment_url;
+    elements.paypalTopupLink.textContent = `Add ${formatUsd(topUp.amount_microusd)} with PayPal`;
+    elements.paypalTopupConfirmButton.textContent = `I've paid — add ${formatUsd(topUp.amount_microusd)}`;
+  } else {
+    elements.paypalTopupConfirm.hidden = true;
+  }
   const daily = payload.daily || [];
   const maximum = Math.max(1, ...daily.map((row) => Number(row.charged_microusd || 0)));
   elements.premiumChart.replaceChildren(...daily.map((row) => {
@@ -625,6 +639,35 @@ elements.addPasskeyButton.addEventListener("click", async () => {
     elements.passkeyMessage.textContent = error.message;
   } finally {
     elements.addPasskeyButton.disabled = false;
+  }
+});
+
+elements.paypalTopupLink.addEventListener("click", () => {
+  paypalTopupClaimKey = `paypal-${crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+  elements.paypalTopupConfirm.hidden = false;
+  elements.paypalTopupMessage.textContent = "";
+});
+
+elements.paypalTopupConfirmButton.addEventListener("click", async () => {
+  if (!paypalTopupClaimKey) return;
+  elements.paypalTopupConfirmButton.disabled = true;
+  elements.paypalTopupMessage.textContent = "Adding your credit…";
+  try {
+    const result = await api("/api/account/premium-account/paypal-beta-topup", {
+      method: "POST",
+      headers: { "Idempotency-Key": paypalTopupClaimKey },
+      body: JSON.stringify({ acknowledged_paid: true }),
+    });
+    elements.paypalTopupMessage.textContent = result.credited
+      ? `${formatUsd(result.amount_microusd)} added. Thank you.`
+      : "This payment confirmation was already credited.";
+    paypalTopupClaimKey = null;
+    elements.paypalTopupConfirm.hidden = true;
+    renderPremiumAccount(await api("/api/account/premium-account"));
+  } catch (error) {
+    elements.paypalTopupMessage.textContent = error.message;
+  } finally {
+    elements.paypalTopupConfirmButton.disabled = false;
   }
 });
 

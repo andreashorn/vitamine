@@ -102,6 +102,68 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(payload["credited_microusd"], 3_000_000)
         self.assertEqual(payload["charged_microusd"], 0)
         self.assertFalse(payload["enforcement_enabled"])
+        self.assertFalse(payload["top_up"]["enabled"])
+
+    def test_trusted_beta_paypal_topup_is_immediate_and_idempotent(self):
+        self.create_account()
+        with patch.dict(
+            os.environ,
+            {"VITAMINE_PAYPAL_BETA_TOPUP_URL": "https://paypal.me/tester/5USD"},
+        ):
+            summary = self.client.get("/api/account/premium-account")
+            self.assertTrue(summary.json()["top_up"]["enabled"])
+            self.assertEqual(summary.json()["top_up"]["amount_microusd"], 5_000_000)
+
+            headers = {"Idempotency-Key": "paypal-test-claim-1"}
+            first = self.client.post(
+                "/api/account/premium-account/paypal-beta-topup",
+                headers=headers,
+                json={"acknowledged_paid": True},
+            )
+            self.assertEqual(first.status_code, 200, first.text)
+            self.assertTrue(first.json()["credited"])
+            self.assertEqual(first.json()["balance_microusd"], 8_000_000)
+
+            repeated = self.client.post(
+                "/api/account/premium-account/paypal-beta-topup",
+                headers=headers,
+                json={"acknowledged_paid": True},
+            )
+            self.assertEqual(repeated.status_code, 200, repeated.text)
+            self.assertFalse(repeated.json()["credited"])
+            self.assertEqual(repeated.json()["balance_microusd"], 8_000_000)
+
+        with sqlite3.connect(self.db_path) as con:
+            claims = con.execute("SELECT COUNT(*) FROM paypal_beta_topups").fetchone()[0]
+            credits = con.execute(
+                "SELECT COUNT(*) FROM premium_account_transactions WHERE kind='paypal_beta_topup'"
+            ).fetchone()[0]
+        self.assertEqual(claims, 1)
+        self.assertEqual(credits, 1)
+
+    def test_paypal_topup_requires_configuration_confirmation_and_idempotency(self):
+        self.create_account()
+        unavailable = self.client.post(
+            "/api/account/premium-account/paypal-beta-topup",
+            headers={"Idempotency-Key": "paypal-test-claim-2"},
+            json={"acknowledged_paid": True},
+        )
+        self.assertEqual(unavailable.status_code, 503)
+        with patch.dict(
+            os.environ,
+            {"VITAMINE_PAYPAL_BETA_TOPUP_URL": "https://paypal.me/tester/5USD"},
+        ):
+            unconfirmed = self.client.post(
+                "/api/account/premium-account/paypal-beta-topup",
+                headers={"Idempotency-Key": "paypal-test-claim-3"},
+                json={"acknowledged_paid": False},
+            )
+            self.assertEqual(unconfirmed.status_code, 422)
+            missing_key = self.client.post(
+                "/api/account/premium-account/paypal-beta-topup",
+                json={"acknowledged_paid": True},
+            )
+            self.assertEqual(missing_key.status_code, 400)
 
     def test_new_account_requires_one_time_email_confirmation(self):
         _, token = self.redeem()
@@ -850,7 +912,7 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertEqual(page.headers["vary"], "Cookie")
         self.assertIn('autocomplete="username"', page.text)
-        self.assertIn("20260801-story-final", page.text)
+        self.assertIn("20260801-paypal-beta", page.text)
         self.assertIn("Stop recounting your career from scratch, over and over again.", page.text)
         self.assertIn('class="vitamine-bottle"', page.text)
         self.assertIn("Alex Researcher", page.text)
