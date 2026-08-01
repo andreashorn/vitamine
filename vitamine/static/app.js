@@ -2593,7 +2593,19 @@ async function buildExportFormat(formatId) {
   state.exportArtifacts[formatId] = data;
   renderExportFormats();
   $("#exportResultTitle").textContent = `${format.name} is ready`;
-  $("#exportOutput").textContent = data.docx_path ? data.docx_path.split("/").pop() : "Word document created";
+  const audit = data.quality_audit;
+  const auditNote = audit
+    ? audit.status === "failed"
+      ? " Final quality check could not run."
+      : ` Final quality check: ${audit.applied_count || 0} safe correction${audit.applied_count === 1 ? "" : "s"} applied${audit.review_count ? `; ${audit.review_count} suggestion${audit.review_count === 1 ? "" : "s"} flagged for review` : ""}.${audit.status === "deterministic_only" ? " The LLM audit was unavailable." : ""}`
+    : "";
+  const reviewDetails = (audit?.issues || [])
+    .filter((issue) => !issue.applied)
+    .slice(0, 3)
+    .map((issue) => issue.reason)
+    .filter(Boolean)
+    .join("; ");
+  $("#exportOutput").textContent = `${data.docx_path ? data.docx_path.split("/").pop() : "Word document created"}.${auditNote}${reviewDetails ? ` Review: ${reviewDetails}` : ""}`;
   $("#exportResultLink").href = data.docx;
   $("#exportResultLink").hidden = state.cloud.enabled;
   openBuiltArtifact(data);

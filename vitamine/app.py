@@ -84,6 +84,7 @@ from .enrichment_guard import (
     remember_rejection,
     review_nonpublications,
 )
+from .export_quality import run_export_quality_audit
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -6097,7 +6098,32 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
     }
     if not exporter:
         raise HTTPException(status_code=422, detail="This local format is a preview package; its Word exporter is not implemented yet.")
-    return builders[content_profile](lang)
+    response = builders[content_profile](lang)
+    if response.status_code >= 400:
+        return response
+    payload = json.loads(response.body)
+    relative_docx = str(payload.get("docx_path") or "")
+    docx_path = (ROOT / relative_docx).resolve() if relative_docx else Path()
+    try:
+        with connect() as con:
+            settings = cv_import_settings(con, include_secret=True)
+            quality_audit = run_export_quality_audit(con, docx_path, llm_json, settings)
+        if quality_audit["applied_count"]:
+            rebuilt = builders[content_profile](lang)
+            if rebuilt.status_code >= 400:
+                return rebuilt
+            payload = json.loads(rebuilt.body)
+        payload["quality_audit"] = quality_audit
+    except Exception as exc:
+        # A quality check must never prevent delivery of an otherwise valid CV.
+        payload["quality_audit"] = {
+            "status": "failed",
+            "applied_count": 0,
+            "review_count": 0,
+            "warning": str(exc)[:500],
+            "issues": [],
+        }
+    return JSONResponse(payload)
 
 
 @app.post("/api/actions/build-harvard")
