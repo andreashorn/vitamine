@@ -19,6 +19,8 @@ from docx.shared import Inches, Pt, RGBColor
 
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
+from vitamine.scripts.export_publication_selection import selected_or_fallback_publications
+from vitamine.scripts.export_utils import sanitize_docx_compatibility_markup
 
 DB = active_db_path()
 LANG = "en"
@@ -275,19 +277,7 @@ def load_data() -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row
             ORDER BY section_key, start_date, id
             """
         ).fetchall()
-        pubs = con.execute(
-            """
-            SELECT *
-            FROM publications
-            WHERE include_short=1
-              AND COALESCE(suppress_display, 0)=0
-              AND category='peer_reviewed'
-            ORDER BY COALESCE(short_selected_order, selected_order, 999), CAST(year AS INTEGER) DESC, id DESC
-            LIMIT ?
-            """
-            ,
-            (publication_limit,),
-        ).fetchall()
+        pubs = selected_or_fallback_publications(con, profile="short", limit=publication_limit)
     return person, entries, pubs
 
 
@@ -627,6 +617,7 @@ def build_docx(path: Path) -> Path:
     doc.core_properties.author = name
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
+    sanitize_docx_compatibility_markup(path)
     return path
 
 

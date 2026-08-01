@@ -17,6 +17,8 @@ from docx.oxml.ns import qn
 
 from vitamine.paths import OUTPUT, PACKAGE, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
+from vitamine.scripts.export_publication_selection import selected_or_fallback_publications
+from vitamine.scripts.export_utils import sanitize_docx_compatibility_markup
 
 DB = active_db_path()
 DEFAULT_TEMPLATE = PACKAGE / "onepage_tabular" / "ultrashort_tabular_template.docx"
@@ -472,18 +474,7 @@ def publication_citation(row: sqlite3.Row) -> str:
 
 
 def selected_publications(con: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
-    return con.execute(
-        """
-        SELECT *
-        FROM publications
-        WHERE include_ultrashort = 1
-          AND COALESCE(suppress_display, 0) = 0
-          AND category = 'peer_reviewed'
-        ORDER BY COALESCE(ultrashort_selected_order, selected_order, 999), CAST(year AS INTEGER) DESC, id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    return selected_or_fallback_publications(con, profile="ultrashort", limit=limit)
 
 
 def publication_limit(con: sqlite3.Connection, fallback: int = 10) -> int:
@@ -650,6 +641,7 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
         clear_paragraph(paragraph)
 
     doc.save(output)
+    sanitize_docx_compatibility_markup(output)
     return output
 
 

@@ -22,7 +22,7 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from vitamine.scripts.export_utils import markdown_to_html_body
+from vitamine.scripts.export_utils import markdown_to_html_body, sanitize_docx_compatibility_markup
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
 
@@ -344,7 +344,7 @@ def person_block(con: sqlite3.Connection) -> list[str]:
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
     today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
     if not person:
-        return [f"**{tr('faculty')}**", "", f"# {tr('cv')}"]
+        return [f"# {tr('cv')}"]
     rows = [
         (tr("date_prepared").rstrip(":"), today),
         (tr("name").rstrip(":"), person["display_name"] or person["full_name"]),
@@ -354,7 +354,7 @@ def person_block(con: sqlite3.Connection) -> list[str]:
         (tr("work_email").rstrip(":"), person["work_email"]),
         (tr("place_of_birth").rstrip(":"), person["place_of_birth"]),
     ]
-    out = [f"<div class=\"cv-kicker\">{tr('faculty')}</div>", "", f"# {tr('cv')}", ""]
+    out = [f"# {tr('cv')}", ""]
     out.append("|  |  |")
     out.append("| --- | --- |")
     for label, value in rows:
@@ -886,11 +886,7 @@ def build_typst() -> str:
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.73in, right: 0.62in, top: 0.72in, bottom: 0.55in))',
         f'#set text(font: "Helvetica", size: 10.5pt, lang: "{LANG}")',
         "#set par(leading: 0.49em)",
-        "#align(center)[",
-        f"  {typ_text(tr('faculty'), bold=True)}",
-        "  #linebreak()",
-        f"  {typ_text(tr('cv'), bold=True)}",
-        "]",
+        f"#align(center)[{typ_text(tr('cv'), bold=True)}]",
         "#v(0.32in)",
     ]
     if person:
@@ -1691,8 +1687,8 @@ def build_docx(path: Path, lang: str = "en") -> Path:
         raise RuntimeError(f"Formal Academic CV template has {len(tables)} tables; expected 25.")
 
     if LANG == "de":
-        _set_plain_paragraph(doc.paragraphs[0], tr("faculty"))
         _set_plain_paragraph(doc.paragraphs[1], tr("cv"))
+    _remove_paragraph(doc.paragraphs[0])
 
     metadata = [
         (tr("date_prepared"), today),
@@ -1950,6 +1946,7 @@ def build_docx(path: Path, lang: str = "en") -> Path:
     _strip_word_editing_ids(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
+    sanitize_docx_compatibility_markup(path)
     return path
 
 

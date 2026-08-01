@@ -58,9 +58,9 @@
       "preinstalled": true,
       "exporter": "long",
       "quality": {
-        "key": "experimental",
-        "label": "Handmade design captured",
-        "description": "A sanitized copy of the handmade Word CV is bundled as the design source. The database-to-template mapping still needs rebuilding."
+        "key": "word_ready",
+        "label": "Word-ready",
+        "description": "The polished long-form Word export is ready for regular use."
       },
       "source": {
         "kind": "guidance",

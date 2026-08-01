@@ -3,10 +3,41 @@
 from __future__ import annotations
 
 import html
+import re
 import subprocess
+import tempfile
+import zipfile
 from pathlib import Path
 
 from vitamine.paths import tool_path
+
+
+MC_IGNORABLE_ATTRIBUTE = re.compile(rb"\s+[A-Za-z_][\w.-]*:Ignorable=\"[^\"]*\"")
+
+
+def sanitize_docx_compatibility_markup(path: Path) -> Path:
+    """Remove stale mc:Ignorable declarations that make Word repair the DOCX.
+
+    python-docx can discard namespace declarations that are referenced only by
+    the QName-valued ``mc:Ignorable`` attribute in retained templates. The XML
+    remains well-formed, but Word reports it as unreadable content. Removing
+    that optional hint is safe because extension elements keep their namespace
+    URIs and Word can still interpret them normally.
+    """
+    path = Path(path)
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".docx", delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        with zipfile.ZipFile(path, "r") as source, zipfile.ZipFile(temporary, "w") as target:
+            for item in source.infolist():
+                payload = source.read(item.filename)
+                if item.filename.endswith(".xml"):
+                    payload = MC_IGNORABLE_ATTRIBUTE.sub(b"", payload)
+                target.writestr(item, payload)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return path
 
 
 def compile_typst_if_available(typ_path: Path, pdf_path: Path, cwd: Path) -> tuple[Path | None, str | None]:
