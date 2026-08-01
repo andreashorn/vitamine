@@ -41,7 +41,7 @@ Generated Word exports and logs are written to `output/` and are ignored by git.
 currently generates DOCX only so the editable document is always the primary artifact. Users
 can create PDF or HTML copies from Word when needed.
 
-The dashboard includes a collaboration map populated by OpenAlex institution locations collected during DOI metadata enrichment. It uses OpenStreetMap tiles when online and keeps a simple built-in map fallback for offline use.
+The dashboard includes a world map populated by OpenAlex institution locations collected during DOI metadata enrichment. A toggle switches between publication collaborations and a bounded sample of citing researchers, ranked by repeated citation links and shown at their publication affiliations. It uses OpenStreetMap tiles when online and keeps a simple built-in map fallback for offline use.
 
 ## Testing
 

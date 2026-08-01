@@ -180,6 +180,33 @@ ON collaboration_institutions(publication_id);
 CREATE INDEX IF NOT EXISTS idx_collaboration_institutions_inst
 ON collaboration_institutions(institution_id);
 
+CREATE TABLE IF NOT EXISTS citation_institutions (
+  id INTEGER PRIMARY KEY,
+  publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+  cited_openalex_work_id TEXT,
+  citing_openalex_work_id TEXT NOT NULL,
+  citing_work_title TEXT,
+  citing_work_year TEXT,
+  author_id TEXT,
+  author_name TEXT NOT NULL,
+  institution_id TEXT NOT NULL,
+  institution_name TEXT NOT NULL,
+  ror TEXT,
+  country_code TEXT,
+  country TEXT,
+  latitude REAL,
+  longitude REAL,
+  source TEXT NOT NULL DEFAULT 'openalex',
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(publication_id, citing_openalex_work_id, author_name, institution_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_citation_institutions_pub
+ON citation_institutions(publication_id);
+
+CREATE INDEX IF NOT EXISTS idx_citation_institutions_author
+ON citation_institutions(author_id, author_name);
+
 CREATE TABLE IF NOT EXISTS biosketch_contributions (
   id INTEGER PRIMARY KEY,
   document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,

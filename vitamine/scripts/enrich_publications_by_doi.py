@@ -108,6 +108,36 @@ def ensure_columns(con: sqlite3.Connection) -> None:
         ON collaboration_institutions(institution_id)
         """
     )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS citation_institutions (
+          id INTEGER PRIMARY KEY,
+          publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+          cited_openalex_work_id TEXT,
+          citing_openalex_work_id TEXT NOT NULL,
+          citing_work_title TEXT,
+          citing_work_year TEXT,
+          author_id TEXT,
+          author_name TEXT NOT NULL,
+          institution_id TEXT NOT NULL,
+          institution_name TEXT NOT NULL,
+          ror TEXT,
+          country_code TEXT,
+          country TEXT,
+          latitude REAL,
+          longitude REAL,
+          source TEXT NOT NULL DEFAULT 'openalex',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(publication_id, citing_openalex_work_id, author_name, institution_id)
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_citation_institutions_pub ON citation_institutions(publication_id)"
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_citation_institutions_author ON citation_institutions(author_id, author_name)"
+    )
 
 
 def normalize_doi(value: str | None) -> str:
@@ -403,6 +433,7 @@ def openalex_collaboration_rows(publication_id: int, row: sqlite3.Row, payload: 
     seen: set[tuple[str, str, str]] = set()
     for authorship in payload.get("authorships") or []:
         author = authorship.get("author") or {}
+        author_id = str(author.get("id") or "").strip()
         author_name = clean_text(author.get("display_name") or authorship.get("raw_author_name"))
         author_position = clean_text(authorship.get("author_position"))
         institutions = authorship.get("institutions") or []
@@ -470,9 +501,61 @@ def openalex_collaboration_rows(publication_id: int, row: sqlite3.Row, payload: 
                     "publication_title": publication_title,
                     "publication_year": publication_year,
                     "author_name": author_name,
+                    "author_id": author_id,
                     "author_position": author_position,
                     "institution_id": institution_id,
                     **institution,
+                }
+            )
+    return records
+
+
+def citation_sample_limit(cited_by_count: Any) -> int:
+    """Keep citation geography useful without making refresh cost unbounded."""
+    try:
+        count = max(0, int(cited_by_count or 0))
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 25:
+        return count
+    if count <= 250:
+        return 50
+    return 100
+
+
+def openalex_citation_rows(
+    publication_id: int,
+    cited_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    cited_work_id = str(cited_payload.get("id") or "").strip()
+    limit = citation_sample_limit(cited_payload.get("cited_by_count"))
+    if not cited_work_id or not limit:
+        return []
+    short_id = cited_work_id.rsplit("/", 1)[-1]
+    url = "https://api.openalex.org/works?" + urllib.parse.urlencode(
+        {
+            "filter": f"cites:{short_id}",
+            "sort": "cited_by_count:desc",
+            "per-page": limit,
+        }
+    )
+    payload = request_json(url) or {}
+    records: list[dict[str, Any]] = []
+    for citing_work in payload.get("results") or []:
+        proxy = {
+            "id": citing_work.get("id"),
+            "display_name": citing_work.get("display_name"),
+            "publication_year": citing_work.get("publication_year"),
+            "authorships": citing_work.get("authorships") or [],
+        }
+        for row in openalex_collaboration_rows(publication_id, cited_payload, proxy):
+            records.append(
+                {
+                    **row,
+                    "cited_openalex_work_id": cited_work_id,
+                    "citing_openalex_work_id": row["openalex_work_id"],
+                    "citing_work_title": row["publication_title"],
+                    "citing_work_year": row["publication_year"],
                 }
             )
     return records
@@ -960,6 +1043,46 @@ def upsert_collaboration_rows(con: sqlite3.Connection, rows: list[dict[str, Any]
     return count
 
 
+def upsert_citation_rows(con: sqlite3.Connection, rows: list[dict[str, Any]]) -> int:
+    count = 0
+    for row in rows:
+        con.execute(
+            """
+            INSERT INTO citation_institutions (
+              publication_id, cited_openalex_work_id, citing_openalex_work_id,
+              citing_work_title, citing_work_year, author_id, author_name,
+              institution_id, institution_name, ror, country_code, country,
+              latitude, longitude, source, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(publication_id, citing_openalex_work_id, author_name, institution_id)
+            DO UPDATE SET
+              cited_openalex_work_id=excluded.cited_openalex_work_id,
+              citing_work_title=excluded.citing_work_title,
+              citing_work_year=excluded.citing_work_year,
+              author_id=excluded.author_id,
+              institution_name=excluded.institution_name,
+              ror=excluded.ror,
+              country_code=excluded.country_code,
+              country=excluded.country,
+              latitude=excluded.latitude,
+              longitude=excluded.longitude,
+              source=excluded.source,
+              updated_at=datetime('now')
+            """,
+            (
+                row["publication_id"], row["cited_openalex_work_id"],
+                row["citing_openalex_work_id"], row["citing_work_title"],
+                row["citing_work_year"], row.get("author_id") or "",
+                row["author_name"], row["institution_id"], row["institution_name"],
+                row["ror"], row["country_code"], row["country"], row["latitude"],
+                row["longitude"], row.get("source") or "openalex",
+            ),
+        )
+        count += 1
+    return count
+
+
 def enrich(
     limit: int | None = None,
     include_suppressed: bool = False,
@@ -985,6 +1108,7 @@ def enrich(
     fetched = 0
     updated = 0
     institutions = 0
+    citation_affiliations = 0
     with connect() as con:
         rows = con.execute(
             f"""
@@ -1084,14 +1208,21 @@ def enrich(
             changes = changes_for_row(row, values)
             sources = [name for name, data in [("crossref", crossref), ("openalex", openalex), ("pubmed", pubmed)] if data]
             collaboration_rows = []
+            citation_rows = []
             if openalex.get("_payload"):
                 collaboration_rows = openalex_collaboration_rows(row["id"], row, openalex["_payload"])
+                citation_rows = openalex_citation_rows(row["id"], openalex["_payload"])
                 if not dry_run:
                     con.execute(
                         "DELETE FROM collaboration_institutions WHERE publication_id=?",
                         (row["id"],),
                     )
                     institutions += upsert_collaboration_rows(con, collaboration_rows)
+                    con.execute(
+                        "DELETE FROM citation_institutions WHERE publication_id=?",
+                        (row["id"],),
+                    )
+                    citation_affiliations += upsert_citation_rows(con, citation_rows)
             if changes:
                 updated += 1
                 if not dry_run:
@@ -1107,6 +1238,7 @@ def enrich(
                         "candidates": candidates_checked,
                         "changes": changes,
                         "institutions": len(collaboration_rows),
+                        "citation_affiliations": len(citation_rows),
                     }
                 )
             if not dry_run:
@@ -1125,6 +1257,7 @@ def enrich(
         "checked": fetched,
         "updated": updated,
         "institutions": institutions,
+        "citation_affiliations": citation_affiliations,
         "dry_run": dry_run,
         "refresh": refresh,
         "resolve_missing": resolve_missing,

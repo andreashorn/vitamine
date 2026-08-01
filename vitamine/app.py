@@ -1293,6 +1293,42 @@ def ensure_collaboration_tables(con: sqlite3.Connection) -> None:
         ON collaboration_institutions(institution_id)
         """
     )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS citation_institutions (
+          id INTEGER PRIMARY KEY,
+          publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+          cited_openalex_work_id TEXT,
+          citing_openalex_work_id TEXT NOT NULL,
+          citing_work_title TEXT,
+          citing_work_year TEXT,
+          author_id TEXT,
+          author_name TEXT NOT NULL,
+          institution_id TEXT NOT NULL,
+          institution_name TEXT NOT NULL,
+          ror TEXT,
+          country_code TEXT,
+          country TEXT,
+          latitude REAL,
+          longitude REAL,
+          source TEXT NOT NULL DEFAULT 'openalex',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(publication_id, citing_openalex_work_id, author_name, institution_id)
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_citation_institutions_pub
+        ON citation_institutions(publication_id)
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_citation_institutions_author
+        ON citation_institutions(author_id, author_name)
+        """
+    )
 
 
 def ensure_biosketch_tables(con: sqlite3.Connection) -> None:

@@ -354,6 +354,111 @@ def _profile_collaborators(
     }
 
 
+def _profile_citations(
+    con: sqlite3.Connection,
+    person: sqlite3.Row | None,
+    tables: set[str],
+    publication_columns: set[str],
+) -> dict[str, Any]:
+    empty = {
+        "own": None, "nodes": [], "edges": [], "institution_count": 0,
+        "researcher_count": 0, "citation_links": 0, "sampled_works": 0,
+    }
+    if person is None or "citation_institutions" not in tables:
+        return empty
+    own_name = _text(person["own_institution_name"], 500)
+    try:
+        own_latitude = float(person["own_institution_latitude"])
+        own_longitude = float(person["own_institution_longitude"])
+    except (TypeError, ValueError):
+        return empty
+    if not own_name:
+        return empty
+    suppressed_clause = (
+        "AND COALESCE(p.suppress_display, 0)=0"
+        if "suppress_display" in publication_columns else ""
+    )
+    rows = con.execute(
+        f"""
+        SELECT ci.publication_id, ci.citing_openalex_work_id, ci.citing_work_year,
+               ci.author_id, ci.author_name, ci.institution_id, ci.institution_name,
+               ci.ror, ci.country_code, ci.country, ci.latitude, ci.longitude
+        FROM citation_institutions ci
+        JOIN publications p ON p.id=ci.publication_id
+        WHERE ci.latitude IS NOT NULL AND ci.longitude IS NOT NULL {suppressed_clause}
+        ORDER BY ci.institution_name, ci.author_name
+        """
+    ).fetchall()
+    name_terms = _researcher_name_terms(person)
+    self_citing_works = {
+        _text(row["citing_openalex_work_id"], 300)
+        for row in rows
+        if _first_or_last_author(row["author_name"], name_terms)
+    }
+    grouped: dict[str, dict[str, Any]] = {}
+    all_researchers: set[str] = set()
+    sampled_works: set[str] = set()
+    for row in rows:
+        citing_work_id = _text(row["citing_openalex_work_id"], 300)
+        if citing_work_id in self_citing_works:
+            continue
+        institution_id = _text(row["institution_id"], 300)
+        institution_name = _text(row["institution_name"], 500)
+        key = institution_id or _normalized_institution(institution_name)
+        author_name = _text(row["author_name"], 300)
+        author_key = _text(row["author_id"], 300) or author_name.casefold()
+        event = (int(row["publication_id"]), citing_work_id)
+        item = grouped.setdefault(key, {
+            "id": f"citation:{key}", "name": institution_name,
+            "ror": _safe_public_url(row["ror"]), "country": _text(row["country"], 200),
+            "country_code": _text(row["country_code"], 10),
+            "latitude": float(row["latitude"]), "longitude": float(row["longitude"]),
+            "events": set(), "researchers": {}, "years": set(),
+        })
+        item["events"].add(event)
+        researcher = item["researchers"].setdefault(
+            author_key, {"name": author_name, "events": set()}
+        )
+        researcher["events"].add(event)
+        year = _text(row["citing_work_year"], 20)
+        if year:
+            item["years"].add(year)
+        all_researchers.add(author_key)
+        sampled_works.add(citing_work_id)
+    ranked = sorted(
+        grouped.values(), key=lambda item: (-len(item["events"]), item["name"].casefold())
+    )[:160]
+    own = {
+        "id": "own-institution", "name": own_name,
+        "country": _text(person["own_institution_country"], 200),
+        "country_code": _text(person["own_institution_country_code"], 10),
+        "latitude": own_latitude, "longitude": own_longitude, "own": True,
+    }
+    nodes = [own]
+    edges = []
+    citation_links = 0
+    for item in ranked:
+        count = len(item.pop("events"))
+        researchers = sorted(
+            ({"name": value["name"], "citation_count": len(value["events"])}
+             for value in item.pop("researchers").values()),
+            key=lambda value: (-value["citation_count"], value["name"].casefold()),
+        )
+        item["researchers"] = researchers[:20]
+        item["researcher_count"] = len(researchers)
+        item["years"] = sorted(item["years"], reverse=True)
+        item["citation_count"] = count
+        item["own"] = False
+        nodes.append(item)
+        edges.append({"source": own["id"], "target": item["id"], "weight": count})
+        citation_links += count
+    return {
+        "own": own, "nodes": nodes, "edges": edges,
+        "institution_count": len(ranked), "researcher_count": len(all_researchers),
+        "citation_links": citation_links, "sampled_works": len(sampled_works),
+    }
+
+
 def build_public_profile_snapshot(
     database_path: Path,
     *,
@@ -428,6 +533,12 @@ def build_public_profile_snapshot(
             "publications": publications,
             "metrics": _profile_metrics(publication_rows, person),
             "collaborators": _profile_collaborators(
+                con,
+                person,
+                tables,
+                publication_columns,
+            ),
+            "citations": _profile_citations(
                 con,
                 person,
                 tables,

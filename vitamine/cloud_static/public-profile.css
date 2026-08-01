@@ -438,6 +438,29 @@ body[data-profile-theme="dark"] .public-osm-tiles { filter: brightness(.58) satu
   display: flex;
   gap: 4px;
 }
+.map-mode-toggle {
+  position: absolute;
+  z-index: 5;
+  top: 9px;
+  right: 9px;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid rgba(51, 65, 85, .55);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, .93);
+  box-shadow: 0 2px 8px rgba(15, 23, 42, .1);
+}
+.map-mode-toggle button {
+  min-height: 31px;
+  border: 0;
+  padding: 5px 12px;
+  background: transparent;
+  color: #334155;
+  font-size: .7rem;
+  font-weight: 740;
+}
+.map-mode-toggle button[aria-pressed="true"] { background: var(--accent); color: white; }
+.map-mode-toggle button:disabled { cursor: default; opacity: .45; }
 .public-map-controls button {
   min-width: 31px;
   min-height: 31px;

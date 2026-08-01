@@ -67,6 +67,21 @@ class PublicProfileSnapshotTests(unittest.TestCase):
                     """,
                     (publication,),
                 )
+                con.executemany(
+                    """
+                    INSERT INTO citation_institutions(
+                      publication_id, cited_openalex_work_id, citing_openalex_work_id,
+                      citing_work_title, citing_work_year, author_id, author_name,
+                      institution_id, institution_name, country_code, country,
+                      latitude, longitude
+                    ) VALUES (?, 'W-OWN', ?, 'A citing paper', '2025', ?, ?,
+                              'I456', 'Citing Institute', 'FR', 'France', 48.86, 2.35)
+                    """,
+                    [
+                        (publication, "W-CITING-1", "A-GRACE", "Grace Citer"),
+                        (publication, "W-CITING-2", "A-GRACE", "Grace Citer"),
+                    ],
+                )
             snapshot = build_public_profile_snapshot(
                 database,
                 database_id="database-123",
@@ -81,6 +96,12 @@ class PublicProfileSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["metrics"]["total_citations"], 12)
         self.assertEqual(snapshot["metrics"]["all"]["h_index"], 1)
         self.assertEqual(snapshot["collaborators"]["institution_count"], 1)
+        self.assertEqual(snapshot["citations"]["researcher_count"], 1)
+        self.assertEqual(snapshot["citations"]["citation_links"], 2)
+        self.assertEqual(
+            snapshot["citations"]["nodes"][1]["researchers"][0],
+            {"name": "Grace Citer", "citation_count": 2},
+        )
         self.assertEqual(
             [block["key"] for block in snapshot["blocks"]],
             ["bio", "metrics", "publications", "collaborators"],

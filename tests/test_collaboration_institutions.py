@@ -1,7 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from vitamine.scripts.enrich_publications_by_doi import openalex_collaboration_rows
+from vitamine.scripts.enrich_publications_by_doi import (
+    citation_sample_limit,
+    openalex_collaboration_rows,
+)
 
 
 FRANKLIN_ID = "https://openalex.org/I53236636"
@@ -62,6 +65,11 @@ def charite_ror_match(_raw_affiliation):
 
 
 class CollaborationInstitutionTests(unittest.TestCase):
+    def test_citation_sample_limit_scales_but_stays_bounded(self):
+        self.assertEqual(citation_sample_limit(12), 12)
+        self.assertEqual(citation_sample_limit(100), 50)
+        self.assertEqual(citation_sample_limit(2000), 100)
+
     @patch(
         "vitamine.scripts.enrich_publications_by_doi.ror_affiliation_match",
         side_effect=charite_ror_match,

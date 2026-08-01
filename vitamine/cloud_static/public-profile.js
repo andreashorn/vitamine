@@ -28,6 +28,7 @@ const state = {
   },
   collaborationMap: {
     data: null,
+    mode: "collaborations",
     zoom: PROFILE_MAP_DEFAULT_ZOOM,
     origin: null,
     drag: null,
@@ -423,7 +424,18 @@ function profileMapTiles(extent) {
   return tiles.join("");
 }
 
-function collaboratorTooltip(node) {
+function collaboratorTooltip(node, mode) {
+  if (mode === "citations") {
+    const researchers = (node.researchers || []).slice(0, 8)
+      .map((item) => `${item.name} (${formatNumber(item.citation_count)})`).join(", ");
+    const more = Number(node.researcher_count || 0) > 8
+      ? `, +${node.researcher_count - 8} more` : "";
+    return `
+      <strong>${escapeHtml(node.name)}</strong>
+      ${node.country ? `<span>${escapeHtml(node.country)}</span>` : ""}
+      ${node.citation_count ? `<span>${formatNumber(node.citation_count)} citation links</span>` : ""}
+      ${researchers ? `<span>${escapeHtml(researchers + more)}</span>` : ""}`;
+  }
   const authors = (node.authors || []).slice(0, 8).join(", ");
   const more = (node.authors || []).length > 8 ? `, +${node.authors.length - 8} more` : "";
   return `
@@ -433,7 +445,7 @@ function collaboratorTooltip(node) {
     ${authors ? `<span>${escapeHtml(authors + more)}</span>` : ""}`;
 }
 
-function publicCollaborationMapMarkup(data) {
+function publicCollaborationMapMarkup(data, mode = "collaborations") {
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
   const own = nodes.find((node) => node.own) || data.own;
   const extent = profileMapExtent();
@@ -452,14 +464,15 @@ function publicCollaborationMapMarkup(data) {
   }).join("");
   const markers = nodes.map((node) => {
     const point = profileMapPoint(node, extent);
-    const size = node.own ? 18 : Math.min(20, 8 + Math.sqrt(Number(node.publication_count || 1)) * 2.2);
+    const weight = mode === "citations" ? node.citation_count : node.publication_count;
+    const size = node.own ? 18 : Math.min(20, 8 + Math.sqrt(Number(weight || 1)) * 2.2);
     return `
       <button
         class="collaborator-marker ${node.own ? "own" : ""}"
         type="button"
         style="left:${(point.x / PROFILE_MAP_WIDTH * 100).toFixed(2)}%;top:${(point.y / PROFILE_MAP_HEIGHT * 100).toFixed(2)}%;width:${size.toFixed(1)}px;height:${size.toFixed(1)}px"
         aria-label="${escapeHtml(node.name)}"
-      ><span>${collaboratorTooltip(node)}</span></button>`;
+      ><span>${collaboratorTooltip(node, mode)}</span></button>`;
   }).join("");
   return `
     <svg class="public-osm-tiles" viewBox="0 0 ${PROFILE_MAP_WIDTH} ${PROFILE_MAP_HEIGHT}" preserveAspectRatio="none" aria-hidden="true">
@@ -478,15 +491,23 @@ function publicCollaborationMapMarkup(data) {
 }
 
 function renderCollaborators(profile) {
-  const data = profile.collaborators || {};
+  const collaborationData = profile.collaborators || {};
+  const citationData = profile.citations || {};
+  const collaborationAvailable = (collaborationData.nodes || []).some((node) => !node.own);
+  const citationAvailable = (citationData.nodes || []).some((node) => !node.own);
+  if (state.collaborationMap.mode === "citations" && !citationAvailable) {
+    state.collaborationMap.mode = "collaborations";
+  }
+  const mode = state.collaborationMap.mode;
+  const data = mode === "citations" ? citationData : collaborationData;
   const nodes = Array.isArray(data.nodes) ? data.nodes : [];
   const own = nodes.find((node) => node.own) || data.own;
-  const collaborators = nodes.filter((node) => !node.own);
-  if (!own || !collaborators.length) {
+  const mappedNodes = nodes.filter((node) => !node.own);
+  if (!own || !mappedNodes.length) {
     return `
       <section class="profile-block collaborators-block" data-profile-block="collaborators">
         ${blockHeader("collaborators", "Publication affiliations")}
-        <p class="empty-copy">No public collaboration geography is available yet.</p>
+        <p class="empty-copy">No public collaboration or citation geography is available yet.</p>
       </section>`;
   }
   state.collaborationMap.data = data;
@@ -498,11 +519,19 @@ function renderCollaborators(profile) {
     <section class="profile-block collaborators-block" data-profile-block="collaborators">
       ${blockHeader("collaborators", "Publication affiliations")}
       <div id="publicCollaborationMap" class="public-collaboration-map">
-        ${publicCollaborationMapMarkup(data)}
+        <div class="map-mode-toggle" role="group" aria-label="Map data">
+          <button type="button" data-map-mode="collaborations" aria-pressed="${mode === "collaborations"}" ${collaborationAvailable ? "" : "disabled"}>Collaborations</button>
+          <button type="button" data-map-mode="citations" aria-pressed="${mode === "citations"}" ${citationAvailable ? "" : "disabled"}>Citations</button>
+        </div>
+        ${publicCollaborationMapMarkup(data, mode)}
       </div>
       <div class="collaboration-summary">
-        <span><strong>${formatNumber(data.institution_count)}</strong> institutions</span>
-        <span><strong>${formatNumber(data.publication_links)}</strong> publication links</span>
+        ${mode === "citations" ? `
+          <span><strong>${formatNumber(data.researcher_count)}</strong> citing researchers</span>
+          <span><strong>${formatNumber(data.citation_links)}</strong> citation links</span>
+          <span>Top affiliations from ${formatNumber(data.sampled_works)} sampled citing works</span>` : `
+          <span><strong>${formatNumber(data.institution_count)}</strong> institutions</span>
+          <span><strong>${formatNumber(data.publication_links)}</strong> publication links</span>`}
         <span>Centered on ${escapeHtml(own.name)}</span>
       </div>
     </section>`;
@@ -593,7 +622,10 @@ function renderPublicationResults() {
 function rerenderPublicCollaborationMap() {
   const container = $("#publicCollaborationMap");
   if (!container || !state.collaborationMap.data) return;
-  container.innerHTML = publicCollaborationMapMarkup(state.collaborationMap.data);
+  const modeToggle = container.querySelector(".map-mode-toggle")?.outerHTML || "";
+  container.innerHTML = modeToggle + publicCollaborationMapMarkup(
+    state.collaborationMap.data, state.collaborationMap.mode,
+  );
 }
 
 function profileMapViewPoint(event, container) {
@@ -635,6 +667,12 @@ function bindPublicCollaborationMap() {
   if (!container || container.dataset.mapEventsBound) return;
   container.dataset.mapEventsBound = "true";
   container.addEventListener("click", (event) => {
+    const modeButton = event.target.closest("[data-map-mode]");
+    if (modeButton && !modeButton.disabled) {
+      state.collaborationMap.mode = modeButton.dataset.mapMode;
+      renderProfile();
+      return;
+    }
     const button = event.target.closest("[data-map-zoom]");
     if (!button) return;
     if (button.dataset.mapZoom === "in") zoomPublicCollaborationMap(1);
@@ -649,7 +687,7 @@ function bindPublicCollaborationMap() {
     );
   }, { passive: false });
   container.addEventListener("pointerdown", (event) => {
-    if (event.target.closest(".collaborator-marker, .public-map-controls, .public-osm-credit")) return;
+    if (event.target.closest(".collaborator-marker, .map-mode-toggle, .public-map-controls, .public-osm-credit")) return;
     container.setPointerCapture(event.pointerId);
     state.collaborationMap.drag = {
       pointerId: event.pointerId,
