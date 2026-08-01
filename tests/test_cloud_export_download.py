@@ -11,6 +11,7 @@ class CloudExportDownloadTests(unittest.TestCase):
 
     def test_cloud_cards_do_not_show_last_export_link(self):
         self.assertIn("artifact.docx && !state.cloud.enabled", self.script)
+        self.assertIn("if (state.exportFormats.length) renderExportFormats();", self.script)
 
     def test_cloud_export_uses_download_attribute_instead_of_new_window(self):
         self.assertIn("if (state.cloud.enabled) {", self.script)

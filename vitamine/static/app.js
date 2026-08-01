@@ -252,6 +252,7 @@ function setCloudJobControls(running) {
 function configureCloudWorkspace(workspace) {
   state.cloud.enabled = true;
   state.cloud.workspace = workspace;
+  if (state.exportFormats.length) renderExportFormats();
   const account = workspace.account || {};
   $("#cloudAccountMenu").hidden = false;
   $("#cloudAccountInitials").textContent = accountInitials(account);
