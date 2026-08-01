@@ -159,6 +159,11 @@ to the portable `.vitamine` database. Desktop users retain manual API-key
 setup. Connecting or disconnecting Zotero restarts only the current private
 workspace worker so its runtime environment receives the updated credential.
 
+As of 2026-08-01, Zotero OAuth is deployed in production with cloud schema
+version 10. The configured client credentials and callback completed Zotero's
+temporary-credential handshake successfully. No token value was printed or
+stored by that verification; the temporary credential was left to expire.
+
 ## PostgreSQL and backups
 
 - PostgreSQL 14 runs as the standard Ubuntu service and listens on loopback
