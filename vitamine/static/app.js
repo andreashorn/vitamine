@@ -1598,6 +1598,13 @@ async function loadZoteroOAuthStatus() {
   } else if (state.zoteroOauth.connected) {
     const identity = state.zoteroOauth.username || state.zoteroOauth.zotero_user_id;
     $("#connectionStatus").textContent = `Zotero connected${identity ? ` as ${identity}` : ""}`;
+    if (!state.zoteroLibraries.length) {
+      try {
+        await testZoteroConnection();
+      } catch (error) {
+        console.warn("Zotero libraries could not be loaded automatically:", error);
+      }
+    }
   }
 }
 
