@@ -14,6 +14,8 @@ from pathlib import Path
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.shared import Inches, Pt, RGBColor
 
 from vitamine.paths import OUTPUT, PACKAGE, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
@@ -122,6 +124,12 @@ def citation_text(value: str | None) -> str:
 def sentence_part(value: str | None) -> str:
     value = citation_text(value)
     return value if not value or value.endswith((".", "?", "!")) else f"{value}."
+
+
+def compact_authors(value: str | None, maximum: int = 3) -> str:
+    authors = citation_text(value)
+    parts = [part.strip() for part in authors.split(",") if part.strip()]
+    return ", ".join(parts[:maximum]) + ", et al." if len(parts) > maximum else authors
 
 
 def normalize_citation_spacing(value: str | None) -> str:
@@ -277,6 +285,25 @@ def clear_paragraph(paragraph) -> None:
             paragraph._p.remove(child)
 
 
+def remove_numbering(paragraph) -> None:
+    paragraph_properties = paragraph._p.get_or_add_pPr()
+    numbering = paragraph_properties.find(qn("w:numPr"))
+    if numbering is not None:
+        paragraph_properties.remove(numbering)
+
+
+def set_run_font(run, *, bold: bool = False, italic: bool = False, underline: bool = False, color: str = "111111") -> None:
+    run.font.name = "Arial"
+    run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Arial")
+    run._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.size = Pt(10.15)
+    run.bold = bold
+    run.italic = italic
+    run.underline = underline
+    run.font.color.rgb = RGBColor.from_string(color)
+
+
 def add_text(paragraph, parts: list[tuple[str, bool]]) -> None:
     clear_paragraph(paragraph)
     for text, bold in parts:
@@ -315,31 +342,81 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
     if not value:
         return
     if not bold_names:
-        run = paragraph.add_run(value)
-        run.italic = italic
-        run.underline = underline
+        set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
         return
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn,\s*A(?:\.\s*[A-Z]\.)?|Horn\s+A\.?|Horn)\b", value):
         if match.start() > cursor:
-            run = paragraph.add_run(value[cursor : match.start()])
-            run.italic = italic
-            run.underline = underline
-        run = paragraph.add_run(match.group(0))
-        run.bold = True
-        run.italic = italic
-        run.underline = underline
+            set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
+        set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
         cursor = match.end()
     if cursor < len(value):
-        run = paragraph.add_run(value[cursor:])
-        run.italic = italic
-        run.underline = underline
+        set_run_font(paragraph.add_run(value[cursor:]), italic=italic, underline=underline)
 
 
-def add_publication_docx_text(paragraph, row: sqlite3.Row) -> None:
+def add_hyperlink(paragraph, url: str, display: str) -> None:
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for attribute in ("ascii", "hAnsi", "eastAsia"):
+        fonts.set(qn(f"w:{attribute}"), "Arial")
+    properties.append(fonts)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), "20")
+    properties.append(size)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    properties.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(underline)
+    run.append(properties)
+    text_element = OxmlElement("w:t")
+    text_element.text = display
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def publication_link(row: sqlite3.Row) -> str:
+    doi = citation_text(row["doi"])
+    if doi:
+        return doi if doi.startswith("http") else f"https://doi.org/{doi}"
+    url = citation_text(row["url"] if "url" in row.keys() else "")
+    return url if not url or url.startswith("http") else f"https://{url}"
+
+
+def add_publication_docx_text(paragraph, index: int, row: sqlite3.Row) -> None:
     clear_paragraph(paragraph)
-    compact_citation = publication_citation(row)
-    add_docx_piece(paragraph, compact_citation, bold_names=True)
+    remove_numbering(paragraph)
+    paragraph.paragraph_format.left_indent = Inches(0.42)
+    paragraph.paragraph_format.first_line_indent = Inches(-0.32)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(0.42))
+    set_run_font(paragraph.add_run(f"{index}.\t"))
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        add_docx_piece(paragraph, alternate, bold_names=True)
+        return
+    authors = compact_authors(row["authors"])
+    title = citation_text(row["title"])
+    venue = citation_text(row["venue"])
+    year_value = citation_text(row["year"])
+    if authors:
+        add_docx_piece(paragraph, authors, bold_names=True)
+    if year_value:
+        add_docx_piece(paragraph, f" ({year_value})." if authors else sentence_part(year_value))
+    if title:
+        add_docx_piece(paragraph, " " + sentence_part(title))
+    if venue:
+        venue = venue.title() if venue.isupper() else venue
+        add_docx_piece(paragraph, " " + sentence_part(venue), italic=True, underline=True)
+    link = publication_link(row)
+    if link:
+        add_docx_piece(paragraph, " ")
+        add_hyperlink(paragraph, link, link)
 
 
 def citation_parts(citation: str, bold_terms: tuple[str, ...]) -> list[tuple[str, bool]]:
@@ -634,11 +711,13 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
         add_text(paragraph, split_year_prefix(line))
     for paragraph in award_paragraphs[len(awards) :]:
         clear_paragraph(paragraph)
+        remove_numbering(paragraph)
     publication_paragraphs = doc.paragraphs[12 : 12 + publication_limit]
-    for paragraph, publication in zip(publication_paragraphs, publications):
-        add_publication_docx_text(paragraph, publication)
+    for index, (paragraph, publication) in enumerate(zip(publication_paragraphs, publications), 1):
+        add_publication_docx_text(paragraph, index, publication)
     for paragraph in publication_paragraphs[len(publications) :]:
         clear_paragraph(paragraph)
+        remove_numbering(paragraph)
 
     doc.save(output)
     sanitize_docx_compatibility_markup(output)

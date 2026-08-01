@@ -15,6 +15,7 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Inches, Pt, RGBColor
 
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
@@ -135,6 +136,12 @@ def citation_cell(value: str | None) -> str:
 def sentence_part(value: str) -> str:
     value = citation_cell(value)
     return value if not value or value.endswith((".", "?", "!")) else f"{value}."
+
+
+def compact_authors(value: str | None, maximum: int = 3) -> str:
+    authors = citation_cell(value)
+    parts = [part.strip() for part in authors.split(",") if part.strip()]
+    return ", ".join(parts[:maximum]) + ", et al." if len(parts) > maximum else authors
 
 
 def impact_factor_label(row: sqlite3.Row) -> str:
@@ -440,13 +447,40 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
         set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
         return
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn,\s*A(?:\.\s*[A-Z]\.)?|Horn\s+A\.?|Horn)\b", value):
         if match.start() > cursor:
             set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
         set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
         cursor = match.end()
     if cursor < len(value):
         set_run_font(paragraph.add_run(value[cursor:]), italic=italic, underline=underline)
+
+
+def add_hyperlink(paragraph, url: str, display: str) -> None:
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for attribute in ("ascii", "hAnsi", "eastAsia"):
+        fonts.set(qn(f"w:{attribute}"), "Arial")
+    properties.append(fonts)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), "16")
+    properties.append(size)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    properties.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(underline)
+    run.append(properties)
+    text_element = OxmlElement("w:t")
+    text_element.text = display
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
 
 
 def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
@@ -459,9 +493,7 @@ def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
         add_docx_piece(paragraph, alternate, bold_names=True)
         return
     parts: list[tuple[str, bool, bool, bool]] = []
-    authors = citation_cell(row["authors"])
-    if authors:
-        parts.append((sentence_part(authors), True, False, False))
+    authors = compact_authors(row["authors"])
     title = citation_cell(row["title"])
     if title:
         parts.append((sentence_part(title), False, False, False))
@@ -470,18 +502,23 @@ def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
         venue = venue.title() if venue.isupper() else venue
         parts.append((sentence_part(venue), False, True, True))
     year = citation_cell(row["year"])
-    if year:
-        parts.append((sentence_part(year), False, False, False))
-    impact = impact_factor_label(row)
-    if impact:
-        parts.append((sentence_part(impact), False, False, False))
+    if authors and year:
+        parts.insert(0, (f"{authors} ({year}).", True, False, False))
+    elif authors:
+        parts.insert(0, (sentence_part(authors), True, False, False))
+    elif year:
+        parts.insert(0, (sentence_part(year), False, False, False))
     doi = citation_cell(row["doi"])
-    if doi:
-        parts.append((sentence_part(f"doi:{doi}"), False, False, False))
     for index, (value, bold_names, italic, underline) in enumerate(parts):
         if index:
             set_run_font(paragraph.add_run(" "))
         add_docx_piece(paragraph, value, bold_names=bold_names, italic=italic, underline=underline)
+    link = doi if doi.startswith("http") else f"https://doi.org/{doi}" if doi else clean(row["url"] if "url" in row.keys() else "")
+    if link:
+        if not link.startswith("http"):
+            link = f"https://{link}"
+        set_run_font(paragraph.add_run(" "))
+        add_hyperlink(paragraph, link, link)
 
 
 def add_compact_heading(doc: Document, label: str) -> None:

@@ -27,6 +27,8 @@ class CitationStyleTests(unittest.TestCase):
     def test_default_style_preserves_existing_exporter(self):
         self.assertIsNone(format_publication(self.publication, "vitamine-long"))
         self.assertEqual(validate_citation_style("unknown"), "vitamine-long")
+        default = next(style for style in CITATION_STYLES if style["id"] == "vitamine-long")
+        self.assertEqual(default["label"], "VitaMine Default")
 
     def test_csl_metadata_preserves_surname_particles_and_avoids_duplicate_doi_url(self):
         item = publication_to_csl(self.publication)

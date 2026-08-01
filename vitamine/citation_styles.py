@@ -13,8 +13,8 @@ from vitamine.paths import active_db_path
 CITATION_STYLES = [
     {
         "id": "vitamine-long",
-        "label": "Vitamine Long CV (default)",
-        "description": "The established Long CV citation format. Existing exports remain unchanged.",
+        "label": "VitaMine Default",
+        "description": "The consistent VitaMine citation format used across CV exports.",
         "csl": None,
         "group": "VitaMine",
     },
