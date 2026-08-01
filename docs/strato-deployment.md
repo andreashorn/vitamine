@@ -499,9 +499,10 @@ remain visibly unpriced rather than receiving a guessed charge.
 These accounting tables are deliberately not application-encrypted: they
 contain opaque account/CV/job identifiers, model names, token counts, prices,
 and timestamps, but no prompts, CV text, model output, filename, or credential.
-The account library emphasizes the user's current balance and also shows recent
-operations and a 30-day spending chart. Negative balances do not prevent
-imports, enrichment, or other premium features during the pilot.
+The account library shows the user's current balance, rounded to two decimal
+places, in the signed-in header. Per-operation charges, the internal markup,
+and usage history are not exposed in the user interface. Negative balances do
+not prevent imports, enrichment, or other premium features during the pilot.
 
 Schema migration 11 adds an append-only audit table for the trusted-beta
 PayPal top-up flow. Set `VITAMINE_PAYPAL_BETA_TOPUP_URL` to a complete HTTPS
