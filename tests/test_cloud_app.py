@@ -998,7 +998,7 @@ class CloudAppTests(unittest.TestCase):
         self.assertIn("Ada Profile, MD, PhD", profile_page.text)
         self.assertNotIn('class="profile-brand"', profile_page.text)
         self.assertIn("Made with VitaMine", profile_page.text)
-        self.assertIn("20260731-portrait-flow", profile_page.text)
+        self.assertIn("20260801-citation-map", profile_page.text)
 
         removed_portrait = self.client.delete("/api/person/portrait")
         self.assertEqual(removed_portrait.status_code, 200, removed_portrait.text)
