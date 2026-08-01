@@ -163,6 +163,10 @@ As of 2026-08-01, Zotero OAuth is deployed in production with cloud schema
 version 10. The configured client credentials and callback completed Zotero's
 temporary-credential handshake successfully. No token value was printed or
 stored by that verification; the temporary credential was left to expire.
+Hosted workers prefer the account OAuth credential over any older manual key
+embedded in an imported CV. OAuth makes the personal library and authorized
+groups available in the selector, but each CV still syncs one selected Zotero
+library/source at a time rather than merging every accessible library.
 
 ## PostgreSQL and backups
 
