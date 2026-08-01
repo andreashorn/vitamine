@@ -702,6 +702,63 @@ class CloudAppTests(unittest.TestCase):
         self.assertNotEqual(connection[1], token_payload["refresh_token"])
         self.assertEqual(remaining_states, 0)
 
+    def test_zotero_oauth_uses_one_time_request_and_stores_encrypted_key(self):
+        self.create_account()
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        oauth_environment = {
+            "ZOTERO_OAUTH_CLIENT_KEY": "zotero-test-key",
+            "ZOTERO_OAUTH_CLIENT_SECRET": "zotero-test-secret",
+            "ZOTERO_OAUTH_CALLBACK_URL": "https://vitamine.cloud/gateway/zotero/oauth/callback",
+        }
+        temporary = {"token": "temporary-token", "secret": "temporary-secret"}
+        token = {"api_key": "sensitive-zotero-api-key", "user_id": "12345", "username": "Researcher"}
+        access = {"userID": 12345, "access": {"user": {"library": True}, "groups": {"all": {"library": True}}}}
+        with (
+            patch.dict(os.environ, oauth_environment),
+            patch("vitamine.cloud_app.request_zotero_temporary_credentials", new=AsyncMock(return_value=temporary)),
+        ):
+            started = self.client.post("/gateway/zotero/oauth/start")
+            self.assertEqual(started.status_code, 200, started.text)
+            authorization = urlparse(started.json()["authorization_url"])
+            query = parse_qs(authorization.query)
+            self.assertEqual(query["oauth_token"], [temporary["token"]])
+            self.assertEqual(query["library_access"], ["1"])
+            self.assertEqual(query["write_access"], ["0"])
+            self.assertEqual(query["all_groups"], ["read"])
+
+            with (
+                patch("vitamine.cloud_app.exchange_zotero_access_token", new=AsyncMock(return_value=token)) as exchange,
+                patch("vitamine.cloud_app.verify_zotero_api_key", new=AsyncMock(return_value=access)),
+                patch("vitamine.cloud_app.restart_workspace_with_current_connections") as restart,
+            ):
+                completed = self.client.get(
+                    "/gateway/zotero/oauth/callback",
+                    params={"oauth_token": temporary["token"], "oauth_verifier": "verifier"},
+                    follow_redirects=False,
+                )
+            self.assertEqual(completed.status_code, 303, completed.text)
+            self.assertEqual(parse_qs(urlparse(completed.headers["location"]).query)["zotero_oauth"], ["connected"])
+            exchange.assert_awaited_once_with(temporary["token"], temporary["secret"], "verifier")
+            restart.assert_called_once()
+
+            status = self.client.get("/gateway/zotero/oauth/status")
+            self.assertTrue(status.json()["connected"])
+            self.assertEqual(status.json()["username"], token["username"])
+            replayed = self.client.get(
+                "/gateway/zotero/oauth/callback",
+                params={"oauth_token": temporary["token"], "oauth_verifier": "replay"},
+                follow_redirects=False,
+            )
+            self.assertEqual(replayed.status_code, 400, replayed.text)
+
+        with sqlite3.connect(self.db_path) as con:
+            stored = con.execute("SELECT api_key_ciphertext FROM zotero_oauth_connections").fetchone()[0]
+            remaining = con.execute("SELECT COUNT(*) FROM zotero_oauth_requests").fetchone()[0]
+        self.assertNotEqual(stored, token["api_key"])
+        self.assertNotIn(token["api_key"], stored)
+        self.assertEqual(remaining, 0)
+
     def test_account_database_survives_close_logout_and_reopen(self):
         self.create_account()
         opened = self.client.post("/gateway/workspace/new")

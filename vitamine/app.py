@@ -2218,7 +2218,7 @@ def get_connections() -> dict[str, Any]:
             LIMIT 1
             """
         ).fetchone()
-        api_key = get_setting(con, "zotero_api_key")
+        api_key = get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
         library_type = get_setting(con, "zotero_library_type") or "users"
         library_id = get_setting(con, "zotero_library_id")
         stored_policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
@@ -2242,6 +2242,8 @@ async def update_connections(request: Request) -> dict[str, Any]:
     payload = await request.json()
     orcid_id = str(payload.get("orcid_id") or "").strip()
     api_key = str(payload.get("zotero_api_key") or "").strip()
+    if api_key and os.environ.get("VITAMINE_CLOUD_WORKER") == "1":
+        raise HTTPException(status_code=403, detail="Connect Zotero securely from the hosted VitaMine workspace.")
     library_value = str(payload.get("zotero_library_value") or "").strip()
     library_type = str(payload.get("zotero_library_type") or "users").strip("/") or "users"
     library_id = str(payload.get("zotero_library_id") or "").strip()
@@ -2282,7 +2284,7 @@ async def update_connections(request: Request) -> dict[str, Any]:
         set_setting(con, "publication_source_policy", source_policy)
         if api_key:
             set_setting(con, "zotero_api_key", api_key)
-        effective_key = api_key or get_setting(con, "zotero_api_key")
+        effective_key = api_key or get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
         if effective_key and not library_id:
             _, libraries = zotero_accessible_libraries(effective_key)
             chosen = choose_zotero_library(
@@ -4420,7 +4422,7 @@ def publication_source_policy(con: sqlite3.Connection) -> str:
     policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
     if policy not in PUBLICATION_SOURCE_POLICIES:
         policy = "zotero_primary_orcid_validation"
-    zotero_key = get_setting(con, "zotero_api_key")
+    zotero_key = get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
     orcid_row = con.execute(
         """
         SELECT

@@ -213,7 +213,7 @@
                   </button>
                 </span>
               </label>
-              <label>Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
+              <label id="connectionZoteroKeyWrap">Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
               <label>Zotero library
                 <select id="connectionZoteroLibrary">
                   <option value="">Auto-detect from key</option>
@@ -239,7 +239,8 @@
               </label>
               <div class="buttonRow connectionActions">
                 <button type="submit">Save Connections</button>
-                <button id="connectZotero" type="button">Set up Zotero</button>
+                <button id="connectZotero" type="button">Connect Zotero</button>
+                <button id="disconnectZotero" type="button" hidden>Disconnect Zotero</button>
                 <button id="testZoteroConnection" type="button">Test Link</button>
                 <button id="loadZoteroCollections" type="button">Load Collections</button>
                 <span id="connectionStatus"></span>
@@ -791,6 +792,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260801-dashboard-citation-map-enrichment"></script>
+  <script src="/static/app.js?v=20260801-zotero-oauth"></script>
 </body>
 </html>

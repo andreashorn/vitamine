@@ -75,6 +75,8 @@ class CloudMigrationTests(unittest.TestCase):
         self.assertIn("background_jobs", tables)
         self.assertIn("llm_usage_events", tables)
         self.assertIn("orcid_oauth_connections", tables)
+        self.assertIn("zotero_oauth_requests", tables)
+        self.assertIn("zotero_oauth_connections", tables)
 
     def test_version_seven_usage_is_priced_and_existing_member_is_credited(self):
         self.seed_version(7)

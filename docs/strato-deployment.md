@@ -148,6 +148,17 @@ authorization action. The dialog explicitly reports when settings are absent
 and leaves the manual fallback available. The main Sync-panel action and the
 secure OAuth action both carry the compact green ORCID iD mark.
 
+The hosted gateway also supports Zotero's OAuth 1.0a key-exchange flow. Its
+production callback is
+`https://vitamine.cloud/gateway/zotero/oauth/callback`. Configure
+`ZOTERO_OAUTH_CLIENT_KEY`, `ZOTERO_OAUTH_CLIENT_SECRET`, and
+`ZOTERO_OAUTH_CALLBACK_URL` only in `/etc/vitamine-cloud.env`. The resulting
+read-only Zotero API key is encrypted in PostgreSQL and injected into the
+owner's isolated workspace and background-job processes; it is never written
+to the portable `.vitamine` database. Desktop users retain manual API-key
+setup. Connecting or disconnecting Zotero restarts only the current private
+workspace worker so its runtime environment receives the updated credential.
+
 ## PostgreSQL and backups
 
 - PostgreSQL 14 runs as the standard Ubuntu service and listens on loopback

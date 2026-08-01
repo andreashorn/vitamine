@@ -19,6 +19,7 @@ const state = {
   },
   orcidOauth: null,
   orcidOauthLoaded: false,
+  zoteroOauth: null,
   orcidDiscoveryAttempted: false,
   zoteroCollections: [],
   zoteroLibraries: [],
@@ -1453,6 +1454,7 @@ async function loadConnections() {
     : (effective === "orcid_only" && data.orcid_id ? "ORCID-only sync active" : "No Zotero key");
   updateZoteroSourceVisibility();
   await loadOrcidOAuthStatus();
+  await loadZoteroOAuthStatus();
 }
 
 async function saveConnections(event) {
@@ -1562,6 +1564,11 @@ function updateZoteroSourceVisibility() {
 }
 
 async function connectZotero() {
+  if (state.cloud.enabled) {
+    const started = await api("/gateway/zotero/oauth/start", { method: "POST" });
+    window.location.assign(started.authorization_url);
+    return;
+  }
   const data = await api("/api/zotero/connect-url");
   window.open(data.url, "_blank", "noopener,width=980,height=760,left=0,top=0");
   setStatus(data.oauth_available ? "Opening Zotero authorization" : "Opening Zotero key setup");
@@ -1570,6 +1577,52 @@ async function connectZotero() {
     renderOnboardingCoach();
     window.setTimeout(() => $("#connectionZoteroKey")?.focus(), 400);
   }
+}
+
+async function loadZoteroOAuthStatus() {
+  const keyWrap = $("#connectionZoteroKeyWrap");
+  const connect = $("#connectZotero");
+  const disconnect = $("#disconnectZotero");
+  if (!state.cloud.enabled) {
+    if (keyWrap) keyWrap.hidden = false;
+    if (disconnect) disconnect.hidden = true;
+    return;
+  }
+  if (keyWrap) keyWrap.hidden = true;
+  state.zoteroOauth = await api("/gateway/zotero/oauth/status");
+  connect.disabled = !state.zoteroOauth.configured;
+  connect.textContent = state.zoteroOauth.connected ? "Reconnect Zotero" : "Connect Zotero";
+  disconnect.hidden = !state.zoteroOauth.connected;
+  if (!state.zoteroOauth.configured) {
+    $("#connectionStatus").textContent = "Zotero sign-in is not configured";
+  } else if (state.zoteroOauth.connected) {
+    const identity = state.zoteroOauth.username || state.zoteroOauth.zotero_user_id;
+    $("#connectionStatus").textContent = `Zotero connected${identity ? ` as ${identity}` : ""}`;
+  }
+}
+
+async function disconnectZotero() {
+  await api("/gateway/zotero/oauth/connection", { method: "DELETE" });
+  state.zoteroLibraries = [];
+  state.zoteroCollections = [];
+  await loadConnections();
+  setStatus("Zotero disconnected");
+}
+
+function handleZoteroOAuthResult() {
+  const url = new URL(window.location.href);
+  const result = url.searchParams.get("zotero_oauth");
+  if (!result) return;
+  const messages = {
+    connected: ["Zotero connected securely", false],
+    cancelled: ["Zotero sign-in was cancelled", false],
+    "workspace-changed": ["The open CV changed during Zotero sign-in. Please try again.", true],
+    "link-error": ["Zotero sign-in could not be completed. Please try again.", true],
+  };
+  const [message, isError] = messages[result] || messages["link-error"];
+  setStatus(message, { error: isError });
+  url.searchParams.delete("zotero_oauth");
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
 async function loadZoteroCollections() {
@@ -4037,6 +4090,7 @@ async function init() {
   $("#journalMetricEditor").addEventListener("change", debounce(saveJournalMetrics, 500));
   $("#connectionsForm").addEventListener("submit", saveConnections);
   $("#connectZotero").addEventListener("click", connectZotero);
+  $("#disconnectZotero").addEventListener("click", disconnectZotero);
   $("#testZoteroConnection").addEventListener("click", testZoteroConnection);
   $("#loadZoteroCollections").addEventListener("click", loadZoteroCollections);
   $("#connectionZoteroSource").addEventListener("change", updateZoteroSourceVisibility);
@@ -4220,6 +4274,7 @@ async function init() {
   await loadStartupStep("Onboarding", loadOnboarding);
   await resumeCloudBackgroundJob();
   handleOrcidOAuthResult();
+  handleZoteroOAuthResult();
   window.addEventListener("resize", () => {
     const config = ONBOARDING_STEPS[state.onboarding?.step];
     if (config) positionOnboardingCoach($(config.target), config);

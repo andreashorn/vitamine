@@ -135,7 +135,7 @@ class MetricsTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
         self.assertIn("20260801-dashboard-citation-map", document)
-        self.assertIn("20260801-dashboard-citation-map-enrichment", document)
+        self.assertIn("20260801-zotero-oauth", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")

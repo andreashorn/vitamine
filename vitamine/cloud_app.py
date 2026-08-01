@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterator
-from urllib.parse import quote, urlencode
+from urllib.parse import parse_qs, quote, urlencode
 
 import httpx
 from cryptography.fernet import Fernet
@@ -73,6 +73,7 @@ PASSWORD_MAX_LENGTH = 256
 LOGIN_WINDOW_MINUTES = 15
 LOGIN_MAX_FAILURES = 10
 ORCID_OAUTH_STATE_MAX_AGE = 10 * 60
+ZOTERO_OAUTH_REQUEST_MAX_AGE = 10 * 60
 ORCID_PATTERN = re.compile(r"^\d{4}-\d{4}-\d{4}-[\dX]{4}$", re.I)
 IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 WORKER_PROCESSES: dict[int, subprocess.Popen] = {}
@@ -84,7 +85,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 9
+CLOUD_SCHEMA_VERSION = 10
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
 PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
@@ -358,6 +359,29 @@ CREATE TABLE IF NOT EXISTS orcid_oauth_connections (
     verified_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS zotero_oauth_requests (
+    request_token_hash TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+    request_secret_ciphertext TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_zotero_oauth_requests_expiry
+ON zotero_oauth_requests(expires_at);
+
+CREATE TABLE IF NOT EXISTS zotero_oauth_connections (
+    member_id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+    last_database_id TEXT REFERENCES account_databases(id) ON DELETE SET NULL,
+    zotero_user_id TEXT NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    api_key_ciphertext TEXT NOT NULL,
+    access_json TEXT NOT NULL DEFAULT '{}',
+    verified_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA = """
@@ -625,6 +649,29 @@ CREATE TABLE IF NOT EXISTS orcid_oauth_connections (
     verified_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS zotero_oauth_requests (
+    request_token_hash TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+    request_secret_ciphertext TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_zotero_oauth_requests_expiry
+ON zotero_oauth_requests(expires_at);
+
+CREATE TABLE IF NOT EXISTS zotero_oauth_connections (
+    member_id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+    last_database_id TEXT REFERENCES account_databases(id) ON DELETE SET NULL,
+    zotero_user_id TEXT NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    api_key_ciphertext TEXT NOT NULL,
+    access_json TEXT NOT NULL DEFAULT '{}',
+    verified_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -823,6 +870,202 @@ def oauth_token_cipher() -> Fernet:
 
 def encrypt_oauth_token(value: str) -> str:
     return oauth_token_cipher().encrypt(value.encode("utf-8")).decode("ascii")
+
+
+def decrypt_oauth_token(value: str) -> str:
+    return oauth_token_cipher().decrypt(value.encode("ascii")).decode("utf-8")
+
+
+def zotero_oauth_config() -> dict[str, str] | None:
+    client_key = str(os.environ.get("ZOTERO_OAUTH_CLIENT_KEY") or "").strip()
+    client_secret = str(os.environ.get("ZOTERO_OAUTH_CLIENT_SECRET") or "").strip()
+    callback_url = str(os.environ.get("ZOTERO_OAUTH_CALLBACK_URL") or "").strip()
+    if not client_key or not client_secret or not callback_url:
+        return None
+    if not callback_url.startswith("https://"):
+        raise RuntimeError("Zotero OAuth requires an HTTPS callback URL.")
+    return {
+        "client_key": client_key,
+        "client_secret": client_secret,
+        "callback_url": callback_url,
+        "request_url": "https://www.zotero.org/oauth/request",
+        "authorize_url": "https://www.zotero.org/oauth/authorize",
+        "access_url": "https://www.zotero.org/oauth/access",
+    }
+
+
+def oauth1_quote(value: Any) -> str:
+    return quote(str(value), safe="~-._")
+
+
+def oauth1_authorization_header(
+    method: str,
+    url: str,
+    *,
+    client_key: str,
+    client_secret: str,
+    token: str = "",
+    token_secret: str = "",
+    extra: dict[str, str] | None = None,
+) -> str:
+    parameters = {
+        "oauth_consumer_key": client_key,
+        "oauth_nonce": secrets.token_urlsafe(24),
+        "oauth_signature_method": "HMAC-SHA1",
+        "oauth_timestamp": str(int(time.time())),
+        "oauth_version": "1.0",
+        **(extra or {}),
+    }
+    if token:
+        parameters["oauth_token"] = token
+    normalized = "&".join(
+        f"{oauth1_quote(key)}={oauth1_quote(value)}"
+        for key, value in sorted(parameters.items())
+    )
+    signature_base = "&".join(
+        (method.upper(), oauth1_quote(url), oauth1_quote(normalized))
+    )
+    signing_key = f"{oauth1_quote(client_secret)}&{oauth1_quote(token_secret)}"
+    signature = base64.b64encode(
+        hmac.new(signing_key.encode("utf-8"), signature_base.encode("utf-8"), hashlib.sha1).digest()
+    ).decode("ascii")
+    header_parameters = {**parameters, "oauth_signature": signature}
+    return "OAuth " + ", ".join(
+        f'{oauth1_quote(key)}="{oauth1_quote(value)}"'
+        for key, value in sorted(header_parameters.items())
+    )
+
+
+async def request_zotero_temporary_credentials() -> dict[str, str]:
+    config = zotero_oauth_config()
+    if config is None:
+        raise HTTPException(status_code=503, detail="Zotero sign-in is not configured.")
+    header = oauth1_authorization_header(
+        "POST",
+        config["request_url"],
+        client_key=config["client_key"],
+        client_secret=config["client_secret"],
+        extra={"oauth_callback": config["callback_url"]},
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+            response = await client.post(config["request_url"], headers={"Authorization": header})
+            response.raise_for_status()
+        payload = {key: values[0] for key, values in parse_qs(response.text).items() if values}
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Zotero could not start authorization. Please try again.") from exc
+    token = str(payload.get("oauth_token") or "")
+    secret = str(payload.get("oauth_token_secret") or "")
+    if not token or not secret or payload.get("oauth_callback_confirmed") != "true":
+        raise HTTPException(status_code=502, detail="Zotero returned an invalid authorization response.")
+    return {"token": token, "secret": secret}
+
+
+def store_zotero_oauth_request(*, token: str, secret: str, member_id: str, database_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    with connect() as con:
+        con.execute("DELETE FROM zotero_oauth_requests WHERE expires_at<=?", (now.isoformat(),))
+        con.execute(
+            """
+            INSERT INTO zotero_oauth_requests
+              (request_token_hash, member_id, database_id, request_secret_ciphertext, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                secret_hash(f"zotero-oauth-request:{token}"), member_id, database_id,
+                encrypt_oauth_token(secret), now.isoformat(),
+                (now + timedelta(seconds=ZOTERO_OAUTH_REQUEST_MAX_AGE)).isoformat(),
+            ),
+        )
+
+
+def consume_zotero_oauth_request(token: str, member_id: str) -> Any:
+    if not token or len(token) > 500:
+        raise HTTPException(status_code=400, detail="This Zotero authorization request is invalid.")
+    token_hash = secret_hash(f"zotero-oauth-request:{token}")
+    with connect() as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT * FROM zotero_oauth_requests WHERE request_token_hash=? FOR UPDATE",
+            (token_hash,),
+        ).fetchone()
+        if row is not None:
+            con.execute("DELETE FROM zotero_oauth_requests WHERE request_token_hash=?", (token_hash,))
+    if row is None or str(row["expires_at"]) <= utc_now():
+        raise HTTPException(status_code=400, detail="This Zotero authorization request expired or was already used.")
+    if not hmac.compare_digest(str(row["member_id"]), member_id):
+        raise HTTPException(status_code=403, detail="This Zotero authorization belongs to another account.")
+    return row
+
+
+async def exchange_zotero_access_token(token: str, token_secret: str, verifier: str) -> dict[str, Any]:
+    config = zotero_oauth_config()
+    if config is None:
+        raise HTTPException(status_code=503, detail="Zotero sign-in is not configured.")
+    header = oauth1_authorization_header(
+        "POST", config["access_url"], client_key=config["client_key"],
+        client_secret=config["client_secret"], token=token, token_secret=token_secret,
+        extra={"oauth_verifier": verifier},
+    )
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+            response = await client.post(config["access_url"], headers={"Authorization": header})
+            response.raise_for_status()
+        payload = {key: values[0] for key, values in parse_qs(response.text).items() if values}
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Zotero could not complete authorization. Please try again.") from exc
+    api_key = str(payload.get("oauth_token") or "")
+    user_id = str(payload.get("userID") or "")
+    if not api_key or not user_id:
+        raise HTTPException(status_code=502, detail="Zotero returned an incomplete authorization response.")
+    return {"api_key": api_key, "user_id": user_id, "username": str(payload.get("username") or "")[:200]}
+
+
+async def verify_zotero_api_key(api_key: str) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+            response = await client.get(
+                "https://api.zotero.org/keys/current",
+                headers={"Zotero-API-Key": api_key, "Zotero-API-Version": "3"},
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="Zotero could not verify the new connection.") from exc
+    if not isinstance(payload, dict) or not (payload.get("access") or {}).get("user", {}).get("library"):
+        raise HTTPException(status_code=403, detail="VitaMine needs read access to your Zotero library.")
+    return payload
+
+
+def store_zotero_oauth_connection(*, member_id: str, database_id: str, token: dict[str, Any], access: dict[str, Any]) -> None:
+    now = utc_now()
+    with connect() as con:
+        con.execute(
+            """
+            INSERT INTO zotero_oauth_connections
+              (member_id, last_database_id, zotero_user_id, username, api_key_ciphertext,
+               access_json, verified_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (member_id) DO UPDATE SET
+              last_database_id=excluded.last_database_id, zotero_user_id=excluded.zotero_user_id,
+              username=excluded.username, api_key_ciphertext=excluded.api_key_ciphertext,
+              access_json=excluded.access_json, verified_at=excluded.verified_at,
+              updated_at=excluded.updated_at
+            """,
+            (
+                member_id, database_id, token["user_id"], token["username"],
+                encrypt_oauth_token(str(token["api_key"])), json.dumps(access), now, now,
+            ),
+        )
+
+
+def account_zotero_api_key(member_id: str) -> str:
+    with connect() as con:
+        row = con.execute(
+            "SELECT api_key_ciphertext FROM zotero_oauth_connections WHERE member_id=?",
+            (member_id,),
+        ).fetchone()
+    return decrypt_oauth_token(str(row["api_key_ciphertext"])) if row is not None else ""
 
 
 def create_oauth_authorization_state(member_id: str, database_id: str) -> str:
@@ -1359,6 +1602,36 @@ def migration_009_verified_email_and_passkeys(con: GatewayConnection) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_passkey_challenges_expiry ON passkey_challenges(expires_at)")
 
 
+def migration_010_zotero_oauth(con: GatewayConnection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS zotero_oauth_requests (
+            request_token_hash TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+            request_secret_ciphertext TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_zotero_oauth_requests_expiry ON zotero_oauth_requests(expires_at)")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS zotero_oauth_connections (
+            member_id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+            last_database_id TEXT REFERENCES account_databases(id) ON DELETE SET NULL,
+            zotero_user_id TEXT NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            api_key_ciphertext TEXT NOT NULL,
+            access_json TEXT NOT NULL DEFAULT '{}',
+            verified_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1369,6 +1642,7 @@ CLOUD_MIGRATIONS = (
     (7, migration_007_llm_usage_ledger),
     (8, migration_008_premium_account_costs),
     (9, migration_009_verified_email_and_passkeys),
+    (10, migration_010_zotero_oauth),
 )
 
 
@@ -1957,6 +2231,10 @@ def start_workspace_worker(row: sqlite3.Row) -> int:
         "VITAMINE_CLOUD_WORKER": "1",
         "VITAMINE_LLM_USAGE_PATH": str(session_dir / "llm-usage.jsonl"),
     }
+    env.pop("ZOTERO_API_KEY", None)
+    zotero_api_key = account_zotero_api_key(str(row["member_id"]))
+    if zotero_api_key:
+        env["ZOTERO_API_KEY"] = zotero_api_key
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             [
@@ -2642,6 +2920,10 @@ def execute_background_job(job: Any) -> None:
         "VITAMINE_CLOUD_WORKER": "1",
         "VITAMINE_LLM_USAGE_PATH": str(usage_path),
     }
+    env.pop("ZOTERO_API_KEY", None)
+    zotero_api_key = account_zotero_api_key(str(job["member_id"]))
+    if zotero_api_key:
+        env["ZOTERO_API_KEY"] = zotero_api_key
     command = [
         sys.executable,
         "-m",
@@ -3142,6 +3424,20 @@ def orcid_oauth_result_redirect(result: str) -> RedirectResponse:
     return RedirectResponse(url=f"/?{urlencode({'orcid_oauth': result})}", status_code=303)
 
 
+def zotero_oauth_result_redirect(result: str) -> RedirectResponse:
+    return RedirectResponse(url=f"/?{urlencode({'zotero_oauth': result})}", status_code=303)
+
+
+def restart_workspace_with_current_connections(workspace: Any) -> None:
+    stop_workspace(workspace, remove_files=False)
+    pid = start_workspace_worker(workspace)
+    with connect() as con:
+        con.execute(
+            "UPDATE workspace_sessions SET pid=?, last_seen_at=? WHERE id=?",
+            (pid, utc_now(), workspace["id"]),
+        )
+
+
 app = FastAPI(
     title="VitaMine Cloud",
     docs_url=None,
@@ -3338,6 +3634,109 @@ async def link_authenticated_orcid_to_current_cv(
         raise HTTPException(status_code=409, detail="Connect your ORCID account first.")
     await apply_authenticated_orcid_to_workspace(workspace, str(connection["orcid_id"]))
     return {"ok": True, "orcid_id": str(connection["orcid_id"])}
+
+
+@app.get("/gateway/zotero/oauth/status")
+def zotero_oauth_status(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    with connect() as con:
+        row = con.execute(
+            "SELECT zotero_user_id, username, access_json, verified_at FROM zotero_oauth_connections WHERE member_id=?",
+            (member["id"],),
+        ).fetchone()
+    return {
+        "ok": True, "configured": zotero_oauth_config() is not None,
+        "connected": row is not None,
+        "zotero_user_id": str(row["zotero_user_id"]) if row is not None else "",
+        "username": str(row["username"] or "") if row is not None else "",
+        "access": parsed_json_object(row["access_json"]) if row is not None else {},
+        "verified_at": str(row["verified_at"]) if row is not None else None,
+    }
+
+
+@app.post("/gateway/zotero/oauth/start")
+async def start_zotero_oauth(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    config = zotero_oauth_config()
+    if config is None:
+        raise HTTPException(status_code=503, detail="Zotero sign-in is not configured.")
+    workspace = workspace_for_request(request, authorization)
+    if not workspace["database_id"]:
+        raise HTTPException(status_code=409, detail="Open a saved VitaMine CV before connecting Zotero.")
+    if active_background_job(str(workspace["database_id"])):
+        raise HTTPException(status_code=409, detail="Wait for the current background process to finish before connecting Zotero.")
+    credentials = await request_zotero_temporary_credentials()
+    store_zotero_oauth_request(
+        token=credentials["token"], secret=credentials["secret"],
+        member_id=str(workspace["member_id"]), database_id=str(workspace["database_id"]),
+    )
+    permissions = urlencode(
+        {"name": "VitaMine", "library_access": "1", "notes_access": "0", "write_access": "0", "all_groups": "read"}
+    )
+    return {
+        "ok": True,
+        "authorization_url": f"{config['authorize_url']}?oauth_token={quote(credentials['token'])}&{permissions}",
+    }
+
+
+@app.get("/gateway/zotero/oauth/callback")
+async def complete_zotero_oauth(
+    request: Request,
+    oauth_token: str = "",
+    oauth_verifier: str = "",
+    authorization: str | None = Header(default=None),
+) -> RedirectResponse:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    oauth_request = consume_zotero_oauth_request(oauth_token, str(member["id"]))
+    if not oauth_verifier or len(oauth_verifier) > 500:
+        return zotero_oauth_result_redirect("cancelled")
+    workspace = workspace_for_request(request, authorization)
+    if not hmac.compare_digest(str(workspace["database_id"] or ""), str(oauth_request["database_id"])):
+        return zotero_oauth_result_redirect("workspace-changed")
+    try:
+        token = await exchange_zotero_access_token(
+            oauth_token, decrypt_oauth_token(str(oauth_request["request_secret_ciphertext"])), oauth_verifier
+        )
+        access = await verify_zotero_api_key(str(token["api_key"]))
+        store_zotero_oauth_connection(
+            member_id=str(member["id"]), database_id=str(workspace["database_id"]), token=token, access=access
+        )
+        restart_workspace_with_current_connections(workspace)
+    except HTTPException:
+        return zotero_oauth_result_redirect("link-error")
+    return zotero_oauth_result_redirect("connected")
+
+
+@app.delete("/gateway/zotero/oauth/connection")
+async def disconnect_zotero_oauth(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    workspace = workspace_for_request(request, authorization)
+    if active_background_job(str(workspace["database_id"])):
+        raise HTTPException(status_code=409, detail="Wait for the current background process to finish before disconnecting Zotero.")
+    api_key = account_zotero_api_key(str(workspace["member_id"]))
+    if not api_key:
+        return {"ok": True, "disconnected": False}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+            response = await client.delete(
+                f"https://api.zotero.org/keys/{quote(api_key, safe='')}",
+                headers={"Zotero-API-Key": api_key, "Zotero-API-Version": "3"},
+            )
+            if response.status_code not in {204, 404}:
+                response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Zotero could not revoke this connection. Please try again.") from exc
+    with connect() as con:
+        con.execute("DELETE FROM zotero_oauth_connections WHERE member_id=?", (workspace["member_id"],))
+    restart_workspace_with_current_connections(workspace)
+    return {"ok": True, "disconnected": True}
 
 
 @app.get("/", response_class=HTMLResponse)

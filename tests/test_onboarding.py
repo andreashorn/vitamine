@@ -13,7 +13,7 @@ class OnboardingTests(unittest.TestCase):
         html = (root / "vitamine" / "static" / "index.html").read_text()
         script = (root / "vitamine" / "static" / "app.js").read_text()
 
-        self.assertIn("20260801-dashboard-citation-map-enrichment", html)
+        self.assertIn("20260801-zotero-oauth", html)
         self.assertEqual(html.count('id="enrichCvDashboard"'), 1)
         self.assertLess(html.index('id="enrichCvDashboard"'), html.index('id="cloudAccountMenu"'))
         self.assertIn('class="topbarEnrichButton"', html)

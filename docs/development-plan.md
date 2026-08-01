@@ -448,7 +448,7 @@ Evidence: pending
 - [x] OpenAlex citation metrics and ROR-informed institution mapping.
 - [x] Automatically refresh sensible institution and metric information rather
   than requiring unnecessary buttons.
-- [ ] Zotero OAuth so users do not have to create and paste API keys.
+- [x] Zotero OAuth so hosted users do not have to create and paste API keys.
 - [ ] A connections page where users can inspect, refresh, or revoke linked
   services.
 - [ ] Integration-specific monitoring and disciplined retry/backoff behavior
