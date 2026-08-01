@@ -925,8 +925,16 @@ def set_setting(con: sqlite3.Connection, key: str, value: str | None) -> None:
     )
 
 
+def zotero_runtime_api_key(con: sqlite3.Connection) -> str:
+    stored_key = get_setting(con, "zotero_api_key")
+    environment_key = os.environ.get("ZOTERO_API_KEY") or ""
+    if os.environ.get("VITAMINE_CLOUD_WORKER") == "1" and environment_key:
+        return environment_key
+    return stored_key or environment_key
+
+
 def zotero_saved_env(con: sqlite3.Connection) -> dict[str, str]:
-    api_key = get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
+    api_key = zotero_runtime_api_key(con)
     library_type = get_setting(con, "zotero_library_type") or os.environ.get("ZOTERO_LIBRARY_TYPE") or "users"
     library_id = get_setting(con, "zotero_library_id") or os.environ.get("ZOTERO_LIBRARY_ID") or ""
     group_name = get_setting(con, "zotero_group_name") or os.environ.get("ZOTERO_GROUP_NAME") or ""
@@ -2219,7 +2227,7 @@ def get_connections() -> dict[str, Any]:
             LIMIT 1
             """
         ).fetchone()
-        api_key = get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
+        api_key = zotero_runtime_api_key(con)
         library_type = get_setting(con, "zotero_library_type") or "users"
         library_id = get_setting(con, "zotero_library_id")
         stored_policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
@@ -2285,7 +2293,7 @@ async def update_connections(request: Request) -> dict[str, Any]:
         set_setting(con, "publication_source_policy", source_policy)
         if api_key:
             set_setting(con, "zotero_api_key", api_key)
-        effective_key = api_key or get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
+        effective_key = api_key or zotero_runtime_api_key(con)
         if effective_key and not library_id:
             _, libraries = zotero_accessible_libraries(effective_key)
             chosen = choose_zotero_library(
