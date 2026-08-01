@@ -2945,6 +2945,12 @@ label.invalid input {
   font-weight: 700;
 }
 
+.citationProfileTable .citationMetricGroupFirst {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
 .citationProfileChart {
   display: grid;
   gap: 10px;

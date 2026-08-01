@@ -96,12 +96,14 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("First/last-author citations", script)
         self.assertIn("citationYearDetail", script)
         self.assertIn("first_last_author_since_yearly_citations", script)
+        self.assertIn("All Publications", script)
+        self.assertIn("First/Last-author publications", script)
         self.assertIn("citationYearDetail isEmpty", script)
         document = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
-        self.assertIn("20260801-fixed-metric-cards", document)
+        self.assertIn("20260801-citation-sections", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")

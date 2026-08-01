@@ -1709,6 +1709,7 @@ function renderCitationProfile(profile) {
   const sinceYear = profile.since_year || "";
   coverage.textContent = `${formatMetricNumber(profile.citation_metric_count || 0)} publications with OpenAlex citation data`;
   table.innerHTML = `
+    <span class="citationMetricGroup citationMetricGroupFirst">All Publications</span>
     <div></div>
     <strong>All</strong>
     <strong>Since ${escapeHtml(sinceYear)}</strong>
@@ -1721,9 +1722,10 @@ function renderCitationProfile(profile) {
     <span>i10-index</span>
     <strong>${formatMetricNumber(all.i10_index)}</strong>
     <strong>${formatMetricNumber(recent.i10_index)}</strong>
-    <span class="citationMetricGroup">First/last-author publications</span>
-    <span></span>
-    <span></span>
+    <span class="citationMetricGroup">First/Last-author publications</span>
+    <div></div>
+    <strong>All</strong>
+    <strong>Since ${escapeHtml(sinceYear)}</strong>
     <span>Citations</span>
     <strong>${formatMetricNumber(firstLast.citations)}</strong>
     <strong>${formatMetricNumber(firstLastRecent.citations)}</strong>
