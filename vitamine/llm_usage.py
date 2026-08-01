@@ -14,10 +14,11 @@ from typing import Any
 
 
 SAFE_MODEL_RE = re.compile(r"[^A-Za-z0-9._:/-]+")
-PRICING_VERSION = "openai-standard-2026-07-31"
+PRICING_VERSION = "openai-standard-2026-08-01"
 PREMIUM_MARKUP_BASIS_POINTS = 20_000
 MICRO_USD_PER_USD = 1_000_000
 MODEL_PRICES_PER_MILLION = {
+    "gpt-5.4-nano": (Decimal("0.20"), Decimal("0.02"), Decimal("1.25")),
     "gpt-4.1": (Decimal("2.00"), Decimal("0.50"), Decimal("8.00")),
     "gpt-4.1-mini": (Decimal("0.40"), Decimal("0.10"), Decimal("1.60")),
     "gpt-4.1-nano": (Decimal("0.10"), Decimal("0.025"), Decimal("0.40")),

@@ -190,8 +190,9 @@ Both deployments use the same application code:
 
 - `config/vitamine-desktop.json` retains user-selectable local/API providers.
 - `deploy/strato/vitamine-hosted.json` forces the shared OpenAI provider and
-  `gpt-4.1-mini`, hides user configuration, rejects settings updates, and skips
-  the LLM configuration step in onboarding.
+  `gpt-5.4-nano` with low reasoning effort and an 8,192-token completion
+  ceiling, hides user configuration, rejects settings updates, and skips the
+  LLM configuration step in onboarding.
 - The shared key is stored only in `/etc/vitamine-cloud.env`.
 - Never copy the key into the repository, command output, logs, or chat.
 

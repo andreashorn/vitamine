@@ -3,6 +3,7 @@ import unittest
 
 from vitamine.scripts.build_long_cv import _formal_four_columns
 from vitamine.scripts.import_uploaded_cv import (
+    apply_generation_controls,
     coalesce_numbered_citations,
     existing_entry_id,
     llm_text_chunks,
@@ -11,6 +12,20 @@ from vitamine.scripts.import_uploaded_cv import (
 
 
 class CvImportAndExportTests(unittest.TestCase):
+    def test_gpt5_generation_controls_use_reasoning_compatible_parameters(self):
+        body = {}
+        apply_generation_controls(
+            body,
+            {"api_reasoning_effort": "low", "api_max_tokens": "8192"},
+            "gpt-5.4-nano",
+        )
+        self.assertEqual(body, {"reasoning_effort": "low", "max_completion_tokens": 8192})
+
+    def test_legacy_generation_controls_remain_compatible(self):
+        body = {}
+        apply_generation_controls(body, {"api_max_tokens": "4096"}, "gpt-4.1-mini")
+        self.assertEqual(body, {"temperature": 0, "max_tokens": 4096})
+
     def test_compound_md_phd_entry_is_split_without_losing_programs(self):
         entry = {
             "section_key": "education",

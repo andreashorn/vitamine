@@ -156,6 +156,8 @@ CV_IMPORT_SETTING_FIELDS = {
     "ollama_model": "llama3.1:8b",
     "api_base_url": str(LLM_POLICY.get("api_base_url") or "https://api.openai.com/v1"),
     "api_model": str(LLM_POLICY.get("api_model") or "gpt-4.1-mini"),
+    "api_reasoning_effort": str(LLM_POLICY.get("api_reasoning_effort") or ""),
+    "api_max_tokens": str(LLM_POLICY.get("api_max_tokens") or "4096"),
     "bundled_llama_model_path": "",
     "bundled_llama_ctx_size": "4096",
 }

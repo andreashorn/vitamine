@@ -1152,10 +1152,9 @@ def call_openai_compatible(text: str, settings: dict[str, str], strict_schema: b
     body = {
         "model": model,
         "messages": [{"role": "user", "content": llm_prompt(text)}],
-        "temperature": 0,
-        "max_tokens": int(settings.get("api_max_tokens") or 4096),
         "response_format": response_format,
     }
+    apply_generation_controls(body, settings, model)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1167,6 +1166,18 @@ def call_openai_compatible(text: str, settings: dict[str, str], strict_schema: b
     )
     with urllib.request.urlopen(request, timeout=180) as response:
         return parse_json_response(response.read())
+
+
+def apply_generation_controls(body: dict[str, Any], settings: dict[str, str], model: str) -> None:
+    max_tokens = int(settings.get("api_max_tokens") or 4096)
+    if model.lower().startswith("gpt-5"):
+        body["max_completion_tokens"] = max_tokens
+        effort = str(settings.get("api_reasoning_effort") or "").strip().lower()
+        if effort:
+            body["reasoning_effort"] = effort
+        return
+    body["temperature"] = 0
+    body["max_tokens"] = max_tokens
 
 
 def http_error_detail(exc: urllib.error.HTTPError) -> str:
@@ -1410,13 +1421,12 @@ def call_openai_compatible_json(
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0,
-        "max_tokens": int(settings.get("api_max_tokens") or 4096),
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": "vitamine_discovery_review", "strict": True, "schema": schema},
         },
     }
+    apply_generation_controls(body, settings, model)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"

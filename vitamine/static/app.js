@@ -90,7 +90,7 @@ const PUBLICATION_CATEGORIES = [
 ];
 
 const DEFAULT_PUBLICATION_CATEGORIES = new Set(["peer_reviewed", "patents"]);
-const OPENAI_MODEL_PRESETS = new Set(["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"]);
+const OPENAI_MODEL_PRESETS = new Set(["gpt-5.4-nano", "gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini", "gpt-4o"]);
 
 function normalizedApiKeyInput(value) {
   let text = String(value || "").trim().replace(/\s+/g, "").replace(/^['"]|['"]$/g, "");

@@ -76,6 +76,11 @@ class LlmUsageTests(unittest.TestCase):
         costs = usage_costs({"model": "gpt-4.1-mini-2025-04-14", "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20})
         self.assertEqual(costs["wholesale_cost_microusd"], 60)
         self.assertEqual(costs["charged_cost_microusd"], 120)
+        nano_costs = usage_costs(
+            {"model": "gpt-5.4-nano-2026-03-17", "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20}
+        )
+        self.assertEqual(nano_costs["wholesale_cost_microusd"], 38)
+        self.assertEqual(nano_costs["charged_cost_microusd"], 76)
 
     def test_response_capture_and_ingestion_are_idempotent(self):
         usage_path = self.root / "usage.jsonl"
