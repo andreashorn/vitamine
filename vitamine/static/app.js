@@ -3973,6 +3973,8 @@ async function init() {
     if (response.ok) {
       const workspace = await response.json();
       configureCloudWorkspace(workspace);
+      const databasePanel = $("#databasePanel");
+      if (databasePanel) databasePanel.hidden = true;
       const databaseModeHelp = $("#databaseModeHelp");
       if (databaseModeHelp) databaseModeHelp.hidden = true;
       ["#renameDatabase", "#useExampleDatabase", "#createBlankDatabase", "#loadDatabase"].forEach((selector) => {
