@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260801-dashboard-citation-map">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-sync-service-cards">
 </head>
 <body>
   <header class="topbar">
@@ -204,65 +204,75 @@
               <p>Pull publication metadata from connected researcher services into the local VitaMine file.</p>
             </div>
             <form id="connectionsForm" class="connectionsForm">
-              <label>ORCID iD
-                <span class="linkedInput">
-                  <input id="connectionOrcid" placeholder="0000-0000-0000-0000">
-                  <button id="linkOrcid" class="orcidLinkButton" type="button">
-                    <span class="orcidIdMark" aria-hidden="true">iD</span>
-                    <span>Link ORCID</span>
-                  </button>
-                </span>
-              </label>
-              <label id="connectionZoteroKeyWrap">Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
-              <label>Zotero library
-                <select id="connectionZoteroLibrary">
-                  <option value="">Auto-detect from key</option>
-                </select>
-              </label>
-              <label>Zotero source
-                <select id="connectionZoteroSource">
-                  <option value="my_publications">My Publications</option>
-                  <option value="library">Whole library</option>
-                  <option value="collection">Collection</option>
-                </select>
-              </label>
-              <label id="connectionZoteroCollectionWrap">Collection
-                <select id="connectionZoteroCollection"></select>
-              </label>
-              <label>Publication source policy
-                <select id="publicationSourcePolicy">
-                  <option value="zotero_primary_orcid_validation">Zotero primary, ORCID validation</option>
-                  <option value="orcid_primary_zotero_validation">ORCID primary, Zotero validation</option>
-                  <option value="zotero_only">Zotero only</option>
-                  <option value="orcid_only">ORCID only</option>
-                </select>
-              </label>
+              <section class="connectionService" aria-labelledby="orcidConnectionTitle">
+                <div class="connectionServiceHeader">
+                  <span class="orcidIdMark" aria-hidden="true">iD</span>
+                  <div>
+                    <h3 id="orcidConnectionTitle">ORCID</h3>
+                    <p>Link and verify the researcher identity used for this CV.</p>
+                  </div>
+                </div>
+                <label>ORCID iD
+                  <span class="linkedInput">
+                    <input id="connectionOrcid" placeholder="0000-0000-0000-0000">
+                    <button id="linkOrcid" class="orcidLinkButton" type="button">
+                      <span class="orcidIdMark" aria-hidden="true">iD</span>
+                      <span>Link ORCID</span>
+                    </button>
+                  </span>
+                </label>
+                <p class="connectionServiceHint">Secure ORCID sign-in verifies your iD as part of linking it.</p>
+              </section>
+
+              <section class="connectionService" aria-labelledby="zoteroConnectionTitle">
+                <div class="connectionServiceHeader">
+                  <span class="zoteroMark" aria-hidden="true">Z</span>
+                  <div>
+                    <h3 id="zoteroConnectionTitle">Zotero</h3>
+                    <p>Choose the library and records VitaMine should import.</p>
+                  </div>
+                </div>
+                <div class="connectionFields">
+                  <label id="connectionZoteroKeyWrap">API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
+                  <label>Library
+                    <select id="connectionZoteroLibrary">
+                      <option value="">Auto-detect from key</option>
+                    </select>
+                  </label>
+                  <label>Source
+                    <select id="connectionZoteroSource">
+                      <option value="my_publications">My Publications</option>
+                      <option value="library">Whole library</option>
+                      <option value="collection">Collection</option>
+                    </select>
+                  </label>
+                  <label id="connectionZoteroCollectionWrap">Collection
+                    <select id="connectionZoteroCollection"></select>
+                  </label>
+                </div>
+                <div class="buttonRow zoteroActions">
+                  <button id="connectZotero" type="button">Connect Zotero</button>
+                  <button id="disconnectZotero" type="button" hidden>Disconnect Zotero</button>
+                  <button id="testZoteroConnection" type="button" title="Check access and refresh the list of available Zotero libraries">Refresh libraries</button>
+                  <button id="loadZoteroCollections" type="button">Load collections</button>
+                </div>
+                <span id="connectionStatus" class="connectionServiceStatus"></span>
+              </section>
+
               <div class="buttonRow connectionActions">
-                <button type="submit">Save Connections</button>
-                <button id="connectZotero" type="button">Connect Zotero</button>
-                <button id="disconnectZotero" type="button" hidden>Disconnect Zotero</button>
-                <button id="testZoteroConnection" type="button">Test Link</button>
-                <button id="loadZoteroCollections" type="button">Load Collections</button>
-                <span id="connectionStatus"></span>
+                <button type="submit">Save connection settings</button>
               </div>
             </form>
-            <div class="buttonRow">
-              <button id="syncZoteroDashboard" type="button">Pull from Zotero</button>
-            </div>
-            <div class="enrichmentSettings">
-              <label class="inlineCheck"><input id="aiWebDiscoveryEnabled" type="checkbox"> Include online profile discovery</label>
-              <span id="enrichmentLastRun"></span>
-            </div>
           </section>
 
           <section class="panel collaborationPanel">
             <div class="panelHeader">
               <h2>World Map</h2>
-              <p>Explore coauthor institutions or the affiliations of researchers who cite your work.</p>
               <div class="dashboardMapToggle" role="group" aria-label="World map data">
                 <button type="button" data-dashboard-map-mode="collaborations" aria-pressed="true">Coauthors</button>
                 <button type="button" data-dashboard-map-mode="citations" aria-pressed="false">Citations</button>
               </div>
+              <p>Explore coauthor institutions or the affiliations of researchers who cite your work.</p>
             </div>
             <div id="collaborationMap" class="collaborationMap" role="img" aria-label="World map of collaboration institutions"></div>
             <div class="mapSummary">
@@ -792,6 +802,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260802-publication-dialog-actions"></script>
+  <script src="/static/app.js?v=20260802-enrichment-simplified-publication-dialog-actions"></script>
 </body>
 </html>

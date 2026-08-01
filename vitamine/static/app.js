@@ -6,7 +6,6 @@ const state = {
   importInbox: { items: [], counts: [] },
   identifiers: [],
   connections: {},
-  enrichmentSettings: {},
   cvImport: {},
   database: {},
   onboarding: null,
@@ -359,7 +358,6 @@ async function resumeCloudBackgroundJob() {
 
 function setActionButtons(disabled) {
   [
-    "#syncZoteroDashboard",
     "#enrichCvDashboard",
     "#connectionsForm button[type='submit']",
     "#connectZotero",
@@ -1336,27 +1334,6 @@ async function saveCvImportSettings() {
   }
 }
 
-async function loadEnrichmentSettings() {
-  const discovery = $("#aiWebDiscoveryEnabled");
-  if (!discovery) return;
-  const data = await api("/api/enrichment-settings");
-  state.enrichmentSettings = data;
-  discovery.checked = !!data.ai_web_discovery_enabled;
-  const lastRun = $("#enrichmentLastRun");
-  if (lastRun) lastRun.textContent = data.enrichment_last_run ? `Last enriched ${data.enrichment_last_run}` : "Not enriched yet";
-}
-
-async function saveEnrichmentSettings() {
-  await api("/api/enrichment-settings", {
-    method: "PUT",
-    body: JSON.stringify({
-      ai_web_discovery_enabled: $("#aiWebDiscoveryEnabled").checked,
-    }),
-  });
-  setStatus("Enrichment option saved");
-  await loadEnrichmentSettings();
-}
-
 async function importCvFiles(files) {
   files = Array.from(files || []);
   if (!files.length) return;
@@ -1446,12 +1423,10 @@ async function loadConnections() {
   renderZoteroLibraries();
   $("#connectionZoteroLibrary").value = data.zotero_library_value || "";
   $("#connectionZoteroSource").value = data.zotero_source_mode || "my_publications";
-  $("#publicationSourcePolicy").value = data.publication_source_policy || "zotero_primary_orcid_validation";
   renderZoteroCollections();
-  const effective = data.effective_publication_source_policy || data.publication_source_policy || "";
   $("#connectionStatus").textContent = data.zotero_api_key_set
     ? "Zotero key saved"
-    : (effective === "orcid_only" && data.orcid_id ? "ORCID-only sync active" : "No Zotero key");
+    : (data.orcid_id ? "ORCID linked; Zotero optional" : "No publication source linked");
   updateZoteroSourceVisibility();
   await loadOrcidOAuthStatus();
   await loadZoteroOAuthStatus();
@@ -1471,7 +1446,6 @@ async function saveConnections(event) {
       zotero_source_mode: sourceMode,
       zotero_collection_key: selected?.key || "",
       zotero_collection_name: selected?.name || "",
-      publication_source_policy: $("#publicationSourcePolicy").value,
     }),
   });
   $("#connectionZoteroKey").value = "";
@@ -4177,7 +4151,6 @@ async function init() {
   on("#cvImportProvider", "change", updateCvImportProviderVisibility);
   on("#cvImportOpenAiModel", "change", updateCvImportProviderVisibility);
   on("#saveCvImportSettings", "click", saveCvImportSettings);
-  on("#aiWebDiscoveryEnabled", "change", saveEnrichmentSettings);
   on("#chooseCvImportFile", "click", () => $("#cvImportFileInput")?.click());
   on("#cvImportFileInput", "change", (event) => importCvFiles(event.target.files));
   on("#importCvDropzone", "dragover", (event) => {
@@ -4242,10 +4215,6 @@ async function init() {
   });
   $("#deleteIdentifier").addEventListener("click", deleteIdentifier);
   $("#narrativeForm").addEventListener("submit", saveNarrativeReport);
-  const sync = async () => {
-    const data = await runAction("/api/actions/sync-zotero", "Zotero pulled", "Pulling from Zotero...");
-    actionLog("#syncOutput", data);
-  };
   const enrichCv = async () => {
     if (state.onboarding?.step === "enrich") {
       const coach = $("#onboardingCoach");
@@ -4264,14 +4233,12 @@ async function init() {
     setStatus(enrichmentSummaryText(data));
     actionLog("#syncOutput", data);
     await loadImportInbox();
-    await loadEnrichmentSettings();
     await loadConnections();
     await loadPersonIdentifiers();
     await loadMetrics();
     await loadPublications();
     await loadOnboarding();
   };
-  $("#syncZoteroDashboard").addEventListener("click", sync);
   $("#enrichCvDashboard").addEventListener("click", enrichCv);
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
@@ -4289,7 +4256,6 @@ async function init() {
   await loadStartupStep("Summary", loadSummary);
   await loadStartupStep("CV import settings", loadCvImportSettings);
   await loadStartupStep("Connections", loadConnections);
-  await loadStartupStep("Enrichment settings", loadEnrichmentSettings);
   await loadStartupStep("Import inbox", loadImportInbox);
   await loadStartupStep("Export settings", loadExportSettings);
   await loadStartupStep("Export formats", loadExportFormats);

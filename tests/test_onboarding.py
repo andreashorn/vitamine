@@ -13,13 +13,19 @@ class OnboardingTests(unittest.TestCase):
         html = (root / "vitamine" / "static" / "index.html").read_text()
         script = (root / "vitamine" / "static" / "app.js").read_text()
 
-        self.assertIn("20260801-zotero-oauth-libraries", html)
+        self.assertIn("20260802-enrichment-simplified-publication-dialog-actions", html)
         self.assertEqual(html.count('id="enrichCvDashboard"'), 1)
         self.assertLess(html.index('id="enrichCvDashboard"'), html.index('id="cloudAccountMenu"'))
         self.assertIn('class="topbarEnrichButton"', html)
         self.assertIn('id="orcidOauthDescription"', html)
         self.assertIn('id="linkOrcid" class="orcidLinkButton"', html)
         self.assertGreaterEqual(html.count('class="orcidIdMark"'), 2)
+        self.assertIn('id="orcidConnectionTitle">ORCID', html)
+        self.assertIn('id="zoteroConnectionTitle">Zotero', html)
+        self.assertIn('class="zoteroMark"', html)
+        self.assertIn('id="testZoteroConnection"', html)
+        self.assertIn('>Refresh libraries</button>', html)
+        self.assertNotIn('>Test Link</button>', html)
         self.assertIn(
             "Secure ORCID sign-in has not yet been enabled for this VitaMine deployment.",
             script,

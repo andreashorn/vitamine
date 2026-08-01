@@ -183,7 +183,7 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  align-items: end;
+  align-items: flex-start;
 }
 
 .exportHeaderControls label {
@@ -1775,18 +1775,83 @@ label.invalid input {
 .connectionsForm {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  background: var(--panel);
+  gap: 12px;
 }
 
 .connectionsForm label {
   min-width: 0;
 }
 
+.connectionService {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--panel);
+}
+
+.connectionServiceHeader {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.connectionServiceHeader h3,
+.connectionServiceHeader p,
+.connectionServiceHint {
+  margin: 0;
+}
+
+.connectionServiceHeader h3 {
+  font-size: 16px;
+}
+
+.connectionServiceHeader p,
+.connectionServiceHint,
+.connectionServiceStatus {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.connectionServiceHint {
+  margin-top: 9px;
+}
+
+.zoteroMark {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 7px;
+  background: #cc2936;
+  color: #ffffff;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.connectionFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.zoteroActions {
+  margin-top: 14px;
+}
+
+.connectionServiceStatus {
+  display: block;
+  margin-top: 10px;
+}
+
 .connectionActions {
   grid-column: 1 / -1;
+  justify-content: flex-end;
   margin-top: 0;
 }
 
@@ -2276,26 +2341,6 @@ label.invalid input {
   text-transform: uppercase;
 }
 
-.enrichmentSettings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  align-items: center;
-  margin-top: 10px;
-  color: var(--muted);
-}
-
-.enrichmentSettings label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 0;
-}
-
-.enrichmentSettings input[type="checkbox"] {
-  width: auto;
-}
-
 @keyframes enrichmentSpin {
   to { transform: rotate(360deg); }
 }
@@ -2646,8 +2691,25 @@ label.invalid input {
   min-width: 0;
 }
 
+.collaborationPanel .panelHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 16px;
+  align-items: center;
+}
+
+.collaborationPanel .panelHeader h2 {
+  margin-bottom: 0;
+}
+
+.collaborationPanel .panelHeader p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .dashboardMapToggle {
   display: inline-flex;
+  justify-self: end;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -3214,6 +3276,10 @@ label.invalid input {
     grid-template-columns: 1fr;
   }
 
+  .connectionsForm {
+    grid-template-columns: 1fr;
+  }
+
   .personPortraitPanel {
     grid-template-columns: 110px minmax(0, 1fr);
   }
@@ -3271,5 +3337,15 @@ label.invalid input {
 
   .biosketchNarrative {
     margin-bottom: 7px;
+  }
+}
+
+@media (max-width: 560px) {
+  .connectionFields {
+    grid-template-columns: 1fr;
+  }
+
+  .linkedInput {
+    flex-direction: column;
   }
 }
