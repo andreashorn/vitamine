@@ -3463,13 +3463,20 @@ async function savePublication(event) {
   const payload = publicationPayload();
   const path = id ? `/api/publications/${id}` : "/api/publications";
   const method = id ? "PUT" : "POST";
-  const data = await api(path, { method, body: JSON.stringify(payload) });
+  closePublicationEditor();
+  let data;
+  try {
+    data = await api(path, { method, body: JSON.stringify(payload) });
+  } catch (error) {
+    openPublicationEditor();
+    setStatus(`Could not save publication: ${error.message}`);
+    return;
+  }
   state.selectedPublicationId = Number(id || data.id || 0) || null;
   if (state.selectedPublicationId) {
     await syncPublicationProfileFlag("ultrashort", state.selectedPublicationId, payload.include_ultrashort);
     await syncPublicationProfileFlag("short", state.selectedPublicationId, payload.include_short);
   }
-  closePublicationEditor();
   setStatus("Publication saved");
   await loadPublications();
   await loadSummary();
@@ -3481,9 +3488,15 @@ async function savePublication(event) {
 async function deletePublication() {
   const id = $("#publicationId").value;
   if (!id) return;
-  await api(`/api/publications/${id}`, { method: "DELETE" });
-  clearPublicationForm();
   closePublicationEditor();
+  try {
+    await api(`/api/publications/${id}`, { method: "DELETE" });
+  } catch (error) {
+    openPublicationEditor();
+    setStatus(`Could not delete publication: ${error.message}`);
+    return;
+  }
+  clearPublicationForm();
   setStatus("Publication deleted");
   await loadPublications();
   await loadSummary();
