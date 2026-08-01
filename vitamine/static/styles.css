@@ -2500,6 +2500,8 @@ label.invalid input {
 
 .metricCard {
   min-width: 0;
+  height: 82px;
+  box-sizing: border-box;
   border: 1px solid var(--line);
   background: #f8fafc;
   padding: 11px;
@@ -2509,6 +2511,8 @@ label.invalid input {
 
 .metricCard:hover,
 .metricCard:focus {
+  height: auto;
+  min-height: 82px;
   border-color: var(--accent);
   background: #ffffff;
 }

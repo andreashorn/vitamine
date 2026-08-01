@@ -101,6 +101,12 @@ class MetricsTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
+        self.assertIn("20260801-fixed-metric-cards", document)
+        styles = (
+            Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
+        ).read_text(encoding="utf-8")
+        self.assertIn("height: 82px;", styles)
+        self.assertIn("min-height: 82px;", styles)
 
 
 if __name__ == "__main__":
