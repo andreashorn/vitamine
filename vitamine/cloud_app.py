@@ -4830,8 +4830,8 @@ def render_public_profile(
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <title>{name} — Academic profile</title>
       <meta name="description" content="{description}">
-      <link rel="stylesheet" href="/assets/public-profile.css?v=20260731-portrait-full-width">
-      <script src="/assets/public-profile.js?v=20260731-portrait-flow" defer></script>
+      <link rel="stylesheet" href="/assets/public-profile.css?v=20260801-citation-map">
+      <script src="/assets/public-profile.js?v=20260801-citation-map" defer></script>
     </head>
     <body
       data-profile-slug="{slug}"
