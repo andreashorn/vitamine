@@ -38,6 +38,7 @@ from .cloud_crypto import decrypt_private_data, encrypt_private_data, is_encrypt
 from .llm_usage import usage_costs
 from .public_profiles import (
     PROFILE_BLOCK_KEYS,
+    PUBLIC_PROFILE_SCHEMA_VERSION,
     build_public_profile_snapshot,
     normalize_profile_blocks,
 )
@@ -666,7 +667,7 @@ class DatabaseRename(BaseModel):
 
 
 class PublicProfileSnapshot(BaseModel):
-    schema_version: int = Field(default=1, ge=1, le=2)
+    schema_version: int = Field(default=1, ge=1, le=PUBLIC_PROFILE_SCHEMA_VERSION)
     source_database_id: str = Field(default="", max_length=200)
     display_name: str = Field(min_length=1, max_length=160)
     profile_title: str = Field(default="", max_length=200)
@@ -4570,6 +4571,51 @@ def built_profile_for_database(
         )
 
 
+def current_public_profile_row(row: Any) -> Any:
+    """Lazily rebuild snapshots created by older projection code."""
+    current = public_snapshot(row, include_internal=True)
+    try:
+        version = int(current.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version >= PUBLIC_PROFILE_SCHEMA_VERSION:
+        return row
+    database_id = str(current.get("source_database_id") or "")
+    if not database_id:
+        return row
+    try:
+        with connect() as con:
+            database = con.execute(
+                """
+                SELECT * FROM account_databases
+                WHERE id=? AND member_id=? AND deleted_at IS NULL
+                """,
+                (database_id, str(row["member_id"])),
+            ).fetchone()
+        if database is None:
+            return row
+        content = decrypt_database_content(
+            database["sqlite_blob"], member_id=str(database["member_id"]),
+            database_id=str(database["id"]),
+        )
+        with materialized_database_blob(content) as database_path:
+            rebuilt = build_public_profile_snapshot(
+                database_path, database_id=database_id, blocks=current.get("blocks"),
+            )
+        preserve_public_profile_customizations(rebuilt, current)
+        with connect() as con:
+            write_public_profile(
+                con, slug=str(row["slug"]), member_id=str(row["member_id"]), snapshot=rebuilt,
+            )
+            refreshed = con.execute(
+                "SELECT * FROM public_profiles WHERE slug=?", (str(row["slug"]),)
+            ).fetchone()
+        return refreshed or row
+    except Exception:
+        LOGGER.warning("public_profile_projection_upgrade_failed")
+        return row
+
+
 @app.post("/api/profile/publish")
 def publish_cv_profile(
     payload: ProfilePublishRequest,
@@ -4762,6 +4808,7 @@ def public_profile_json(slug: str) -> JSONResponse:
         row = con.execute("SELECT * FROM public_profiles WHERE slug=?", (normalized_slug,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Public profile not found.")
+    row = current_public_profile_row(row)
     return JSONResponse(
         public_snapshot(row),
         headers={
@@ -4928,6 +4975,7 @@ def embedded_profile(slug: str, block: str = "", theme: str = "native") -> str:
         row = con.execute("SELECT * FROM public_profiles WHERE slug=?", (normalized_slug,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Public profile not found.")
+    row = current_public_profile_row(row)
     snapshot = public_snapshot(row)
     visible = {
         item["key"]: item["visible"]
@@ -4945,6 +4993,7 @@ def public_profile_page(slug: str) -> str:
         row = con.execute("SELECT * FROM public_profiles WHERE slug=?", (normalized_slug,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Public profile not found.")
+    row = current_public_profile_row(row)
     return render_public_profile(public_snapshot(row))
 
 

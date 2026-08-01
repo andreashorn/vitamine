@@ -540,8 +540,10 @@ is unpublished or moved to another CV.
 Whenever the authoritative saved CV is persisted, its public snapshot is
 rebuilt automatically. A projection failure is logged but never prevents the
 private CV from being saved. Owners can also request an immediate refresh from
-the profile toolbar. No profile is published merely by creating an account or
-uploading a CV.
+the profile toolbar. Public requests also rebuild snapshots created by an older
+projection schema, so deploying a new public-profile field does not leave the
+owner with a manual maintenance task. No profile is published merely by
+creating an account or uploading a CV.
 
 The account library presents CV creation, upload, and saved CV cards as the
 primary workspace, with public-profile management in a separate secondary

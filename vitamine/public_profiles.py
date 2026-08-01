@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 
 PROFILE_BLOCK_KEYS = ("bio", "metrics", "publications", "collaborators")
+PUBLIC_PROFILE_SCHEMA_VERSION = 3
 PROFILE_BLOCK_LABELS = {
     "bio": "About",
     "metrics": "Citations",
@@ -519,7 +520,7 @@ def build_public_profile_snapshot(
             "biography": narrative,
         }
         snapshot = {
-            "schema_version": 2,
+            "schema_version": PUBLIC_PROFILE_SCHEMA_VERSION,
             "source_database_id": database_id,
             "display_name": display_name,
             "profile_title": profile_title,

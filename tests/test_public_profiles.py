@@ -88,7 +88,7 @@ class PublicProfileSnapshotTests(unittest.TestCase):
             )
 
         serialized = json.dumps(snapshot)
-        self.assertEqual(snapshot["schema_version"], 2)
+        self.assertEqual(snapshot["schema_version"], 3)
         self.assertEqual(snapshot["display_name"], "Ada Public")
         self.assertEqual(snapshot["profile_title"], "Ada Public, PhD")
         self.assertEqual(snapshot["bio"]["institution"], "Example University")

@@ -1873,9 +1873,27 @@ def metrics() -> dict[str, Any]:
 
 
 @app.get("/api/collaboration-map")
-def collaboration_map() -> dict[str, Any]:
+def collaboration_map(mode: str = "collaborations") -> dict[str, Any]:
+    mode = str(mode or "collaborations").strip().casefold()
+    if mode not in {"collaborations", "citations"}:
+        raise HTTPException(status_code=422, detail="Choose collaborations or citations.")
     with connect() as con:
         person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
+        if mode == "citations":
+            citation_rows = rows_dict(con.execute(
+                """
+                SELECT ci.publication_id, ci.citing_openalex_work_id, ci.citing_work_year,
+                       ci.author_id, ci.author_name, ci.institution_id, ci.institution_name,
+                       ci.ror, ci.country_code, ci.country, ci.latitude, ci.longitude
+                FROM citation_institutions ci
+                JOIN publications p ON p.id=ci.publication_id
+                WHERE ci.latitude IS NOT NULL AND ci.longitude IS NOT NULL
+                  AND COALESCE(p.suppress_display, 0)=0
+                ORDER BY ci.institution_name, ci.author_name
+                """
+            ).fetchall())
+        else:
+            citation_rows = []
         rows = rows_dict(
             con.execute(
                 """
@@ -1913,6 +1931,60 @@ def collaboration_map() -> dict[str, Any]:
             "edge_count": 0,
             "publication_links": 0,
             "needs_own_institution": True,
+            "mode": mode,
+        }
+    if mode == "citations":
+        name_terms = researcher_name_terms(person)
+        self_citing_works = {
+            str(row["citing_openalex_work_id"] or "")
+            for row in citation_rows
+            if author_matches_researcher(str(row["author_name"] or ""), name_terms)
+        }
+        grouped: dict[str, dict[str, Any]] = {}
+        all_researchers: set[str] = set()
+        sampled_works: set[str] = set()
+        for row in citation_rows:
+            work_id = str(row["citing_openalex_work_id"] or "")
+            if work_id in self_citing_works:
+                continue
+            institution_id = str(row["institution_id"] or row["institution_name"] or "")
+            author_name = str(row["author_name"] or "").strip()
+            author_key = str(row["author_id"] or "").strip() or author_name.casefold()
+            event = (int(row["publication_id"]), work_id)
+            item = grouped.setdefault(institution_id, {
+                "id": f"citation:{institution_id}", "name": row["institution_name"],
+                "ror": row["ror"], "country": row["country"],
+                "country_code": row["country_code"], "latitude": row["latitude"],
+                "longitude": row["longitude"], "events": set(), "researchers": {},
+            })
+            item["events"].add(event)
+            item["researchers"].setdefault(author_key, {"name": author_name, "events": set()})["events"].add(event)
+            all_researchers.add(author_key)
+            sampled_works.add(work_id)
+        ranked = sorted(grouped.values(), key=lambda item: (-len(item["events"]), str(item["name"]).casefold()))[:250]
+        nodes = [{**own_institution, "own": True}]
+        edges = []
+        country_counts: dict[str, int] = {}
+        citation_total = 0
+        for item in ranked:
+            count = len(item.pop("events"))
+            researchers = sorted(
+                ({"name": value["name"], "citation_count": len(value["events"])} for value in item.pop("researchers").values()),
+                key=lambda value: (-value["citation_count"], value["name"].casefold()),
+            )
+            item.update({"researchers": researchers[:20], "researcher_count": len(researchers),
+                         "citation_count": count, "own": False})
+            nodes.append(item)
+            edges.append({"source": own_institution["id"], "target": item["id"], "weight": count})
+            citation_total += count
+            country = item["country"] or item["country_code"] or "Unknown"
+            country_counts[country] = country_counts.get(country, 0) + count
+        return {
+            "mode": mode, "own": own_institution, "nodes": nodes, "edges": edges,
+            "top_countries": [{"country": country, "citation_count": count} for country, count in sorted(country_counts.items(), key=lambda value: value[1], reverse=True)[:10]],
+            "institution_count": len(ranked), "researcher_count": len(all_researchers),
+            "citation_links": citation_total, "sampled_works": len(sampled_works),
+            "needs_own_institution": False,
         }
     nodes = [{**own_institution, "own": True, "publication_count": 0, "author_count": 1, "authors": []}]
     edges = []
@@ -1946,6 +2018,7 @@ def collaboration_map() -> dict[str, Any]:
         for country, count in sorted(country_counts.items(), key=lambda item: item[1], reverse=True)[:10]
     ]
     return {
+        "mode": mode,
         "own": own_institution,
         "nodes": nodes,
         "edges": edges,

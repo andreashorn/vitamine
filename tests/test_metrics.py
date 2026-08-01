@@ -4,11 +4,39 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vitamine.app import metrics
+from vitamine.app import collaboration_map, metrics
 from vitamine.paths import create_blank_database
 
 
 class MetricsTests(unittest.TestCase):
+    def test_dashboard_citation_map_ranks_citing_researchers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "citation-map.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                con.execute(
+                    """UPDATE person SET full_name='Ada Lovelace', display_name='Ada Lovelace',
+                       own_institution_name='Own University', own_institution_country='UK',
+                       own_institution_latitude=51.5, own_institution_longitude=-0.1 WHERE id=1"""
+                )
+                publication_id = con.execute(
+                    "INSERT INTO publications(category, raw_citation) VALUES ('peer_reviewed', 'Paper')"
+                ).lastrowid
+                con.executemany(
+                    """INSERT INTO citation_institutions(
+                       publication_id, citing_openalex_work_id, author_id, author_name,
+                       institution_id, institution_name, country, latitude, longitude
+                       ) VALUES (?, ?, 'A1', 'Grace Citer', 'I1', 'Citing University',
+                                 'France', 48.86, 2.35)""",
+                    [(publication_id, "W1"), (publication_id, "W2")],
+                )
+            with patch("vitamine.app.active_db_path", return_value=path):
+                payload = collaboration_map("citations")
+            self.assertEqual(payload["mode"], "citations")
+            self.assertEqual(payload["researcher_count"], 1)
+            self.assertEqual(payload["citation_links"], 2)
+            self.assertEqual(payload["nodes"][1]["researchers"][0]["name"], "Grace Citer")
+
     def test_profile_metrics_exclude_hidden_problem_records(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "metrics.vitamine"
@@ -106,7 +134,8 @@ class MetricsTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
-        self.assertIn("20260801-citation-selection", document)
+        self.assertIn("20260801-dashboard-citation-map", document)
+        self.assertIn("20260801-dashboard-citation-map-enrichment", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
