@@ -359,22 +359,22 @@ def classify_and_suppress_non_cv_publications(con: sqlite3.Connection) -> int:
     for row in rows:
         category = None
         note = None
+        suppress_display = 0
         if is_poster(row):
-            category = "posters"
-            note = "Suppressed poster / conference abstract; not exported to CV publication lists."
+            category = "poster_presentations"
         elif is_preprint(row):
             category = "preprints"
-            note = "Suppressed preprint; not exported to CV publication lists."
         elif is_correction(row):
             category = row["category"]
             note = "Suppressed correction/erratum; not exported to CV publication lists."
+            suppress_display = 1
         if not category:
             continue
         cursor = con.execute(
             """
             UPDATE publications
             SET category=?,
-                suppress_display=1,
+                suppress_display=?,
                 include_short=0,
                 include_ultrashort=0,
                 selected_order=NULL,
@@ -382,13 +382,13 @@ def classify_and_suppress_non_cv_publications(con: sqlite3.Connection) -> int:
             WHERE id=?
               AND (
                 category IS NOT ?
-                OR COALESCE(suppress_display, 0) != 1
+                OR COALESCE(suppress_display, 0) != ?
                 OR COALESCE(include_short, 0) != 0
                 OR COALESCE(include_ultrashort, 0) != 0
-                OR COALESCE(quality_note, '') != ?
+                OR COALESCE(quality_note, '') != COALESCE(?, '')
               )
             """,
-            (category, note, row["id"], category, note),
+            (category, suppress_display, note, row["id"], category, suppress_display, note),
         )
         changed += cursor.rowcount
     return changed

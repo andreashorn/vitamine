@@ -3235,7 +3235,16 @@ def list_publications(
     clauses = []
     params: list[Any] = []
     if not show_suppressed:
-        clauses.append("COALESCE(suppress_display, 0) = 0")
+        clauses.append(
+            """(
+              COALESCE(suppress_display, 0) = 0
+              OR (
+                category = 'preprints'
+                AND COALESCE(quality_note, '') =
+                    'Suppressed preprint; not exported to CV publication lists.'
+              )
+            )"""
+        )
     if q:
         clauses.append("(title LIKE ? OR authors LIKE ? OR venue LIKE ? OR doi LIKE ? OR quality_note LIKE ?)")
         needle = f"%{q}%"
