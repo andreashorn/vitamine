@@ -23,6 +23,10 @@ const elements = {
   passwordResetMessage: $("#passwordResetMessage"),
   addPasskeyButton: $("#addPasskeyButton"),
   passkeyMessage: $("#passkeyMessage"),
+  passkeyStatus: $("#passkeyStatus"),
+  settingsButton: $("#settingsButton"),
+  settingsDialog: $("#settingsDialog"),
+  closeSettings: $("#closeSettings"),
   loginMessage: $("#loginMessage"),
   inviteMessage: $("#inviteMessage"),
   registerMessage: $("#registerMessage"),
@@ -48,6 +52,7 @@ const elements = {
 let libraryPollTimer = null;
 let libraryPayload = null;
 let profileDatabase = null;
+let conditionalPasskeyController = null;
 
 function apiErrorMessage(payload, status) {
   const detail = payload?.detail;
@@ -182,6 +187,37 @@ function credentialPayload(credential) {
     payload.response.userHandle = response.userHandle ? base64urlFromBytes(response.userHandle) : null;
   }
   return payload;
+}
+
+async function createPasskey(messageElement = elements.passkeyMessage) {
+  if (!window.PublicKeyCredential) throw new Error("Passkeys are not supported by this browser.");
+  const request = await api("/api/account/passkeys/register/options", { method: "POST" });
+  const credential = await navigator.credentials.create({ publicKey: browserCredentialOptions(request.options) });
+  if (!credential) throw new Error("Passkey creation was cancelled.");
+  await api("/api/account/passkeys/register/complete", {
+    method: "POST",
+    body: JSON.stringify({ challenge_id: request.challenge_id, credential: credentialPayload(credential) }),
+  });
+  messageElement.textContent = "Passkey added. You can now sign in without entering your email or password.";
+}
+
+async function signInWithPasskey({ conditional = false } = {}) {
+  if (!window.PublicKeyCredential) throw new Error("Passkeys are not supported by this browser.");
+  const request = await api("/api/account/passkeys/login/options", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  const credential = await navigator.credentials.get({
+    publicKey: browserCredentialOptions(request.options),
+    ...(conditional ? { mediation: "conditional" } : {}),
+    ...(conditionalPasskeyController ? { signal: conditionalPasskeyController.signal } : {}),
+  });
+  if (!credential) throw new Error("Passkey sign-in was cancelled.");
+  await api("/api/account/passkeys/login/complete", {
+    method: "POST",
+    body: JSON.stringify({ challenge_id: request.challenge_id, credential: credentialPayload(credential) }),
+  });
+  await loadLibrary();
 }
 
 function formatSize(bytes) {
@@ -443,6 +479,16 @@ elements.registerForm.addEventListener("submit", async (event) => {
         password,
       }),
     });
+    if (values.get("set_up_passkey")) {
+      elements.registerMessage.textContent = "Your account is ready. Finish setting up your passkey…";
+      try {
+        await createPasskey(elements.registerMessage);
+      } catch (error) {
+        showVerificationPending(result.account.email);
+        elements.verificationMessage.textContent = `Your account was created without a passkey: ${error.message}`;
+        return;
+      }
+    }
     showVerificationPending(result.account.email);
   } catch (error) {
     elements.registerMessage.textContent = error.message;
@@ -534,29 +580,16 @@ elements.loginForm.addEventListener("submit", async (event) => {
 });
 
 elements.passkeyLoginButton.addEventListener("click", async () => {
-  const email = String(elements.loginForm.elements.namedItem("email")?.value || "").trim();
+  conditionalPasskeyController?.abort();
+  conditionalPasskeyController = null;
   elements.loginMessage.textContent = "";
-  if (!email) {
-    elements.loginMessage.textContent = "Enter your email address first.";
-    return;
-  }
   if (!window.PublicKeyCredential) {
     elements.loginMessage.textContent = "Passkeys are not supported by this browser.";
     return;
   }
   setBusy(elements.loginForm, true);
   try {
-    const request = await api("/api/account/passkeys/login/options", {
-      method: "POST",
-      body: JSON.stringify({ email }),
-    });
-    const credential = await navigator.credentials.get({ publicKey: browserCredentialOptions(request.options) });
-    if (!credential) throw new Error("Passkey sign-in was cancelled.");
-    await api("/api/account/passkeys/login/complete", {
-      method: "POST",
-      body: JSON.stringify({ challenge_id: request.challenge_id, credential: credentialPayload(credential) }),
-    });
-    await loadLibrary();
+    await signInWithPasskey();
   } catch (error) {
     elements.loginMessage.textContent = error.message;
   } finally {
@@ -572,19 +605,32 @@ elements.addPasskeyButton.addEventListener("click", async () => {
   }
   elements.addPasskeyButton.disabled = true;
   try {
-    const request = await api("/api/account/passkeys/register/options", { method: "POST" });
-    const credential = await navigator.credentials.create({ publicKey: browserCredentialOptions(request.options) });
-    if (!credential) throw new Error("Passkey creation was cancelled.");
-    await api("/api/account/passkeys/register/complete", {
-      method: "POST",
-      body: JSON.stringify({ challenge_id: request.challenge_id, credential: credentialPayload(credential) }),
-    });
-    elements.passkeyMessage.textContent = "Passkey added. You can now use it to sign in.";
+    await createPasskey();
+    await loadPasskeySettings();
   } catch (error) {
     elements.passkeyMessage.textContent = error.message;
   } finally {
     elements.addPasskeyButton.disabled = false;
   }
+});
+
+async function loadPasskeySettings() {
+  const payload = await api("/api/account/passkeys");
+  const count = payload.passkeys?.length || 0;
+  elements.passkeyStatus.textContent = count
+    ? `${count} passkey${count === 1 ? "" : "s"} registered.`
+    : "No passkey registered yet.";
+  elements.addPasskeyButton.textContent = count ? "Add another passkey" : "Add a passkey";
+}
+
+elements.settingsButton.addEventListener("click", async () => {
+  elements.passkeyMessage.textContent = "";
+  elements.settingsDialog.showModal();
+  try { await loadPasskeySettings(); } catch (error) { elements.passkeyMessage.textContent = error.message; }
+});
+elements.closeSettings.addEventListener("click", () => elements.settingsDialog.close());
+elements.settingsDialog.addEventListener("click", (event) => {
+  if (event.target === elements.settingsDialog) elements.settingsDialog.close();
 });
 
 elements.logoutButton.addEventListener("click", async () => {
@@ -961,5 +1007,15 @@ initializeFeatureStory();
   } catch {
     showAuthTab("login");
     if (confirmation === "invalid") elements.loginMessage.textContent = "That confirmation link is invalid or expired.";
+    if (window.PublicKeyCredential?.isConditionalMediationAvailable) {
+      try {
+        if (await PublicKeyCredential.isConditionalMediationAvailable()) {
+          conditionalPasskeyController = new AbortController();
+          await signInWithPasskey({ conditional: true });
+        }
+      } catch (error) {
+        if (error.name !== "AbortError" && error.name !== "NotAllowedError") console.debug("Conditional passkey sign-in unavailable", error);
+      }
+    }
   }
 })();

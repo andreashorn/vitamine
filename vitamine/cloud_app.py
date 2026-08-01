@@ -718,7 +718,7 @@ class AccountLogin(BaseModel):
 
 
 class PasskeyEmail(BaseModel):
-    email: str = Field(min_length=3, max_length=254)
+    email: str | None = Field(default=None, min_length=3, max_length=254)
 
 
 class PasskeyResponse(BaseModel):
@@ -4834,7 +4834,9 @@ def passkey_registration_options(
         UserVerificationRequirement,
     )
 
-    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    member = authenticated_member(authorization, request.cookies.get(SESSION_COOKIE))
+    if not str(member["email"] or "").strip() or not str(member["password_hash"] or "").strip():
+        raise HTTPException(status_code=403, detail="Create your VitaMine account before adding a passkey.")
     with connect() as con:
         credentials = con.execute(
             "SELECT credential_id FROM passkey_credentials WHERE member_id=?", (member["id"],)
@@ -4849,7 +4851,7 @@ def passkey_registration_options(
                 PublicKeyCredentialDescriptor(id=unbase64url(row["credential_id"])) for row in credentials
             ],
             authenticator_selection=AuthenticatorSelectionCriteria(
-                resident_key=ResidentKeyRequirement.PREFERRED,
+                resident_key=ResidentKeyRequirement.REQUIRED,
                 user_verification=UserVerificationRequirement.REQUIRED,
             ),
         )
@@ -4865,7 +4867,9 @@ def complete_passkey_registration(
 ) -> dict[str, bool]:
     from webauthn import verify_registration_response
 
-    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    member = authenticated_member(authorization, request.cookies.get(SESSION_COOKIE))
+    if not str(member["email"] or "").strip() or not str(member["password_hash"] or "").strip():
+        raise HTTPException(status_code=403, detail="Create your VitaMine account before adding a passkey.")
     with connect() as con:
         challenge = consume_passkey_challenge(con, payload.challenge_id, "register")
         if challenge["member_id"] != member["id"]:
@@ -4906,26 +4910,31 @@ def passkey_login_options(payload: PasskeyEmail, request: Request) -> dict[str, 
     from webauthn import generate_authentication_options, options_to_json
     from webauthn.helpers.structs import PublicKeyCredentialDescriptor, UserVerificationRequirement
 
-    email = normalize_email(payload.email)
+    email = normalize_email(payload.email) if payload.email else None
     with connect() as con:
-        enforce_login_rate_limit(con, request, email)
-        member = con.execute(
-            "SELECT * FROM members WHERE email=? AND revoked_at IS NULL AND email_verified_at IS NOT NULL",
-            (email,),
-        ).fetchone()
-        credentials = [] if member is None else con.execute(
-            "SELECT * FROM passkey_credentials WHERE member_id=?", (member["id"],)
-        ).fetchall()
-        if not credentials:
-            raise HTTPException(status_code=404, detail="No passkey is registered for this account.")
+        member = None
+        credentials = []
+        if email:
+            enforce_login_rate_limit(con, request, email)
+            member = con.execute(
+                "SELECT * FROM members WHERE email=? AND revoked_at IS NULL AND email_verified_at IS NOT NULL",
+                (email,),
+            ).fetchone()
+            credentials = [] if member is None else con.execute(
+                "SELECT * FROM passkey_credentials WHERE member_id=?", (member["id"],)
+            ).fetchall()
+            if not credentials:
+                raise HTTPException(status_code=404, detail="No passkey is registered for this account.")
         options = generate_authentication_options(
             rp_id=passkey_settings()[0],
-            allow_credentials=[
+            allow_credentials=None if not email else [
                 PublicKeyCredentialDescriptor(id=unbase64url(row["credential_id"])) for row in credentials
             ],
             user_verification=UserVerificationRequirement.REQUIRED,
         )
-        challenge_id = store_passkey_challenge(con, member["id"], "authenticate", options.challenge)
+        challenge_id = store_passkey_challenge(
+            con, member["id"] if member is not None else None, "authenticate", options.challenge
+        )
     return {"challenge_id": challenge_id, "options": json.loads(options_to_json(options))}
 
 
@@ -4937,11 +4946,18 @@ def complete_passkey_login(payload: PasskeyResponse, request: Request) -> JSONRe
     with connect() as con:
         challenge = consume_passkey_challenge(con, payload.challenge_id, "authenticate")
         credential = con.execute(
-            "SELECT * FROM passkey_credentials WHERE credential_id=? AND member_id=? FOR UPDATE",
-            (credential_id, challenge["member_id"]),
+            """
+            SELECT p.* FROM passkey_credentials p
+            JOIN members m ON m.id=p.member_id
+            WHERE p.credential_id=? AND m.revoked_at IS NULL AND m.email_verified_at IS NOT NULL
+            FOR UPDATE
+            """,
+            (credential_id,),
         ).fetchone()
         if credential is None:
             raise HTTPException(status_code=401, detail="This passkey is not registered.")
+        if challenge["member_id"] is not None and credential["member_id"] != challenge["member_id"]:
+            raise HTTPException(status_code=401, detail="This passkey is not registered for that account.")
         try:
             verified = verify_authentication_response(
                 credential=payload.credential,
@@ -4959,8 +4975,8 @@ def complete_passkey_login(payload: PasskeyResponse, request: Request) -> JSONRe
             "UPDATE passkey_credentials SET sign_count=?, last_used_at=? WHERE credential_id=?",
             (int(verified.new_sign_count), now, credential_id),
         )
-        token = issue_device_credential(con, challenge["member_id"])
-        con.execute("UPDATE members SET last_seen_at=? WHERE id=?", (now, challenge["member_id"]))
+        token = issue_device_credential(con, credential["member_id"])
+        con.execute("UPDATE members SET last_seen_at=? WHERE id=?", (now, credential["member_id"]))
     response = JSONResponse({"ok": True})
     set_session_cookie(response, request, token)
     return response
