@@ -1748,7 +1748,8 @@ function renderCitationProfile(profile) {
             type="button"
             class="citationBarItem"
             data-citation-year-index="${index}"
-            aria-label="${year}: ${formatMetricNumber(row.citations)} citations. Show yearly details."
+            aria-label="${year}: ${formatMetricNumber(row.citations)} citations. Select yearly details."
+            aria-pressed="false"
             aria-describedby="citationYearDetail"
           >
             <span class="citationBarValue">${formatMetricNumber(row.citations)}</span>
@@ -1775,11 +1776,6 @@ function renderCitationProfile(profile) {
     });
     const detail = chart.querySelector("#citationYearDetail");
     const barItems = chart.querySelectorAll(".citationBarItem");
-    const hideDetail = () => {
-      if (!detail) return;
-      detail.classList.add("isEmpty");
-      barItems.forEach((item) => item.removeAttribute("aria-current"));
-    };
     const showDetail = (item) => {
       if (!detail) return;
       const row = years[Number(item.dataset.citationYearIndex)];
@@ -1812,17 +1808,16 @@ function renderCitationProfile(profile) {
         </small>
       `;
       detail.classList.remove("isEmpty");
-      barItems.forEach((candidate) => candidate.toggleAttribute("aria-current", candidate === item));
-    };
-    showDetail(barItems[barItems.length - 1]);
-    hideDetail();
-    barItems.forEach((item) => {
-      item.addEventListener("mouseenter", () => showDetail(item));
-      item.addEventListener("mouseleave", () => {
-        if (document.activeElement !== item) hideDetail();
+      barItems.forEach((candidate) => {
+        const selected = candidate === item;
+        candidate.toggleAttribute("aria-current", selected);
+        candidate.setAttribute("aria-pressed", String(selected));
       });
-      item.addEventListener("focus", () => showDetail(item));
-      item.addEventListener("blur", hideDetail);
+    };
+    const currentYear = String(new Date().getFullYear());
+    const defaultIndex = years.findIndex((row) => String(row.year) === currentYear);
+    showDetail(barItems[defaultIndex >= 0 ? defaultIndex : barItems.length - 1]);
+    barItems.forEach((item) => {
       item.addEventListener("click", () => showDetail(item));
     });
   }

@@ -99,11 +99,14 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("All Publications", script)
         self.assertIn("First/Last-author publications", script)
         self.assertIn("citationYearDetail isEmpty", script)
+        self.assertIn("new Date().getFullYear()", script)
+        self.assertIn('item.addEventListener("click"', script)
+        self.assertNotIn('item.addEventListener("mouseenter"', script)
         document = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
-        self.assertIn("20260801-citation-sections", document)
+        self.assertIn("20260801-citation-selection", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
