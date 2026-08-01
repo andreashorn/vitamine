@@ -1251,6 +1251,7 @@ def ensure_publication_columns(con: sqlite3.Connection) -> None:
         "openalex_work_id": "TEXT",
         "openalex_cited_by_count": "INTEGER",
         "openalex_counts_by_year_json": "TEXT",
+        "openalex_citation_geography_enriched_at": "TEXT",
     }
     for column, definition in columns.items():
         if column not in existing:

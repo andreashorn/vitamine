@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS publications (
   metadata_enriched_at TEXT,
   openalex_work_id TEXT,
   openalex_cited_by_count INTEGER,
-  openalex_counts_by_year_json TEXT
+  openalex_counts_by_year_json TEXT,
+  openalex_citation_geography_enriched_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS export_settings (

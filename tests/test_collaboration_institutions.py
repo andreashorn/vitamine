@@ -4,6 +4,7 @@ from unittest.mock import patch
 from vitamine.scripts.enrich_publications_by_doi import (
     citation_sample_limit,
     openalex_collaboration_rows,
+    pending_enrichment_clause,
 )
 
 
@@ -69,6 +70,11 @@ class CollaborationInstitutionTests(unittest.TestCase):
         self.assertEqual(citation_sample_limit(12), 12)
         self.assertEqual(citation_sample_limit(100), 50)
         self.assertEqual(citation_sample_limit(2000), 100)
+
+    def test_normal_enrichment_backfills_missing_citation_geography(self):
+        clause = pending_enrichment_clause(False)
+        self.assertIn("openalex_citation_geography_enriched_at IS NULL", clause)
+        self.assertEqual(pending_enrichment_clause(True), "")
 
     @patch(
         "vitamine.scripts.enrich_publications_by_doi.ror_affiliation_match",

@@ -69,6 +69,7 @@ def ensure_columns(con: sqlite3.Connection) -> None:
         "openalex_work_id": "TEXT",
         "openalex_cited_by_count": "INTEGER",
         "openalex_counts_by_year_json": "TEXT",
+        "openalex_citation_geography_enriched_at": "TEXT",
     }
     for column, definition in columns.items():
         if column not in existing:
@@ -1083,6 +1084,16 @@ def upsert_citation_rows(con: sqlite3.Connection, rows: list[dict[str, Any]]) ->
     return count
 
 
+def pending_enrichment_clause(refresh: bool) -> str:
+    if refresh:
+        return ""
+    return (
+        " AND (metadata_enriched_at IS NULL OR COALESCE(doi, '') = ''"
+        " OR COALESCE(openalex_counts_by_year_json, '') = ''"
+        " OR openalex_citation_geography_enriched_at IS NULL)"
+    )
+
+
 def enrich(
     limit: int | None = None,
     include_suppressed: bool = False,
@@ -1101,8 +1112,7 @@ def enrich(
             where += " AND (COALESCE(suppress_display, 0) = 0 OR COALESCE(doi, '') = '')"
         else:
             where += " AND COALESCE(suppress_display, 0) = 0"
-    if not refresh:
-        where += " AND (metadata_enriched_at IS NULL OR COALESCE(doi, '') = '' OR COALESCE(openalex_counts_by_year_json, '') = '')"
+    where += pending_enrichment_clause(refresh)
     sql_limit = f" LIMIT {int(limit)}" if limit else ""
     report: list[dict[str, Any]] = []
     fetched = 0
@@ -1223,6 +1233,14 @@ def enrich(
                         (row["id"],),
                     )
                     citation_affiliations += upsert_citation_rows(con, citation_rows)
+                    con.execute(
+                        """
+                        UPDATE publications
+                        SET openalex_citation_geography_enriched_at=?
+                        WHERE id=?
+                        """,
+                        (dt.datetime.now(dt.timezone.utc).isoformat(), row["id"]),
+                    )
             if changes:
                 updated += 1
                 if not dry_run:

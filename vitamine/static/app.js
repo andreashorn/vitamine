@@ -2017,7 +2017,7 @@ function renderCollaborationMap() {
     container.innerHTML = `
       <div class="emptyMap">
         <strong>${needsOwnInstitution ? "Institution mapping pending" : `No ${state.collaborationMap.mode === "citations" ? "citation" : "collaboration"} geography yet`}</strong>
-        <span>${needsOwnInstitution ? "Save an institution or connect ORCID; VitaMine will add its map coordinates automatically." : "Run metadata enrichment to collect OpenAlex institution locations."}</span>
+        <span>${needsOwnInstitution ? "Save an institution or connect ORCID; VitaMine will add its map coordinates automatically." : "Run Enrich CV to collect OpenAlex institution locations."}</span>
       </div>`;
     $("#collaborationMapStats").innerHTML = `<span>Institutions: <strong>0</strong></span>`;
     $("#collaborationCountries").innerHTML = "";
