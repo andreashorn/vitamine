@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260801-citation-selection">
+  <link rel="stylesheet" href="/static/styles.css?v=20260801-dashboard-citation-map">
 </head>
 <body>
   <header class="topbar">
@@ -256,8 +256,12 @@
 
           <section class="panel collaborationPanel">
             <div class="panelHeader">
-              <h2>Collaboration Map</h2>
-              <p>OpenAlex coauthor institutions linked to the researcher’s institution.</p>
+              <h2>World Map</h2>
+              <p>Explore coauthor institutions or the affiliations of researchers who cite your work.</p>
+              <div class="dashboardMapToggle" role="group" aria-label="World map data">
+                <button type="button" data-dashboard-map-mode="collaborations" aria-pressed="true">Coauthors</button>
+                <button type="button" data-dashboard-map-mode="citations" aria-pressed="false">Citations</button>
+              </div>
             </div>
             <div id="collaborationMap" class="collaborationMap" role="img" aria-label="World map of collaboration institutions"></div>
             <div class="mapSummary">
@@ -787,6 +791,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260801-cloud-export-bootstrap-v2"></script>
+  <script src="/static/app.js?v=20260801-dashboard-citation-map-enrichment"></script>
 </body>
 </html>

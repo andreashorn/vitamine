@@ -926,7 +926,7 @@ class CloudAppTests(unittest.TestCase):
 
         public = self.client.get("/api/public/ada-profile")
         self.assertEqual(public.status_code, 200, public.text)
-        self.assertEqual(public.json()["schema_version"], 2)
+        self.assertEqual(public.json()["schema_version"], 3)
         self.assertNotIn("source_database_id", public.json())
         self.assertNotIn("Never publish this address", public.text)
         self.assertNotIn("private@example.org", public.text)

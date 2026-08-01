@@ -63,6 +63,8 @@ const state = {
   selectedBiosketchContributionId: null,
   collaborationMap: {
     data: null,
+    mode: "collaborations",
+    datasets: {},
     zoom: 2,
     origin: null,
     drag: null,
@@ -1971,6 +1973,17 @@ function mapEdgePath(source, target, extent) {
 }
 
 function mapTooltip(node) {
+  if (state.collaborationMap.mode === "citations") {
+    const researchers = (node.researchers || []).slice(0, 8)
+      .map((item) => `${item.name} (${item.citation_count})`).join(", ");
+    const extra = Number(node.researcher_count || 0) > 8 ? `, +${node.researcher_count - 8} more` : "";
+    return [
+      `<strong>${escapeHtml(node.name)}</strong>`,
+      node.country ? `<span>${escapeHtml(node.country)}</span>` : "",
+      node.citation_count ? `<span>${node.citation_count} citation link${node.citation_count === 1 ? "" : "s"}</span>` : "",
+      researchers ? `<span>${escapeHtml(researchers + extra)}</span>` : "",
+    ].filter(Boolean).join("");
+  }
   const authors = (node.authors || []).slice(0, 8).join(", ");
   const extra = (node.authors || []).length > 8 ? `, +${node.authors.length - 8} more` : "";
   return [
@@ -1982,7 +1995,9 @@ function mapTooltip(node) {
 }
 
 async function loadCollaborationMap() {
-  const data = await api("/api/collaboration-map");
+  const mode = state.collaborationMap.mode;
+  const data = await api(`/api/collaboration-map?mode=${encodeURIComponent(mode)}`);
+  state.collaborationMap.datasets[mode] = data;
   state.collaborationMap.data = data;
   if (!state.collaborationMap.origin) {
     state.collaborationMap.zoom = MAP_ZOOM;
@@ -2001,8 +2016,8 @@ function renderCollaborationMap() {
     const needsOwnInstitution = data.needs_own_institution;
     container.innerHTML = `
       <div class="emptyMap">
-        <strong>${needsOwnInstitution ? "Institution mapping pending" : "No collaboration geography yet"}</strong>
-        <span>${needsOwnInstitution ? "Save an institution or connect ORCID; VitaMine will add its map coordinates automatically." : "Resolve publication metadata to collect OpenAlex institution locations."}</span>
+        <strong>${needsOwnInstitution ? "Institution mapping pending" : `No ${state.collaborationMap.mode === "citations" ? "citation" : "collaboration"} geography yet`}</strong>
+        <span>${needsOwnInstitution ? "Save an institution or connect ORCID; VitaMine will add its map coordinates automatically." : "Run metadata enrichment to collect OpenAlex institution locations."}</span>
       </div>`;
     $("#collaborationMapStats").innerHTML = `<span>Institutions: <strong>0</strong></span>`;
     $("#collaborationCountries").innerHTML = "";
@@ -2025,7 +2040,7 @@ function renderCollaborationMap() {
   const nodeMarkers = collaborators
     .map((node) => {
       const point = mapPoint(node, extent);
-      const radius = Math.min(12, 3.5 + Math.sqrt(Number(node.publication_count || 1)) * 2);
+      const radius = Math.min(12, 3.5 + Math.sqrt(Number(node.citation_count || node.publication_count || 1)) * 2);
       return `<button class="mapMarker collabMarker" type="button" style="left:${(point.x / MAP_WIDTH * 100).toFixed(3)}%;top:${(point.y / MAP_HEIGHT * 100).toFixed(3)}%;width:${(radius * 2).toFixed(1)}px;height:${(radius * 2).toFixed(1)}px" aria-label="${escapeHtml(node.name)}">
         <span class="mapTooltip">${mapTooltip(node)}</span>
       </button>`;
@@ -2059,10 +2074,12 @@ function renderCollaborationMap() {
   bindCollaborationMapControls(container);
   $("#collaborationMapStats").innerHTML = [
     `<span>Institutions: <strong>${data.institution_count}</strong></span>`,
-    `<span>Links: <strong>${data.publication_links}</strong></span>`,
+    state.collaborationMap.mode === "citations"
+      ? `<span>Researchers: <strong>${data.researcher_count}</strong></span><span>Citation links: <strong>${data.citation_links}</strong></span>`
+      : `<span>Publication links: <strong>${data.publication_links}</strong></span>`,
   ].join("");
   $("#collaborationCountries").innerHTML = (data.top_countries || [])
-    .map((row) => `<span>${escapeHtml(row.country)}: <strong>${row.publication_count}</strong></span>`)
+    .map((row) => `<span>${escapeHtml(row.country)}: <strong>${row.citation_count ?? row.publication_count}</strong></span>`)
     .join("");
 }
 
@@ -2141,6 +2158,17 @@ function bindCollaborationMapControls(container) {
   };
   container.addEventListener("pointerup", stopDrag);
   container.addEventListener("pointercancel", stopDrag);
+}
+
+async function selectDashboardMapMode(mode) {
+  if (!["collaborations", "citations"].includes(mode) || mode === state.collaborationMap.mode) return;
+  state.collaborationMap.mode = mode;
+  document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.dashboardMapMode === mode));
+  });
+  state.collaborationMap.data = state.collaborationMap.datasets[mode] || null;
+  if (state.collaborationMap.data) renderCollaborationMap();
+  else await loadCollaborationMap();
 }
 
 function escapeHtml(value) {
@@ -4159,6 +4187,9 @@ async function init() {
   };
   $("#syncZoteroDashboard").addEventListener("click", sync);
   $("#enrichCvDashboard").addEventListener("click", enrichCv);
+  document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
+    button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
+  });
   $("#homeLanguageLabel").addEventListener("change", saveExportSettings);
   $("#exportCitationStyle").addEventListener("change", async () => {
     await saveExportSettings();
