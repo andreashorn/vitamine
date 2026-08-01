@@ -44,8 +44,8 @@ button { cursor: pointer; }
 
 .brand img {
   display: block;
-  width: 168px;
-  height: 64px;
+  width: 210px;
+  height: 80px;
   object-fit: contain;
 }
 
@@ -847,7 +847,7 @@ button:disabled { opacity: .55; cursor: wait; }
 @media (max-width: 680px) {
   .site-header, main { width: min(100% - 28px, 1240px); }
   .site-header { min-height: 76px; }
-  .brand img { width: 140px; height: 54px; }
+  .brand img { width: 168px; height: 64px; }
   .account-nav span { display: none; }
   main { padding-top: 38px; }
   .hero h1 { font-size: clamp(2.65rem, 13vw, 4.3rem); }
