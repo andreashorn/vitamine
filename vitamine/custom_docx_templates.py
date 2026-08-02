@@ -360,6 +360,20 @@ def mapped_section_key(value: str, mappings: dict[str, str]) -> str | None:
     return mappings.get(normalized) or alias_section_key(value)
 
 
+def plausible_llm_heading_mapping(source_text: str, section_key: str) -> bool:
+    """Reject broad semantic guesses that would invent a database meaning."""
+
+    normalized = normalized_heading(source_text)
+    if section_key != "research_skills":
+        return True
+    research_markers = (
+        "research", "scientific", "laboratory", "labor", "technical", "method",
+        "experimental", "computational", "bioinformatic", "statistical",
+        "wissenschaft", "forsch", "methoden",
+    )
+    return any(marker in normalized for marker in research_markers)
+
+
 def page_count_from_docx(data: bytes) -> int | None:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -431,6 +445,9 @@ comprehensive CV that is generally at least 6 pages or roughly 2,400 words.
 Map only headings that appear verbatim in the candidate list to the closest allowed section key.
 Leave a heading unmapped when none of the allowed section keys describes it; VitaMine will preserve
 that source section with a manual-fill placeholder instead of inventing content for it.
+Generic skills, courses, software, languages, interests, references, and referees are not
+research_skills unless the heading itself clearly identifies research, scientific, laboratory,
+technical, methodological, experimental, computational, bioinformatics, or statistical skills.
 Do not treat a person's name, institution, degree, date, or CV title as a section heading.
 Allowed section keys: {allowed}
 
@@ -853,7 +870,12 @@ def analyze_and_skeletonize(
                     continue
                 source_text = clean_text(item.get("source_text") or "")
                 section_key = str(item.get("section_key") or "")
-                if source_text in exact_texts and source_text in section_heading_texts and section_key in SECTION_ALIASES:
+                if (
+                    source_text in exact_texts
+                    and source_text in section_heading_texts
+                    and section_key in SECTION_ALIASES
+                    and plausible_llm_heading_mapping(source_text, section_key)
+                ):
                     normalized_source = exact_texts[source_text]
                     if normalized_source not in mappings:
                         mappings[normalized_source] = section_key

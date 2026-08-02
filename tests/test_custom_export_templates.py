@@ -67,8 +67,8 @@ def oxford_like_document_bytes() -> bytes:
     education = document.add_paragraph("University of Nottingham (2018-2022)")
     education.runs[0].bold = True
     document.add_paragraph("A source-only degree")
-    document.add_heading("SPECIALIST FIELDWORK", level=1)
-    document.add_paragraph("A source-only unusual fieldwork record")
+    document.add_heading("GENERAL SKILLS & COURSES", level=1)
+    document.add_paragraph("A source-only unusual general skill")
     document.add_heading("TEACHING EXPERIENCE", level=1)
     document.add_heading("Mentor/Supervisor, University of Oxford (2022-2025)", level=2)
     document.add_paragraph("A source-only teaching duty.", style="List Bullet")
@@ -233,11 +233,21 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
             "UPDATE person SET display_name='Jane Current', office_address='Current Institute, Berlin', "
             "work_email='jane.current@example.org' WHERE id=1"
         )
+        def overbroad_llm(_prompt, _schema, _settings):
+            return {
+                "content_profile": "short",
+                "confidence": "high",
+                "heading_mappings": [
+                    {"source_text": "GENERAL SKILLS & COURSES", "section_key": "research_skills"}
+                ],
+            }, None
+
         skeleton, blueprint = analyze_and_skeletonize(
             oxford_like_document_bytes(),
             "Oxford-like layout",
             con,
-            settings={"provider": "none"},
+            llm_json=overbroad_llm,
+            settings={"provider": "openai", "api_model": "test-model"},
         )
         skeleton_document = Document(io.BytesIO(skeleton))
         skeleton_text = "\n".join(paragraph.text for paragraph in skeleton_document.paragraphs)
@@ -247,7 +257,7 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
         self.assertIn("research_experience", blueprint["mapped_sections"])
         self.assertIn("research_skills", blueprint["mapped_sections"])
         self.assertIn("conference_papers", blueprint["mapped_sections"])
-        self.assertEqual(blueprint["manual_sections"], ["SPECIALIST FIELDWORK", "CONFERENCE PAPERS"])
+        self.assertEqual(blueprint["manual_sections"], ["GENERAL SKILLS & COURSES", "CONFERENCE PAPERS"])
 
         with tempfile.TemporaryDirectory() as folder:
             canonical_path = Path(folder) / "canonical.docx"
@@ -266,7 +276,7 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
             self.assertIn("Professor of Current Science, Current University", rendered_text)
             self.assertIn("Current Research Prize", rendered_text)
             self.assertNotIn("current invited talk", rendered_text)
-            self.assertIn("SPECIALIST FIELDWORK", rendered_text)
+            self.assertIn("GENERAL SKILLS & COURSES", rendered_text)
             self.assertIn("CONFERENCE PAPERS", rendered_text)
             self.assertEqual(rendered_text.count("[Please fill this section manually.]"), 2)
             self.assertNotIn("source-only", rendered_text)
