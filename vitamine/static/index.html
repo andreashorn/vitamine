@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260802-sync-service-cards">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-custom-word-templates">
 </head>
 <body>
   <header class="topbar">
@@ -343,6 +343,28 @@
             <div id="promptExportPlan" class="promptExportPlan" hidden></div>
           </div>
         </details>
+
+        <section class="templateImportPanel" aria-labelledby="templateImportHeading">
+          <div class="templateImportIntro">
+            <div>
+              <h3 id="templateImportHeading">Learn a format from your Word CV</h3>
+              <p>Drop a DOCX here. VitaMine keeps its Word-native layout, removes recognized CV content into private placeholders, and classifies it as Long, Short, Ultrashort, or Biosketch.</p>
+            </div>
+            <label>Template name
+              <input id="customTemplateName" maxlength="100" placeholder="e.g. Faculty application CV">
+            </label>
+          </div>
+          <div id="customTemplateDropzone" class="templateDropzone" tabindex="0" role="button" aria-controls="customTemplateFileInput">
+            <span class="wordTemplateIcon" aria-hidden="true">W</span>
+            <div>
+              <strong>Drop a Word CV to add its format</strong>
+              <span id="customTemplateFileLabel">DOCX only · up to 20 MB</span>
+            </div>
+            <button id="chooseCustomTemplateFile" type="button">Choose Word document</button>
+            <input id="customTemplateFileInput" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+          </div>
+          <p id="customTemplateStatus" class="fieldStatus" role="status" aria-live="polite"></p>
+        </section>
 
         <section class="formatShelf" aria-labelledby="installedFormatsHeading">
           <div class="formatShelfHeader">
@@ -802,6 +824,6 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260802-enrichment-simplified-publication-dialog-actions"></script>
+  <script src="/static/app.js?v=20260802-custom-word-templates"></script>
 </body>
 </html>

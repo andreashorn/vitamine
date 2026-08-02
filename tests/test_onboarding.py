@@ -13,7 +13,7 @@ class OnboardingTests(unittest.TestCase):
         html = (root / "vitamine" / "static" / "index.html").read_text()
         script = (root / "vitamine" / "static" / "app.js").read_text()
 
-        self.assertIn("20260802-enrichment-simplified-publication-dialog-actions", html)
+        self.assertIn("20260802-custom-word-templates", html)
         self.assertEqual(html.count('id="enrichCvDashboard"'), 1)
         self.assertLess(html.index('id="enrichCvDashboard"'), html.index('id="cloudAccountMenu"'))
         self.assertIn('class="topbarEnrichButton"', html)

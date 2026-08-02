@@ -18,11 +18,13 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+import zipfile
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -54,6 +56,7 @@ from .paths import (
     read_preferences,
     sanitize_database_name,
     set_active_db,
+    output_ref,
     validate_database,
     write_preferences,
 )
@@ -85,6 +88,12 @@ from .enrichment_guard import (
     review_nonpublications,
 )
 from .export_quality import run_export_quality_audit
+from .custom_docx_templates import (
+    MAX_TEMPLATE_BYTES,
+    analyze_and_skeletonize,
+    render_template as render_custom_docx_template,
+    template_sha256,
+)
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -319,6 +328,7 @@ def connect() -> sqlite3.Connection:
     ensure_import_inbox_table(con)
     ensure_discovery_rejections_table(con)
     ensure_export_settings_table(con)
+    ensure_export_templates_table(con)
     ensure_app_settings_table(con)
     ensure_metadata_entities_decoded(con)
     ensure_journal_metrics_table(con)
@@ -393,6 +403,98 @@ def export_format_by_id(format_id: str, formats: list[dict[str, Any]] | None = N
     if not match:
         raise HTTPException(status_code=404, detail="Unknown export format")
     return match
+
+
+def parsed_template_blueprint(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(str(raw or "{}"))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def custom_export_format_payload(row: sqlite3.Row) -> dict[str, Any]:
+    profile = str(row["content_profile"] or "short")
+    blueprint = parsed_template_blueprint(row["blueprint_json"])
+    profile_labels = {
+        "long": "Long CV",
+        "short": "Short CV",
+        "one_page": "Ultrashort CV",
+        "biosketch": "Biosketch",
+    }
+    length_labels = {
+        "long": "Long · follows the imported Word layout",
+        "short": "Short · follows the imported Word layout",
+        "one_page": "Ultrashort · usually one page",
+        "biosketch": "Biosketch · follows the imported Word layout",
+    }
+    page_count = blueprint.get("page_count")
+    mapped_count = len(blueprint.get("mapped_sections") or [])
+    analysis_method = str(blueprint.get("analysis_method") or "deterministic")
+    summary = (
+        "A private Word-native layout learned from your uploaded CV. "
+        f"VitaMine mapped {mapped_count} content section{'s' if mapped_count != 1 else ''} and reuses the original page, table, style, header, and footer structure."
+    )
+    return {
+        "id": str(row["id"]),
+        "name": str(row["name"]),
+        "summary": summary,
+        "length": length_labels.get(profile, length_labels["short"]),
+        "focus": ["your Word layout", "current CV content", "editable DOCX"],
+        "audience": "Reuse a familiar institutional or personal Word CV design with the current VitaMine data.",
+        "preview": "",
+        "preinstalled": False,
+        "installed": True,
+        "custom_template": True,
+        "content_profile": profile,
+        "content_profile_label": profile_labels.get(profile, "Short CV"),
+        "content_profile_description": EXPORT_CONTENT_PROFILES.get(profile, EXPORT_CONTENT_PROFILES["short"])["description"],
+        "exporter": "custom_docx",
+        "quality": {
+            "key": "imported_template",
+            "label": "Imported Word template",
+            "description": "Word-native layout preserved from a private user upload.",
+        },
+        "source": {
+            "kind": "private_user_docx",
+            "title": str(row["source_filename"]),
+            "url": "",
+            "note": "Stored only inside this private VitaMine CV database.",
+        },
+        "template_analysis": {
+            "method": analysis_method,
+            "model": str(blueprint.get("analysis_model") or ""),
+            "page_count": page_count,
+            "mapped_sections": list(blueprint.get("mapped_sections") or []),
+            "classification_reason": str(blueprint.get("classification_reason") or ""),
+        },
+    }
+
+
+def custom_export_formats(con: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = con.execute(
+        """
+        SELECT id, name, source_filename, content_profile, blueprint_json, created_at, updated_at
+        FROM export_templates
+        ORDER BY created_at, lower(name)
+        """
+    ).fetchall()
+    return [custom_export_format_payload(row) for row in rows]
+
+
+def custom_export_template_row(con: sqlite3.Connection, template_id: str) -> sqlite3.Row:
+    row = con.execute("SELECT * FROM export_templates WHERE id=?", (template_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown custom export template")
+    return row
+
+
+def clean_template_name(value: str | None, fallback: str = "My Word CV") -> str:
+    name = re.sub(r"\s+", " ", str(value or "")).strip() or fallback
+    if len(name) > 100:
+        raise HTTPException(status_code=400, detail="Keep the template name below 100 characters.")
+    return name
+
 
 
 def normalized_institution_name(name: str | None) -> str:
@@ -1408,6 +1510,25 @@ def ensure_export_settings_table(con: sqlite3.Connection) -> None:
             """,
             (profile,),
         )
+
+
+def ensure_export_templates_table(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS export_templates (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          source_filename TEXT NOT NULL,
+          source_docx BLOB NOT NULL,
+          content_profile TEXT NOT NULL CHECK (content_profile IN ('long', 'short', 'one_page', 'biosketch')),
+          blueprint_json TEXT NOT NULL,
+          source_sha256 TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+
 
 
 def ensure_manual_document(con: sqlite3.Connection) -> int:
@@ -5076,10 +5197,91 @@ def enrich_cv_job(
 def export_formats() -> dict[str, Any]:
     formats = export_format_catalog()
     installed = set(installed_export_format_ids(formats))
+    bundled = [{**item, "installed": item["id"] in installed} for item in formats]
+    with connect() as con:
+        custom = custom_export_formats(con)
     return {
         "schema_version": 2,
-        "formats": [{**item, "installed": item["id"] in installed} for item in formats],
+        "formats": [*custom, *bundled],
     }
+
+
+@app.post("/api/export-templates")
+async def create_export_template(
+    file: UploadFile = File(...),
+    name: str = Form(""),
+) -> dict[str, Any]:
+    filename = Path(file.filename or "template.docx").name
+    if Path(filename).suffix.casefold() != ".docx":
+        raise HTTPException(status_code=400, detail="Please upload a Word .docx document.")
+    data = await file.read(MAX_TEMPLATE_BYTES + 1)
+    fallback_name = re.sub(r"[_-]+", " ", Path(filename).stem).strip() or "My Word CV"
+    template_name = clean_template_name(name, fallback_name)
+    template_id = f"custom.{uuid.uuid4().hex}"
+    try:
+        with connect() as con:
+            settings = cv_import_settings(con, include_secret=True)
+            skeleton, blueprint = analyze_and_skeletonize(
+                data,
+                template_name,
+                con,
+                llm_json=llm_json,
+                settings=settings,
+            )
+            blueprint["template_name"] = template_name
+            con.execute(
+                """
+                INSERT INTO export_templates
+                  (id, name, source_filename, source_docx, content_profile,
+                   blueprint_json, source_sha256, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                """,
+                (
+                    template_id,
+                    template_name,
+                    filename[:240],
+                    skeleton,
+                    blueprint["content_profile"],
+                    json.dumps(blueprint, ensure_ascii=False),
+                    template_sha256(data),
+                ),
+            )
+            con.commit()
+            row = custom_export_template_row(con, template_id)
+            payload = custom_export_format_payload(row)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "format": payload}
+
+
+@app.put("/api/export-templates/{template_id}")
+async def rename_export_template(template_id: str, request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    name = clean_template_name(payload.get("name"))
+    with connect() as con:
+        row = custom_export_template_row(con, template_id)
+        blueprint = parsed_template_blueprint(row["blueprint_json"])
+        blueprint["template_name"] = name
+        con.execute(
+            """
+            UPDATE export_templates
+            SET name=?, blueprint_json=?, updated_at=datetime('now')
+            WHERE id=?
+            """,
+            (name, json.dumps(blueprint, ensure_ascii=False), template_id),
+        )
+        con.commit()
+        updated = custom_export_format_payload(custom_export_template_row(con, template_id))
+    return {"ok": True, "format": updated}
+
+
+@app.delete("/api/export-templates/{template_id}")
+def delete_export_template(template_id: str) -> dict[str, Any]:
+    with connect() as con:
+        custom_export_template_row(con, template_id)
+        con.execute("DELETE FROM export_templates WHERE id=?", (template_id,))
+        con.commit()
+    return {"ok": True, "template_id": template_id}
 
 
 @app.get("/api/export-formats/{format_id}/prompt-plan")
@@ -6099,8 +6301,73 @@ def build_biosketch_action(lang: str = "en") -> JSONResponse:
     return JSONResponse(build_response(imported_stdout + result.stdout, cache_key, {"language": lang}))
 
 
+def built_docx_path(relative_docx: str) -> Path:
+    relative = Path(str(relative_docx or ""))
+    if relative.is_absolute():
+        return relative.resolve()
+    if relative.parts and relative.parts[0] == "output":
+        return (OUTPUT / Path(*relative.parts[1:])).resolve()
+    return (ROOT / relative).resolve()
+
+
+def build_custom_export_template(template_id: str, lang: str = "en") -> JSONResponse:
+    lang = "de" if lang == "de" else "en"
+    with connect() as con:
+        row = custom_export_template_row(con, template_id)
+        source_docx = bytes(row["source_docx"])
+        blueprint = parsed_template_blueprint(row["blueprint_json"])
+        profile = str(row["content_profile"])
+        template_name = str(row["name"])
+    builders = {
+        "one_page": build_ultrashort_tabular_action,
+        "short": build_short_action,
+        "long": build_long_action,
+        "biosketch": build_biosketch_action,
+    }
+    builder = builders.get(profile)
+    if builder is None:
+        raise HTTPException(status_code=422, detail="This custom template has an unsupported content classification.")
+    canonical_response = builder(lang)
+    if canonical_response.status_code >= 400:
+        return canonical_response
+    canonical_payload = json.loads(canonical_response.body)
+    canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
+    safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", template_name).strip("._-") or "custom_cv"
+    suffix = "_de" if lang == "de" else ""
+    output_path = OUTPUT / f"{safe_stem[:80]}_{template_id.rsplit('.', 1)[-1][:8]}{suffix}.docx"
+    try:
+        with connect() as con:
+            render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+            settings = cv_import_settings(con, include_secret=True)
+            quality_audit = run_export_quality_audit(con, output_path, llm_json, settings)
+        if quality_audit["applied_count"]:
+            canonical_response = builder(lang)
+            if canonical_response.status_code >= 400:
+                return canonical_response
+            canonical_payload = json.loads(canonical_response.body)
+            canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
+            with connect() as con:
+                render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return JSONResponse({"ok": False, "stderr": str(exc)[:1000]}, status_code=500)
+    cache_key = str(int(time.time()))
+    payload = build_response(
+        f"docx: output/{output_ref(output_path)}",
+        cache_key,
+        {
+            "language": lang,
+            "template_id": template_id,
+            "template_render": render_report,
+            "quality_audit": quality_audit,
+        },
+    )
+    return JSONResponse(payload)
+
+
 @app.post("/api/actions/export/{format_id}")
 def build_installed_export_format(format_id: str, lang: str = "en") -> JSONResponse:
+    if format_id.startswith("custom."):
+        return build_custom_export_template(format_id, lang)
     formats = export_format_catalog()
     item = export_format_by_id(format_id, formats)
     if format_id not in installed_export_format_ids(formats):
@@ -6120,7 +6387,7 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
         return response
     payload = json.loads(response.body)
     relative_docx = str(payload.get("docx_path") or "")
-    docx_path = (ROOT / relative_docx).resolve() if relative_docx else Path()
+    docx_path = built_docx_path(relative_docx) if relative_docx else Path()
     try:
         with connect() as con:
             settings = cv_import_settings(con, include_secret=True)

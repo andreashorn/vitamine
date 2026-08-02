@@ -151,6 +151,18 @@ CREATE TABLE IF NOT EXISTS export_settings (
   authorship_filter TEXT NOT NULL DEFAULT 'first_last'
 );
 
+CREATE TABLE IF NOT EXISTS export_templates (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  source_filename TEXT NOT NULL,
+  source_docx BLOB NOT NULL,
+  content_profile TEXT NOT NULL CHECK (content_profile IN ('long', 'short', 'one_page', 'biosketch')),
+  blueprint_json TEXT NOT NULL,
+  source_sha256 TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_publications_zotero_key
 ON publications(zotero_key)
 WHERE zotero_key IS NOT NULL;
