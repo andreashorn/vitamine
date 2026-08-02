@@ -32,6 +32,7 @@ const state = {
   exportSettings: {},
   exportArtifacts: {},
   exportPromptPlans: {},
+  pendingCustomTemplateFile: null,
   biosketch: {
     contributions: [],
     publication_count: 0,
@@ -2278,7 +2279,80 @@ async function loadExportFormats() {
 }
 
 function promptCapableFormats() {
-  return state.exportFormats.filter((format) => format.installed && format.exporter && ["long", "short", "one_page"].includes(format.content_profile));
+  return state.exportFormats.filter((format) => !format.custom_template && format.installed && format.exporter && ["long", "short", "one_page"].includes(format.content_profile));
+}
+
+function customTemplateDefaultName(filename) {
+  return String(filename || "My Word CV")
+    .replace(/\.docx$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() || "My Word CV";
+}
+
+async function importCustomExportTemplate(file) {
+  if (!file) return;
+  if (!/\.docx$/i.test(file.name || "")) {
+    setStatus("Please choose a Word .docx document.", { error: true });
+    return;
+  }
+  if (file.size > 20 * 1024 * 1024) {
+    setStatus("The Word template is larger than 20 MB.", { error: true });
+    return;
+  }
+  state.pendingCustomTemplateFile = file;
+  const nameInput = $("#customTemplateName");
+  if (nameInput && !nameInput.value.trim()) nameInput.value = customTemplateDefaultName(file.name);
+  $("#customTemplateFileLabel").textContent = file.name;
+  const form = new FormData();
+  form.append("file", file);
+  form.append("name", nameInput?.value.trim() || customTemplateDefaultName(file.name));
+  const stopProcessing = startProcessing(
+    "Learning the Word CV format…",
+    "VitaMine is mapping headings, classifying the CV, and creating private layout placeholders.",
+  );
+  setActionButtons(true);
+  $("#customTemplateStatus").textContent = `Analyzing ${file.name}…`;
+  try {
+    const data = await api("/api/export-templates", { method: "POST", body: form });
+    const format = data.format || {};
+    const classification = format.content_profile_label || "CV";
+    const mapped = format.template_analysis?.mapped_sections?.length || 0;
+    $("#customTemplateStatus").textContent = `${format.name || "Word template"} added as ${classification}; ${mapped} section${mapped === 1 ? "" : "s"} mapped.`;
+    state.pendingCustomTemplateFile = null;
+    $("#customTemplateFileInput").value = "";
+    $("#customTemplateFileLabel").textContent = "DOCX only · up to 20 MB";
+    await loadExportFormats();
+    setStatus(`${format.name || "Word template"} added to Your formats`);
+  } catch (error) {
+    $("#customTemplateStatus").textContent = error.message || "The Word template could not be added.";
+    setStatus(error.message, { error: true });
+  } finally {
+    stopProcessing();
+    setActionButtons(false);
+  }
+}
+
+async function renameCustomExportTemplate(formatId) {
+  const format = state.exportFormats.find((item) => item.id === formatId && item.custom_template);
+  if (!format) return;
+  const name = window.prompt("Template name", format.name);
+  if (name === null || !name.trim() || name.trim() === format.name) return;
+  await api(`/api/export-templates/${encodeURIComponent(formatId)}`, {
+    method: "PUT",
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  await loadExportFormats();
+  setStatus("Word template renamed");
+}
+
+async function deleteCustomExportTemplate(formatId) {
+  const format = state.exportFormats.find((item) => item.id === formatId && item.custom_template);
+  if (!format || !window.confirm(`Delete the private Word template “${format.name}”?`)) return;
+  await api(`/api/export-templates/${encodeURIComponent(formatId)}`, { method: "DELETE" });
+  delete state.exportArtifacts[formatId];
+  await loadExportFormats();
+  setStatus("Word template deleted");
 }
 
 function renderPromptExportFormats() {
@@ -2447,7 +2521,10 @@ function exportFormatCard(format) {
     const artifactLink = artifact.docx && !state.cloud.enabled
       ? `<a href="${escapeHtml(artifact.docx)}" title="${escapeHtml(artifact.docx_path || "")}" target="_blank" rel="noopener">Open last export</a>`
       : "";
-    actions = `${buildButton}${artifactLink}<button class="formatActionButton quietButton formatRemoveButton" data-format-id="${escapeHtml(format.id)}" type="button">Remove</button>`;
+    const manageButton = format.custom_template
+      ? `<button class="formatActionButton quietButton formatRenameTemplateButton" data-format-id="${escapeHtml(format.id)}" type="button">Rename</button><button class="formatActionButton quietButton formatDeleteTemplateButton" data-format-id="${escapeHtml(format.id)}" type="button">Delete</button>`
+      : `<button class="formatActionButton quietButton formatRemoveButton" data-format-id="${escapeHtml(format.id)}" type="button">Remove</button>`;
+    actions = `${buildButton}${artifactLink}${manageButton}`;
   } else {
     actions = `<button class="formatActionButton formatInstallButton" data-format-id="${escapeHtml(format.id)}" type="button">Add format</button>`;
   }
@@ -2457,9 +2534,15 @@ function exportFormatCard(format) {
         <div class="checkboxStack compact longPublicationCategories"></div>
       </details>`
     : "";
+  const preview = format.custom_template
+    ? `<div class="customWordPreview" aria-hidden="true"><span>W</span><small>${escapeHtml(format.content_profile_label || "CV")}</small></div>`
+    : `<img src="${escapeHtml(format.preview)}" alt="">`;
+  const analysis = format.custom_template && format.template_analysis
+    ? `<span class="templateAnalysisNote">${format.template_analysis.page_count ? `${format.template_analysis.page_count} source page${format.template_analysis.page_count === 1 ? "" : "s"} · ` : ""}${format.template_analysis.mapped_sections?.length || 0} mapped sections${format.template_analysis.model ? ` · analyzed with ${escapeHtml(format.template_analysis.model)}` : ""}</span>`
+    : "";
   return `<article class="formatCard ${format.installed ? "installed" : ""}">
     <div class="formatPreview">
-      <img src="${escapeHtml(format.preview)}" alt="">
+      ${preview}
     </div>
     <div class="formatCardBody">
       <div class="formatTitleRow">
@@ -2472,6 +2555,7 @@ function exportFormatCard(format) {
       <span class="formatLength">${escapeHtml(format.length || "")}</span>
       <span class="contentProfileBadge" title="${escapeHtml(format.content_profile_description || "Controls which CV content-selection routine is used.")}">${escapeHtml(profileLabel)} content</span>
       <p>${escapeHtml(format.summary || "")}</p>
+      ${analysis}
       <div class="formatFocus" aria-label="Focus">${focus}</div>
       ${longOptions}
       ${sourceLink ? `<div class="formatSource">${sourceLink}</div>` : ""}
@@ -2489,6 +2573,12 @@ function bindExportFormatActions() {
   });
   $$(".formatBuildButton").forEach((button) => {
     button.addEventListener("click", () => buildExportFormat(button.dataset.formatId));
+  });
+  $$(".formatRenameTemplateButton").forEach((button) => {
+    button.addEventListener("click", () => renameCustomExportTemplate(button.dataset.formatId));
+  });
+  $$(".formatDeleteTemplateButton").forEach((button) => {
+    button.addEventListener("click", () => deleteCustomExportTemplate(button.dataset.formatId));
   });
 }
 
@@ -4093,6 +4183,25 @@ async function init() {
   $("#showSuppressedPubs").addEventListener("change", loadPublications);
   $("#journalMetricSearch").addEventListener("input", debounce(loadJournalMetrics));
   $("#exportFormatSearch").addEventListener("input", renderExportFormats);
+  $("#chooseCustomTemplateFile").addEventListener("click", () => $("#customTemplateFileInput").click());
+  $("#customTemplateFileInput").addEventListener("change", (event) => importCustomExportTemplate(event.target.files?.[0]));
+  $("#customTemplateDropzone").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      $("#customTemplateFileInput").click();
+    }
+  });
+  $("#customTemplateDropzone").addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    $("#customTemplateDropzone").classList.add("dragover");
+  });
+  $("#customTemplateDropzone").addEventListener("dragleave", () => $("#customTemplateDropzone").classList.remove("dragover"));
+  $("#customTemplateDropzone").addEventListener("drop", (event) => {
+    event.preventDefault();
+    $("#customTemplateDropzone").classList.remove("dragover");
+    importCustomExportTemplate(event.dataTransfer.files?.[0]);
+  });
   $("#journalMetricEditor").addEventListener("change", debounce(saveJournalMetrics, 500));
   $("#connectionsForm").addEventListener("submit", saveConnections);
   $("#connectZotero").addEventListener("click", connectZotero);

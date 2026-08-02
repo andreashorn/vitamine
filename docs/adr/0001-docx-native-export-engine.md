@@ -57,6 +57,26 @@ and the optional built-in exporter key.
 Installed-format IDs are application preferences, not CV-database content. If no preference
 exists, the four `preinstalled` entries are installed. The catalogue order is canonical.
 
+## Amendment: private user-imported Word templates
+
+As of 2026-08-02, the local catalogue is supplemented by private Word templates stored inside
+the active `.vitamine` database. A DOCX uploaded in the Exports view is analyzed into semantic
+section slots, classified as Long, Short, Ultrashort (`one_page` internally), or Biosketch, and
+added directly to “Your formats.” The user supplies or later changes its display name.
+
+The original Word package is converted into a private layout skeleton: recognized person values
+and section content become placeholders while page geometry, paragraph and table formatting,
+styles, headers, footers, and embedded visual assets remain Word-native. External relationships,
+custom XML, comments, tracked deletions, and personal document properties are removed. Export
+uses the deterministic builder for the classified content profile and pours its current content
+into the imported layout slots. Structured LLM analysis improves unfamiliar heading mappings;
+classification and common academic headings retain a deterministic fallback.
+
+Unlike bundled catalogue entries, private templates and their installed state belong to the CV
+database rather than machine preferences. This makes them portable with desktop `.vitamine`
+files and part of the encrypted hosted CV snapshot. There is still no remote marketplace or
+executable third-party template code.
+
 ## Current Word sources
 
 ### Tabular One Page CV

@@ -1,6 +1,6 @@
 # VitaMine hosted prototype on Strato
 
-Last updated: 2026-07-31.
+Last updated: 2026-08-02.
 
 This is the project handoff for future Codex sessions. It intentionally contains
 no API keys, invite codes, cookies, or other credentials.
@@ -215,6 +215,15 @@ Both deployments use the same application code:
   LLM configuration step in onboarding.
 - The shared key is stored only in `/etc/vitamine-cloud.env`.
 - Never copy the key into the repository, command output, logs, or chat.
+
+Private custom Word export templates use the same managed LLM configuration for ambiguous
+heading mapping and a deterministic fallback for common academic CV structures. DOCX uploads are
+limited to 20 MB. VitaMine stores the sanitized Word skeleton, classification, and semantic slot
+blueprint in the active `.vitamine` database's `export_templates` table. On the hosted service this
+means the template is covered by the existing encrypted PostgreSQL CV snapshot and persists through
+the normal successful POST/PUT/DELETE workspace snapshot flow; no separate unencrypted template
+directory or cloud schema migration is involved. Deploy `vitamine/custom_docx_templates.py`,
+`vitamine/app.py`, `vitamine/schema.sql`, and the export UI assets together when this pipeline changes.
 
 ## Existing server workloads
 
