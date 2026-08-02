@@ -407,6 +407,28 @@ class CustomDocxTemplateApiTests(unittest.TestCase):
         self.assertIn("async function importCustomExportTemplate(file)", script.text)
         self.assertIn("renameCustomExportTemplate", script.text)
 
+    def test_stale_remove_action_deletes_a_custom_template(self):
+        created = self.client.post(
+            "/api/export-templates",
+            data={"name": "Legacy remove target"},
+            files={
+                "file": (
+                    "legacy-remove.docx",
+                    document_bytes(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        template_id = created.json()["format"]["id"]
+
+        removed = self.client.delete(f"/api/export-formats/{template_id}/install")
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertTrue(removed.json()["deleted"])
+        self.assertFalse(
+            any(item["id"] == template_id for item in self.client.get("/api/export-formats").json()["formats"])
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

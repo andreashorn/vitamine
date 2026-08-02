@@ -5443,6 +5443,17 @@ def install_export_format(format_id: str) -> dict[str, Any]:
 
 @app.delete("/api/export-formats/{format_id}/install")
 def uninstall_export_format(format_id: str) -> dict[str, Any]:
+    # Compatibility for clients that loaded the export-format UI before
+    # custom templates gained their dedicated Delete action. Those clients
+    # send the generic Remove request for every installed card.
+    if format_id.startswith("custom."):
+        delete_export_template(format_id)
+        return {
+            "ok": True,
+            "format_id": format_id,
+            "installed": False,
+            "deleted": True,
+        }
     formats = export_format_catalog()
     item = export_format_by_id(format_id, formats)
     installed = [item_id for item_id in installed_export_format_ids(formats) if item_id != format_id]
