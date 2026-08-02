@@ -426,14 +426,14 @@ Evidence: pending
   closed browser and recover after a service restart.
 - [x] Bound the current exposure through invite-only access and the API
   account's own spending limit.
-- [x] Measure managed-LLM token usage and versioned API cost per account, with
-  a visible non-enforcing Premium Features Account balance for the pilot.
-- [x] Offer invited testers a fixed, self-attested $5 PayPal top-up with
-  idempotent crediting and an append-only central audit record.
+- [x] Measure managed-LLM token usage and versioned API cost per account in a
+  private at-cost operator ledger.
+- [x] Replace the pilot balance/top-up model with a 90-day VitaMine+ trial,
+  €25 annual entitlement, and a free tier that cannot invoke managed LLMs.
 - [ ] Tell users clearly when their uploaded CV content is sent to OpenAI and
   obtain the appropriate consent.
-- [ ] Enforce per-account and per-job quotas or balance limits; accounting and
-  negative pilot balances are implemented, but do not yet block usage.
+- [ ] Add abuse-oriented per-account and per-job spending limits independently
+  of VitaMine+ access.
 - [ ] An operator view for unusually expensive, repeated, failed, or stuck
   jobs.
 - [ ] Robust job idempotency and cancellation so retries cannot silently repeat

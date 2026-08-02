@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine — Academic CV manager</title>
-  <link rel="stylesheet" href="/assets/account.css?v=20260801-passkey-settings">
-  <script src="/assets/account.js?v=20260801-passkey-settings" defer></script>
+  <link rel="stylesheet" href="/assets/account.css?v=20260801-passkey-settings-vitamine-plus">
+  <script src="/assets/account.js?v=20260801-passkey-settings-vitamine-plus" defer></script>
 </head>
 <body id="top">
   <header class="site-header">
@@ -14,9 +14,7 @@
     </a>
     <div id="accountNav" class="account-nav" hidden>
       <span id="accountIdentity"></span>
-      <span class="nav-balance" title="Premium features account balance">
-        Balance <strong id="premiumBalance">$—</strong>
-      </span>
+      <button id="plusStatusButton" class="plus-status-button" type="button">VitaMine+</button>
       <button id="settingsButton" class="text-button" type="button">Settings</button>
       <button id="logoutButton" class="text-button" type="button">Sign out</button>
     </div>
@@ -412,7 +410,32 @@
         </div>
         <button id="addPasskeyButton" class="secondary-button" type="button">Add another passkey</button>
       </section>
+      <section id="plusDeveloperSetting" class="security-setting" hidden>
+        <div>
+          <h3>VitaMine+ development access</h3>
+          <p>Temporarily override your plan to test both the free and VitaMine+ experiences.</p>
+        </div>
+        <label class="developer-toggle"><input id="plusDeveloperToggle" type="checkbox"> VitaMine+ enabled</label>
+      </section>
       <p id="passkeyMessage" class="message" role="status"></p>
+    </div>
+  </dialog>
+
+  <dialog id="plusDialog" class="account-dialog plus-dialog">
+    <div class="plus-dialog-panel">
+      <div class="account-dialog-heading">
+        <div><p class="eyebrow">VitaMine+</p><h2 id="plusDialogTitle">More confidence, less maintenance.</h2></div>
+        <button id="closePlusDialog" class="dialog-close" type="button" aria-label="Close">×</button>
+      </div>
+      <p id="plusDialogStatus"></p>
+      <ul>
+        <li>Import existing CV documents</li>
+        <li>Enrich your CV from trusted research sources</li>
+        <li>Use custom Word export templates</li>
+        <li>Explore full collaboration-network map details</li>
+      </ul>
+      <div class="plus-price"><strong>€25</strong><span>per year</span></div>
+      <a class="primary-button" href="mailto:hello@vitamine.cloud?subject=Upgrade%20to%20VitaMine%2B">Upgrade to VitaMine+</a>
     </div>
   </dialog>
 </body>

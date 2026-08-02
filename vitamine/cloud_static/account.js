@@ -47,7 +47,13 @@ const elements = {
   profileSlug: $("#profileSlug"),
   profileSetupMessage: $("#profileSetupMessage"),
   closeProfileSetup: $("#closeProfileSetup"),
-  premiumBalance: $("#premiumBalance"),
+  plusStatusButton: $("#plusStatusButton"),
+  plusDialog: $("#plusDialog"),
+  plusDialogTitle: $("#plusDialogTitle"),
+  plusDialogStatus: $("#plusDialogStatus"),
+  closePlusDialog: $("#closePlusDialog"),
+  plusDeveloperSetting: $("#plusDeveloperSetting"),
+  plusDeveloperToggle: $("#plusDeveloperToggle"),
 };
 let libraryPollTimer = null;
 let libraryPayload = null;
@@ -234,18 +240,24 @@ function formatDate(value) {
     : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
 }
 
-function formatUsd(microusd) {
-  return new Intl.NumberFormat(undefined, {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(Number(microusd || 0) / 1_000_000);
-}
-
-function renderPremiumAccount(payload) {
-  elements.premiumBalance.textContent = formatUsd(payload.balance_microusd);
-  elements.premiumBalance.classList.toggle("negative", Number(payload.balance_microusd) < 0);
+function renderPlusStatus(plus = {}) {
+  elements.plusStatusButton.textContent = plus.active ? "VitaMine+" : "Upgrade to +";
+  elements.plusStatusButton.classList.toggle("active", Boolean(plus.active));
+  elements.plusDeveloperSetting.hidden = !plus.developer_toggle;
+  if (plus.developer_toggle) elements.plusDeveloperToggle.checked = Boolean(plus.active);
+  if (plus.plan === "developer") {
+    elements.plusDialogTitle.textContent = plus.active ? "Developer VitaMine+ access is enabled." : "Developer free-plan mode is enabled.";
+    elements.plusDialogStatus.textContent = "Use the temporary switch in Settings to move between both plan experiences.";
+  } else if (plus.plan === "trial") {
+    elements.plusDialogTitle.textContent = "Your VitaMine+ trial is active.";
+    elements.plusDialogStatus.textContent = `All VitaMine+ features are available until ${formatDate(plus.active_until)}. After that, VitaMine remains free and your data stays accessible.`;
+  } else if (plus.plan === "paid") {
+    elements.plusDialogTitle.textContent = "Your VitaMine+ plan is active.";
+    elements.plusDialogStatus.textContent = plus.active_until ? `Your current plan runs through ${formatDate(plus.active_until)}.` : "All VitaMine+ features are available.";
+  } else {
+    elements.plusDialogTitle.textContent = "More confidence, less maintenance.";
+    elements.plusDialogStatus.textContent = "VitaMine stays free. Upgrade to keep intelligent import, enrichment, custom-template, and network-exploration features.";
+  }
 }
 
 function suggestedProfileSlug(value) {
@@ -369,10 +381,9 @@ function databaseCard(database, job = null) {
 
 async function loadLibrary() {
   window.clearTimeout(libraryPollTimer);
-  const [payload, jobsPayload, premiumPayload] = await Promise.all([
+  const [payload, jobsPayload] = await Promise.all([
     api("/api/account/databases"),
     api("/api/cloud/jobs"),
-    api("/api/account/premium-account"),
   ]);
   const jobs = new Map((jobsPayload.jobs || []).map((job) => [job.database_id, job]));
   libraryPayload = payload;
@@ -380,7 +391,7 @@ async function loadLibrary() {
   elements.libraryView.hidden = false;
   elements.accountNav.hidden = false;
   elements.accountIdentity.textContent = payload.account.display_name || payload.account.email;
-  renderPremiumAccount(premiumPayload);
+  renderPlusStatus(payload.plus);
   elements.profileStatus.hidden = false;
   if (payload.profile) {
     elements.profileStatusTitle.textContent = `vitamine.cloud/${payload.profile.slug}`;
@@ -631,6 +642,27 @@ elements.settingsButton.addEventListener("click", async () => {
 elements.closeSettings.addEventListener("click", () => elements.settingsDialog.close());
 elements.settingsDialog.addEventListener("click", (event) => {
   if (event.target === elements.settingsDialog) elements.settingsDialog.close();
+});
+elements.plusStatusButton.addEventListener("click", () => elements.plusDialog.showModal());
+elements.closePlusDialog.addEventListener("click", () => elements.plusDialog.close());
+elements.plusDialog.addEventListener("click", (event) => {
+  if (event.target === elements.plusDialog) elements.plusDialog.close();
+});
+elements.plusDeveloperToggle.addEventListener("change", async () => {
+  elements.plusDeveloperToggle.disabled = true;
+  try {
+    const payload = await api("/api/account/plus-developer-toggle", {
+      method: "PUT",
+      body: JSON.stringify({ active: elements.plusDeveloperToggle.checked }),
+    });
+    if (libraryPayload) libraryPayload.plus = payload.plus;
+    renderPlusStatus(payload.plus);
+  } catch (error) {
+    elements.plusDeveloperToggle.checked = !elements.plusDeveloperToggle.checked;
+    elements.passkeyMessage.textContent = error.message;
+  } finally {
+    elements.plusDeveloperToggle.disabled = false;
+  }
 });
 
 elements.logoutButton.addEventListener("click", async () => {

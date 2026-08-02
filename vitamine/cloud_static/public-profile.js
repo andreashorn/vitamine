@@ -1,6 +1,7 @@
 const body = document.body;
 const slug = body.dataset.profileSlug;
 const embedded = body.dataset.profileEmbedded === "true";
+const plusActive = body.dataset.plusActive === "true";
 const requestedBlock = body.dataset.profileBlock || "";
 const BLOCK_LABELS = {
   bio: "About",
@@ -555,7 +556,7 @@ function renderProfile() {
   $("#profileUpdated").textContent = profile.updated_at
     ? `Updated ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(profile.updated_at))}`
     : "";
-  if (embedded && requestedBlock) $(".profile-footer").hidden = true;
+  if (embedded && requestedBlock && plusActive) $(".profile-footer").hidden = true;
   bindProfileInteractions();
 }
 

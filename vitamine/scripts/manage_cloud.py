@@ -49,6 +49,27 @@ def revoke_invitation(invitation_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+def grant_vitamine_plus(member_id: str, days: int = 365) -> str | None:
+    initialize_database()
+    paid_until = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+    with connect() as con:
+        cursor = con.execute(
+            "UPDATE members SET plus_paid_until=? WHERE id=?",
+            (paid_until, member_id),
+        )
+    return paid_until if cursor.rowcount == 1 else None
+
+
+def enable_plus_developer_toggle(member_id: str) -> bool:
+    initialize_database()
+    with connect() as con:
+        cursor = con.execute(
+            "UPDATE members SET plus_dev_toggle_enabled=1, plus_dev_override=1 WHERE id=?",
+            (member_id,),
+        )
+    return cursor.rowcount == 1
+
+
 def llm_usage_totals(days: int = 30) -> list[dict]:
     initialize_database()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -113,6 +134,12 @@ def main() -> int:
     revoke = subparsers.add_parser("revoke-invite")
     revoke.add_argument("invitation_id", type=int)
 
+    grant_plus = subparsers.add_parser("grant-plus")
+    grant_plus.add_argument("member_id")
+    grant_plus.add_argument("--days", type=int, default=365)
+    plus_dev = subparsers.add_parser("enable-plus-dev-toggle")
+    plus_dev.add_argument("member_id")
+
     usage = subparsers.add_parser("llm-usage")
     usage.add_argument("--days", type=int, default=30)
     subparsers.add_parser("premium-accounts")
@@ -136,6 +163,19 @@ def main() -> int:
         if not revoke_invitation(args.invitation_id):
             parser.error("Invitation was not found or was already revoked.")
         print(f"Revoked invitation {args.invitation_id}.")
+        return 0
+    if args.command == "grant-plus":
+        if args.days < 1:
+            parser.error("--days must be at least 1")
+        paid_until = grant_vitamine_plus(args.member_id, args.days)
+        if paid_until is None:
+            parser.error("Member was not found.")
+        print(f"VitaMine+ active until {paid_until} for {args.member_id}.")
+        return 0
+    if args.command == "enable-plus-dev-toggle":
+        if not enable_plus_developer_toggle(args.member_id):
+            parser.error("Member was not found.")
+        print(f"Enabled the VitaMine+ developer toggle for {args.member_id}.")
         return 0
     if args.command == "llm-usage":
         if args.days < 1:

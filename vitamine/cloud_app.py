@@ -85,13 +85,14 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 11
+CLOUD_SCHEMA_VERSION = 12
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
 PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
 PASSKEY_RP_ID = "vitamine.cloud"
 PASSKEY_ORIGIN = "https://vitamine.cloud"
-INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000
+PLUS_TRIAL_DAYS = 90
+INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000  # Legacy migrations only.
 PAYPAL_BETA_TOPUP_MICROUSD = 5_000_000
 LOGGER = logging.getLogger("vitamine.cloud")
 
@@ -117,6 +118,10 @@ CREATE TABLE IF NOT EXISTS members (
     password_hash TEXT,
     display_name TEXT NOT NULL DEFAULT '',
     account_created_at TEXT,
+    plus_trial_ends_at TEXT,
+    plus_paid_until TEXT,
+    plus_dev_toggle_enabled INTEGER NOT NULL DEFAULT 0,
+    plus_dev_override INTEGER,
     email_verified_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -417,6 +422,10 @@ CREATE TABLE IF NOT EXISTS members (
     password_hash TEXT,
     display_name TEXT NOT NULL DEFAULT '',
     account_created_at TEXT,
+    plus_trial_ends_at TEXT,
+    plus_paid_until TEXT,
+    plus_dev_toggle_enabled INTEGER NOT NULL DEFAULT 0,
+    plus_dev_override INTEGER,
     email_verified_at TEXT,
     created_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
@@ -738,6 +747,10 @@ class PasswordResetCompletion(BaseModel):
 
 class PaypalBetaTopupClaim(BaseModel):
     acknowledged_paid: bool
+
+
+class PlusDeveloperToggle(BaseModel):
+    active: bool
 
 
 class DatabaseRename(BaseModel):
@@ -1684,6 +1697,41 @@ def migration_011_paypal_beta_topups(con: GatewayConnection) -> None:
     )
 
 
+def migration_012_vitamine_plus(con: GatewayConnection) -> None:
+    definitions = {
+        "plus_trial_ends_at": "TEXT",
+        "plus_paid_until": "TEXT",
+        "plus_dev_toggle_enabled": "INTEGER NOT NULL DEFAULT 0",
+        "plus_dev_override": "INTEGER",
+    }
+    if cloud_table_exists(con, "members"):
+        if con.backend == "postgres":
+            for name, definition in definitions.items():
+                con.execute(f"ALTER TABLE members ADD COLUMN IF NOT EXISTS {name} {definition}")
+        else:
+            columns = sqlite_column_names(con, "members")
+            for name, definition in definitions.items():
+                if name not in columns:
+                    con.execute(f"ALTER TABLE members ADD COLUMN {name} {definition}")
+        trial_end = (datetime.now(timezone.utc) + timedelta(days=PLUS_TRIAL_DAYS)).isoformat()
+        con.execute(
+            "UPDATE members SET plus_trial_ends_at=? WHERE plus_trial_ends_at IS NULL",
+            (trial_end,),
+        )
+    # The former 2x debit and promotional-credit balance are superseded by a
+    # private at-cost usage ledger. Historical measurements are normalized too.
+    con.execute(
+        """
+        UPDATE llm_usage_events
+        SET charged_cost_microusd=wholesale_cost_microusd,
+            markup_basis_points=10000
+        WHERE wholesale_cost_microusd IS NOT NULL
+        """
+    )
+    if cloud_table_exists(con, "members") and cloud_table_exists(con, "premium_account_transactions"):
+        con.execute("DELETE FROM premium_account_transactions")
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1696,6 +1744,7 @@ CLOUD_MIGRATIONS = (
     (9, migration_009_verified_email_and_passkeys),
     (10, migration_010_zotero_oauth),
     (11, migration_011_paypal_beta_topups),
+    (12, migration_012_vitamine_plus),
 )
 
 
@@ -1814,6 +1863,58 @@ def account_member(
     if not str(member["email_verified_at"] or "").strip():
         raise HTTPException(status_code=403, detail="Confirm your email address before using VitaMine.")
     return member
+
+
+def parsed_utc(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def vitamine_plus_status(member: Any, *, now: datetime | None = None) -> dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    trial_end = parsed_utc(member["plus_trial_ends_at"] if "plus_trial_ends_at" in member.keys() else None)
+    paid_until = parsed_utc(member["plus_paid_until"] if "plus_paid_until" in member.keys() else None)
+    paid = bool(paid_until and paid_until > now)
+    trial = bool(trial_end and trial_end > now)
+    dev_enabled = bool(member["plus_dev_toggle_enabled"] if "plus_dev_toggle_enabled" in member.keys() else False)
+    raw_override = member["plus_dev_override"] if "plus_dev_override" in member.keys() else None
+    dev_override = bool(raw_override) if dev_enabled and raw_override is not None else None
+    active = dev_override if dev_override is not None else paid or trial
+    active_until = paid_until if paid else trial_end if trial else None
+    return {
+        "active": active,
+        "plan": "developer" if dev_override is not None else "paid" if paid else "trial" if trial else "free",
+        "label": "VitaMine+",
+        "trial_ends_at": trial_end.isoformat() if trial_end else None,
+        "paid_until": paid_until.isoformat() if paid_until else None,
+        "active_until": active_until.isoformat() if active_until else None,
+        "price_eur_per_year": 25,
+        "developer_toggle": dev_enabled,
+        "developer_override": dev_override,
+    }
+
+
+def require_vitamine_plus(member: Any) -> dict[str, Any]:
+    status = vitamine_plus_status(member)
+    if not status["active"]:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "vitamine_plus_required",
+                "message": "This feature is part of VitaMine+.",
+                "plus": status,
+            },
+        )
+    return status
+
+
+def member_plus_status(member_id: str) -> dict[str, Any]:
+    with connect() as con:
+        member = con.execute("SELECT * FROM members WHERE id=?", (member_id,)).fetchone()
+    return vitamine_plus_status(member) if member else {"active": False, "plan": "free", "label": "VitaMine+"}
 
 
 def public_app_url() -> str:
@@ -2283,6 +2384,7 @@ def start_workspace_worker(row: sqlite3.Row) -> int:
         "VITAMINE_PREFERENCES": str(session_dir / "preferences.json"),
         "VITAMINE_CLOUD_WORKER": "1",
         "VITAMINE_LLM_USAGE_PATH": str(session_dir / "llm-usage.jsonl"),
+        "VITAMINE_PLUS_ACTIVE": "1" if member_plus_status(str(row["member_id"]))["active"] else "0",
     }
     env.pop("ZOTERO_API_KEY", None)
     zotero_api_key = account_zotero_api_key(str(row["member_id"]))
@@ -4021,10 +4123,7 @@ def workspace_status(
 ) -> dict[str, Any]:
     row = workspace_for_request(request, authorization)
     with connect() as con:
-        member = con.execute(
-            "SELECT email, display_name FROM members WHERE id=?",
-            (row["member_id"],),
-        ).fetchone()
+        member = con.execute("SELECT * FROM members WHERE id=?", (row["member_id"],)).fetchone()
     return {
         "ok": True,
         "database_id": row["database_id"],
@@ -4032,6 +4131,7 @@ def workspace_status(
         "expires_at": row["expires_at"],
         "persistent": bool(row["database_id"]),
         "background_jobs": True,
+        "plus": vitamine_plus_status(member),
         "account": {
             "email": member["email"] if member else "",
             "display_name": member["display_name"] if member else "",
@@ -4102,6 +4202,9 @@ async def queue_cv_import_job(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
     workspace = workspace_for_request(request, authorization)
+    with connect() as con:
+        member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
+    require_vitamine_plus(member)
     if not files:
         raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
     job_id = secrets.token_urlsafe(18)
@@ -4177,6 +4280,9 @@ def queue_enrichment_job(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> JSONResponse:
     workspace = workspace_for_request(request, authorization)
+    with connect() as con:
+        member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
+    require_vitamine_plus(member)
     job_id = secrets.token_urlsafe(18)
     job, created = create_background_job(
         workspace=workspace,
@@ -4274,6 +4380,7 @@ def list_account_databases(
             "email": member["email"],
             "display_name": member["display_name"],
         },
+        "plus": vitamine_plus_status(member),
         "databases": [account_database_payload(row) for row in rows],
         "profile": {
             "slug": profile["slug"],
@@ -4332,13 +4439,31 @@ def premium_account_summary(
         "charged_microusd": charged,
         "wholesale_cost_microusd": int(usage_row["wholesale"] or 0),
         "unpriced_responses": int(usage_row["unpriced"] or 0),
-        "markup_factor": 2,
+        "markup_factor": 1,
         "pricing_source": "https://developers.openai.com/api/docs/pricing",
         "daily": daily,
         "recent": recent,
         "enforcement_enabled": False,
         "top_up": paypal_beta_topup_config(),
     }
+
+
+@app.put("/api/account/plus-developer-toggle")
+def set_plus_developer_toggle(
+    payload: PlusDeveloperToggle,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    if not bool(member["plus_dev_toggle_enabled"]):
+        raise HTTPException(status_code=404, detail="Developer entitlement control is not available.")
+    with connect() as con:
+        con.execute(
+            "UPDATE members SET plus_dev_override=? WHERE id=? AND plus_dev_toggle_enabled=1",
+            (1 if payload.active else 0, member["id"]),
+        )
+        updated = con.execute("SELECT * FROM members WHERE id=?", (member["id"],)).fetchone()
+    return {"ok": True, "plus": vitamine_plus_status(updated)}
 
 
 @app.post("/api/account/premium-account/paypal-beta-topup")
@@ -4348,61 +4473,8 @@ def confirm_paypal_beta_topup(
     authorization: str | None = Header(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
-    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
-    config = paypal_beta_topup_config()
-    if not config["enabled"]:
-        raise HTTPException(status_code=503, detail="PayPal beta top-ups are not currently available.")
-    if not payload.acknowledged_paid:
-        raise HTTPException(status_code=422, detail="Confirm that you sent the PayPal payment first.")
-    normalized_key = normalize_idempotency_key(idempotency_key)
-    if normalized_key is None:
-        raise HTTPException(status_code=400, detail="An Idempotency-Key is required.")
-    claim_key_hash = hashlib.sha256(
-        f"{member['id']}:{normalized_key}".encode("utf-8")
-    ).hexdigest()
-    claim_id = f"paypal-beta:{claim_key_hash}"
-    transaction_id = f"paypal-credit:{claim_key_hash}"
-    now = utc_now()
-    with connect() as con:
-        con.execute("BEGIN IMMEDIATE")
-        existing = con.execute(
-            "SELECT id FROM paypal_beta_topups WHERE claim_key_hash=?",
-            (claim_key_hash,),
-        ).fetchone()
-        if existing is None:
-            con.execute(
-                """
-                INSERT INTO paypal_beta_topups
-                  (id, member_id, claim_key_hash, amount_microusd, currency,
-                   confirmation_mode, created_at)
-                VALUES (?, ?, ?, ?, 'USD', 'trusted_beta_self_attested', ?)
-                """,
-                (claim_id, member["id"], claim_key_hash, PAYPAL_BETA_TOPUP_MICROUSD, now),
-            )
-            con.execute(
-                """
-                INSERT INTO premium_account_transactions
-                  (id, member_id, amount_microusd, kind, note, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    transaction_id,
-                    member["id"],
-                    PAYPAL_BETA_TOPUP_MICROUSD,
-                    "paypal_beta_topup",
-                    "Trusted-beta PayPal top-up (self-attested)",
-                    now,
-                ),
-            )
-        balance = premium_balance_microusd(con, member["id"])
-    return {
-        "ok": True,
-        "credited": existing is None,
-        "amount_microusd": PAYPAL_BETA_TOPUP_MICROUSD,
-        "currency": "USD",
-        "balance_microusd": balance,
-        "confirmation_mode": "trusted_beta_self_attested",
-    }
+    account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    raise HTTPException(status_code=410, detail="Balance top-ups have been retired in favor of VitaMine+.")
 
 
 @app.patch("/api/account/databases/{database_id}")
@@ -4631,14 +4703,6 @@ async def redeem_invitation(request: Request) -> JSONResponse:
             "INSERT INTO members (id, invitation_id, created_at, last_seen_at) VALUES (?, ?, ?, ?)",
             (member_id, invitation["id"], now, now),
         )
-        con.execute(
-            """
-            INSERT INTO premium_account_transactions
-              (id, member_id, amount_microusd, kind, note, created_at)
-            VALUES (?, ?, ?, 'promotional_credit', 'Early-access credit', ?)
-            """,
-            (f"initial-credit:{member_id}", member_id, INITIAL_PREMIUM_CREDIT_MICROUSD, now),
-        )
         token = issue_device_credential(con, member_id)
         con.execute(
             "UPDATE invitations SET use_count=use_count+1 WHERE id=?",
@@ -4667,10 +4731,15 @@ def register_account(
             cursor = con.execute(
                 """
                 UPDATE members
-                SET email=?, password_hash=?, display_name=?, account_created_at=?, last_seen_at=?
+                SET email=?, password_hash=?, display_name=?, account_created_at=?, last_seen_at=?,
+                    plus_trial_ends_at=?
                 WHERE id=? AND email IS NULL AND password_hash IS NULL
                 """,
-                (email, password_hash, display_name, now, now, member["id"]),
+                (
+                    email, password_hash, display_name, now, now,
+                    (datetime.now(timezone.utc) + timedelta(days=PLUS_TRIAL_DAYS)).isoformat(),
+                    member["id"],
+                ),
             )
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=409, detail="This invitation already belongs to an account.")
@@ -5050,6 +5119,7 @@ def session(request: Request, authorization: str | None = Header(default=None)) 
         "display_name": member["display_name"] or "",
         "database_count": int(database_count),
         "profile": dict(profile) if profile else None,
+        "plus": vitamine_plus_status(member),
     }
 
 
@@ -5413,6 +5483,7 @@ def render_public_profile(
     embedded: bool = False,
     theme: str = "native",
     block: str = "",
+    plus_active: bool = True,
 ) -> str:
     name = html.escape(
         str(
@@ -5441,14 +5512,15 @@ def render_public_profile(
       <meta name="viewport" content="width=device-width, initial-scale=1">
       <title>{name} — Academic profile</title>
       <meta name="description" content="{description}">
-      <link rel="stylesheet" href="/assets/public-profile.css?v=20260801-citation-map">
-      <script src="/assets/public-profile.js?v=20260801-citation-map" defer></script>
+      <link rel="stylesheet" href="/assets/public-profile.css?v=20260801-citation-map-plus">
+      <script src="/assets/public-profile.js?v=20260801-citation-map-plus" defer></script>
     </head>
     <body
       data-profile-slug="{slug}"
       data-profile-theme="{theme}"
       data-profile-embedded="{embedded_attribute}"
       data-profile-block="{block_attribute}"
+      data-plus-active="{'true' if plus_active else 'false'}"
     >
       <aside id="ownerToolbar" class="owner-toolbar" hidden>
         <span>You’re viewing your public profile</span>
@@ -5541,13 +5613,14 @@ def embedded_profile(slug: str, block: str = "", theme: str = "native") -> str:
         raise HTTPException(status_code=404, detail="Public profile not found.")
     row = current_public_profile_row(row)
     snapshot = public_snapshot(row)
+    plus_active = member_plus_status(str(row["member_id"]))["active"]
     visible = {
         item["key"]: item["visible"]
         for item in normalize_profile_blocks(snapshot.get("blocks"))
     }
     if block and not visible.get(block, False):
         raise HTTPException(status_code=404, detail="That public-profile block is not published.")
-    return render_public_profile(snapshot, embedded=True, theme=theme, block=block)
+    return render_public_profile(snapshot, embedded=True, theme=theme, block=block, plus_active=plus_active)
 
 
 @app.get("/{slug}", response_class=HTMLResponse)

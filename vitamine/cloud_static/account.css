@@ -57,14 +57,24 @@ button { cursor: pointer; }
   font-size: .88rem;
 }
 
-.nav-balance {
-  border-left: 1px solid var(--line);
-  padding-left: 18px;
-  white-space: nowrap;
+.plus-status-button {
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 7px 12px;
+  background: transparent;
+  color: var(--accent);
+  font-size: .8rem;
+  font-weight: 800;
 }
-
-.nav-balance strong { color: var(--accent); }
-.nav-balance strong.negative { color: var(--danger); }
+.plus-status-button.active { background: var(--accent-soft); }
+.plus-dialog-panel { display: grid; gap: 18px; padding: 27px; }
+.plus-dialog-panel > p { margin: 0; color: var(--muted); line-height: 1.55; }
+.plus-dialog-panel ul { margin: 0; padding-left: 22px; color: var(--muted); line-height: 1.8; }
+.plus-price { display: flex; align-items: baseline; gap: 8px; }
+.plus-price strong { color: var(--accent); font-size: 2rem; }
+.plus-price span { color: var(--muted); }
+.plus-dialog-panel > .primary-button { justify-self: start; text-decoration: none; }
+.developer-toggle { display: flex; align-items: center; gap: 8px; color: var(--accent); font-weight: 780; white-space: nowrap; }
 
 .text-button {
   border: 0;

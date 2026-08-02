@@ -15,7 +15,7 @@ from typing import Any
 
 SAFE_MODEL_RE = re.compile(r"[^A-Za-z0-9._:/-]+")
 PRICING_VERSION = "openai-standard-2026-08-01"
-PREMIUM_MARKUP_BASIS_POINTS = 20_000
+PREMIUM_MARKUP_BASIS_POINTS = 10_000
 MICRO_USD_PER_USD = 1_000_000
 MODEL_PRICES_PER_MILLION = {
     "gpt-5.4-nano": (Decimal("0.20"), Decimal("0.02"), Decimal("1.25")),

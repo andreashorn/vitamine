@@ -75,12 +75,12 @@ class LlmUsageTests(unittest.TestCase):
         self.assertIsNone(partial["output_tokens"])
         costs = usage_costs({"model": "gpt-4.1-mini-2025-04-14", "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20})
         self.assertEqual(costs["wholesale_cost_microusd"], 60)
-        self.assertEqual(costs["charged_cost_microusd"], 120)
+        self.assertEqual(costs["charged_cost_microusd"], 60)
         nano_costs = usage_costs(
             {"model": "gpt-5.4-nano-2026-03-17", "input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20}
         )
         self.assertEqual(nano_costs["wholesale_cost_microusd"], 38)
-        self.assertEqual(nano_costs["charged_cost_microusd"], 76)
+        self.assertEqual(nano_costs["charged_cost_microusd"], 38)
 
     def test_response_capture_and_ingestion_are_idempotent(self):
         usage_path = self.root / "usage.jsonl"
@@ -101,14 +101,14 @@ class LlmUsageTests(unittest.TestCase):
             self.assertEqual(row["input_tokens"], 12)
             self.assertEqual(row["output_tokens"], 3)
             self.assertEqual(row["wholesale_cost_microusd"], 10)
-            self.assertEqual(row["charged_cost_microusd"], 20)
+            self.assertEqual(row["charged_cost_microusd"], 10)
         totals = llm_usage_totals(30)
         self.assertEqual(totals[0]["responses"], 1)
         self.assertEqual(totals[0]["input_tokens"], 12)
-        self.assertEqual(totals[0]["charged_cost_microusd"], 20)
+        self.assertEqual(totals[0]["charged_cost_microusd"], 10)
         accounts = premium_account_totals()
-        self.assertEqual(accounts[0]["charged_microusd"], 20)
-        self.assertEqual(accounts[0]["balance_microusd"], -20)
+        self.assertEqual(accounts[0]["charged_microusd"], 10)
+        self.assertEqual(accounts[0]["balance_microusd"], -10)
 
 
 if __name__ == "__main__":
