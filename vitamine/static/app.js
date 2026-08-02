@@ -318,8 +318,40 @@ function configureWorkspacePlus() {
   const button = $("#workspacePlusButton");
   if (!button || !state.cloud.enabled) return;
   button.hidden = false;
-  button.textContent = hasVitaminePlus() ? "VitaMine+" : "Upgrade to +";
-  button.classList.toggle("upgrade", !hasVitaminePlus());
+  const developerToggle = Boolean(state.cloud.plus?.developer_toggle);
+  button.classList.toggle("developer", developerToggle);
+  button.classList.toggle("upgrade", !developerToggle && !hasVitaminePlus());
+  button.setAttribute("aria-pressed", developerToggle ? String(hasVitaminePlus()) : "false");
+  button.title = developerToggle
+    ? "Temporary developer control: switch between VitaMine+ and the free plan"
+    : "View VitaMine+ plan details";
+  button.textContent = developerToggle
+    ? (hasVitaminePlus() ? "DEV · Plus ON" : "DEV · Free mode")
+    : (hasVitaminePlus() ? "VitaMine+" : "Upgrade to +");
+}
+
+async function toggleWorkspaceDeveloperPlus() {
+  const button = $("#workspacePlusButton");
+  if (!state.cloud.plus?.developer_toggle) {
+    showWorkspacePlusDialog();
+    return;
+  }
+  button.disabled = true;
+  try {
+    const payload = await api("/api/account/plus-developer-toggle", {
+      method: "PUT",
+      body: JSON.stringify({ active: !hasVitaminePlus() }),
+    });
+    state.cloud.plus = payload.plus;
+    configureWorkspacePlus();
+    if (state.exportFormats.length) renderExportFormats();
+    await loadCollaborationMap();
+    setStatus(hasVitaminePlus() ? "Developer mode: VitaMine+ enabled" : "Developer mode: free plan enabled");
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function cloudJobMessage(job) {
@@ -2067,8 +2099,11 @@ async function loadCollaborationMap() {
       container.innerHTML = '<button type="button"><strong>Full network map with VitaMine+</strong><span>Upgrade to explore institutions and collaboration details.</span></button>';
       container.querySelector("button")?.addEventListener("click", showWorkspacePlusDialog);
     }
+    $("#collaborationMapStats").innerHTML = "";
+    $("#collaborationCountries").innerHTML = "";
     return;
   }
+  $("#collaborationMap")?.classList.remove("plusMapLocked");
   const mode = state.collaborationMap.mode;
   const data = await api(`/api/collaboration-map?mode=${encodeURIComponent(mode)}`);
   state.collaborationMap.datasets[mode] = data;
@@ -4282,7 +4317,7 @@ async function init() {
   $("#enrichCvDashboard").addEventListener("click", () => {
     if (requirePlusUi()) enrichCv();
   });
-  $("#workspacePlusButton")?.addEventListener("click", showWorkspacePlusDialog);
+  $("#workspacePlusButton")?.addEventListener("click", toggleWorkspaceDeveloperPlus);
   $("#closeWorkspacePlusDialog")?.addEventListener("click", () => $("#workspacePlusDialog")?.close());
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));

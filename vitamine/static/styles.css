@@ -3360,6 +3360,20 @@ label.invalid input {
 }
 
 .workspacePlusButton.upgrade { background: #167564; color: #fff; }
+.workspacePlusButton.developer {
+  border-color: #8b5cf6;
+  background: linear-gradient(135deg, #6d28d9, #8b5cf6);
+  color: #fff;
+  box-shadow: 0 4px 14px rgb(109 40 217 / 28%);
+  font-size: .82rem;
+  letter-spacing: .02em;
+}
+.workspacePlusButton.developer[aria-pressed="false"] {
+  border-color: #b45309;
+  background: linear-gradient(135deg, #b45309, #d97706);
+  box-shadow: 0 4px 14px rgb(180 83 9 / 25%);
+}
+.workspacePlusButton.developer:disabled { cursor: wait; opacity: .65; }
 .workspacePlusDialog { border: 0; border-radius: 22px; padding: 0; width: min(540px, calc(100vw - 32px)); }
 .workspacePlusDialog::backdrop { background: rgb(13 31 35 / 52%); backdrop-filter: blur(3px); }
 .workspacePlusPanel { padding: 28px; }
