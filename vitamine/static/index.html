@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260802-sync-service-cards">
+  <link rel="stylesheet" href="/static/styles.css?v=20260802-sync-service-cards-vitamine-plus">
 </head>
 <body>
   <header class="topbar">
@@ -34,6 +34,7 @@
         </svg>
         <span>Enrich CV</span>
       </button>
+      <button id="workspacePlusButton" class="workspacePlusButton" type="button" hidden>VitaMine+</button>
       <div id="cloudAccountMenu" class="cloudAccountMenu" hidden>
         <button id="cloudAccountMenuButton" class="cloudAccountMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">
           <span id="cloudAccountInitials" aria-hidden="true">VM</span>
@@ -802,6 +803,19 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260802-enrichment-simplified-publication-dialog-actions"></script>
+  <dialog id="workspacePlusDialog" class="workspacePlusDialog">
+    <div class="workspacePlusPanel">
+      <div class="workspacePlusHeading">
+        <div><span>VitaMine+</span><h2>More confidence, less maintenance.</h2></div>
+        <button id="closeWorkspacePlusDialog" type="button" aria-label="Close">×</button>
+      </div>
+      <p id="workspacePlusStatus"></p>
+      <ul><li>Intelligent CV import and enrichment</li><li>Custom Word export templates</li><li>Full collaboration-network map details</li><li>Future intelligent sync features</li></ul>
+      <div class="workspacePlusPrice"><strong>€25</strong><span>per year</span></div>
+      <a href="mailto:hello@vitamine.cloud?subject=Upgrade%20to%20VitaMine%2B">Upgrade to VitaMine+</a>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js?v=20260802-enrichment-simplified-publication-dialog-actions-vitamine-plus"></script>
 </body>
 </html>

@@ -13,6 +13,7 @@ const state = {
   cloud: {
     enabled: false,
     workspace: null,
+    plus: null,
     activeJob: null,
     resuming: false,
   },
@@ -254,6 +255,8 @@ function setCloudJobControls(running) {
 function configureCloudWorkspace(workspace) {
   state.cloud.enabled = true;
   state.cloud.workspace = workspace;
+  state.cloud.plus = workspace.plus || null;
+  configureWorkspacePlus();
   if (state.exportFormats.length) renderExportFormats();
   const account = workspace.account || {};
   $("#cloudAccountMenu").hidden = false;
@@ -290,6 +293,33 @@ function configureCloudWorkspace(workspace) {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeCloudAccountMenu();
   });
+}
+
+function hasVitaminePlus() {
+  return !state.cloud.enabled || Boolean(state.cloud.plus?.active);
+}
+
+function showWorkspacePlusDialog() {
+  const plus = state.cloud.plus || {};
+  const status = $("#workspacePlusStatus");
+  if (status) status.textContent = plus.active
+    ? (plus.plan === "trial" ? `Your VitaMine+ trial is active until ${new Date(plus.active_until).toLocaleDateString()}.` : "VitaMine+ is active for this account.")
+    : "Upgrade to keep intelligent tools and full network details available.";
+  $("#workspacePlusDialog")?.showModal();
+}
+
+function requirePlusUi() {
+  if (hasVitaminePlus()) return true;
+  showWorkspacePlusDialog();
+  return false;
+}
+
+function configureWorkspacePlus() {
+  const button = $("#workspacePlusButton");
+  if (!button || !state.cloud.enabled) return;
+  button.hidden = false;
+  button.textContent = hasVitaminePlus() ? "VitaMine+" : "Upgrade to +";
+  button.classList.toggle("upgrade", !hasVitaminePlus());
 }
 
 function cloudJobMessage(job) {
@@ -1337,6 +1367,7 @@ async function saveCvImportSettings() {
 async function importCvFiles(files) {
   files = Array.from(files || []);
   if (!files.length) return;
+  if (!requirePlusUi()) return;
   if (state.onboarding?.enabled && !state.onboarding.llm_configured) {
     state.pendingCvImportFiles = files;
     const coach = $("#onboardingCoach");
@@ -2029,6 +2060,15 @@ function mapTooltip(node) {
 }
 
 async function loadCollaborationMap() {
+  if (!hasVitaminePlus()) {
+    const container = $("#collaborationMap");
+    if (container) {
+      container.classList.add("plusMapLocked");
+      container.innerHTML = '<button type="button"><strong>Full network map with VitaMine+</strong><span>Upgrade to explore institutions and collaboration details.</span></button>';
+      container.querySelector("button")?.addEventListener("click", showWorkspacePlusDialog);
+    }
+    return;
+  }
   const mode = state.collaborationMap.mode;
   const data = await api(`/api/collaboration-map?mode=${encodeURIComponent(mode)}`);
   state.collaborationMap.datasets[mode] = data;
@@ -4239,7 +4279,11 @@ async function init() {
     await loadPublications();
     await loadOnboarding();
   };
-  $("#enrichCvDashboard").addEventListener("click", enrichCv);
+  $("#enrichCvDashboard").addEventListener("click", () => {
+    if (requirePlusUi()) enrichCv();
+  });
+  $("#workspacePlusButton")?.addEventListener("click", showWorkspacePlusDialog);
+  $("#closeWorkspacePlusDialog")?.addEventListener("click", () => $("#workspacePlusDialog")?.close());
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });
