@@ -23,6 +23,7 @@ from docx import Document
 from vitamine.paths import APP_SUPPORT, ROOT, bundled_model_path, tool_path
 from vitamine.metadata_text import decode_metadata_text
 from vitamine.llm_usage import record_usage
+from vitamine.llm_routing import settings_for_llm_task
 from vitamine.profile_resolver import resolve_profiles
 from vitamine.scripts.import_background_docs import (
     PUBLICATION_SECTIONS,
@@ -2408,7 +2409,7 @@ def import_cv_file(con: sqlite3.Connection, path: Path, original_filename: str, 
     heuristic_pubs = heuristic_publications(text)
     heuristic_biosketch = heuristic_contributions(text)
     heuristic_report = heuristic_narrative_report(text)
-    llm_data, llm_warning = llm_extract(text, settings)
+    llm_data, llm_warning = llm_extract(text, settings_for_llm_task(settings, "cv_import"))
     llm_rows = [normalize_llm_entry(row) for row in (llm_data or {}).get("entries", []) if isinstance(row, dict)]
     llm_entries = [row for row in llm_rows if row]
     llm_contributions = [

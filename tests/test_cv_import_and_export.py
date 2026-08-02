@@ -1,6 +1,7 @@
 import sqlite3
 import unittest
 
+from vitamine.llm_routing import settings_for_llm_task
 from vitamine.scripts.build_long_cv import _formal_four_columns
 from vitamine.scripts.import_uploaded_cv import (
     apply_generation_controls,
@@ -12,6 +13,23 @@ from vitamine.scripts.import_uploaded_cv import (
 
 
 class CvImportAndExportTests(unittest.TestCase):
+    def test_task_models_only_override_the_two_configured_cv_workloads(self):
+        settings = {
+            "provider": "openai",
+            "api_model": "gpt-5.4-nano",
+            "task_models": {
+                "cv_import": "gpt-5.6-luna",
+                "custom_template_analysis": "gpt-5.6-luna",
+            },
+        }
+        self.assertEqual(settings_for_llm_task(settings, "cv_import")["api_model"], "gpt-5.6-luna")
+        self.assertEqual(
+            settings_for_llm_task(settings, "custom_template_analysis")["api_model"],
+            "gpt-5.6-luna",
+        )
+        self.assertEqual(settings_for_llm_task(settings, "enrichment")["api_model"], "gpt-5.4-nano")
+        self.assertEqual(settings["api_model"], "gpt-5.4-nano")
+
     def test_gpt5_generation_controls_use_reasoning_compatible_parameters(self):
         body = {}
         apply_generation_controls(

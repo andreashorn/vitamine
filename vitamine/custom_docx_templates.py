@@ -22,12 +22,16 @@ from typing import Any, Callable, Iterable
 
 from docx import Document
 from docx.document import Document as DocumentObject
+from docx.oxml import OxmlElement
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
 from docx.oxml.table import CT_Row, CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table, _Row
 from docx.text.paragraph import Paragraph
 from lxml import etree
+
+from .llm_routing import settings_for_llm_task
 
 
 MAX_TEMPLATE_BYTES = 20 * 1024 * 1024
@@ -50,6 +54,15 @@ PERSON_FIELDS = (
 )
 
 SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "research_experience": (
+        "research experience", "research employment", "research positions",
+        "scientific experience", "wissenschaftliche erfahrung",
+    ),
+    "research_skills": (
+        "relevant research skills", "research skills", "scientific skills",
+        "technical skills", "laboratory skills", "methodological skills",
+        "forschungsmethoden", "wissenschaftliche kompetenzen",
+    ),
     "education": (
         "education", "education and training", "education/training", "academic education",
         "ausbildung", "studium und ausbildung", "akademische ausbildung", "qualifications",
@@ -60,8 +73,8 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "academic_appointments": (
         "academic appointments", "faculty academic appointments", "scientific appointments",
-        "positions and scientific appointments", "academic positions", "akademische berufungen",
-        "akademische positionen",
+        "positions and scientific appointments", "positions and appointments", "academic positions",
+        "akademische berufungen", "akademische positionen", "positionen und berufungen",
     ),
     "hospital_appointments": (
         "hospital appointments", "appointments at hospitals/affiliated institutions",
@@ -69,7 +82,8 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "professional_positions": (
         "professional positions", "other professional positions", "employment", "experience",
-        "work experience", "career history", "beruflicher werdegang", "berufserfahrung",
+        "work experience", "career history", "additional relevant experience",
+        "beruflicher werdegang", "berufserfahrung",
     ),
     "committee_service": (
         "committee service", "committee membership", "committees", "gremienarbeit",
@@ -86,14 +100,16 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "honors": (
         "honors", "honours", "honors and prizes", "honors and awards", "awards",
-        "awards and honors", "distinctions", "auszeichnungen", "auszeichnungen und preise",
+        "awards and honors", "selected honors", "distinctions", "auszeichnungen",
+        "ausgewählte auszeichnungen", "auszeichnungen und preise",
     ),
     "funding": (
-        "research funding", "funding", "grants", "grant support", "funded projects",
+        "research funding", "funding", "selected funding", "grants", "grant support", "funded projects",
         "report of funded and unfunded projects", "forschungsförderung", "drittmittel",
+        "ausgewählte forschungsförderung",
     ),
     "teaching": (
-        "teaching", "teaching activities", "teaching of students in courses", "lehre",
+        "teaching", "teaching experience", "teaching activities", "teaching of students in courses", "lehre",
     ),
     "mentoring": (
         "mentoring", "supervision", "research supervisory and training responsibilities",
@@ -101,7 +117,7 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "invited_presentations": (
         "invited presentations", "invited lectures", "invited talks", "presentations",
-        "eingeladene vorträge", "vorträge",
+        "selected presentations", "eingeladene vorträge", "ausgewählte vorträge", "vorträge",
     ),
     "clinical_activities": (
         "clinical activities", "clinical activities and innovations", "klinische tätigkeiten",
@@ -128,7 +144,25 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "narrative_report": (
         "narrative report", "research narrative", "narrativer bericht",
     ),
+    "conference_papers": (
+        "conference papers", "conference contributions", "conference abstracts",
+        "kongressbeiträge", "konferenzbeiträge",
+    ),
 }
+
+SOURCE_SECTION_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "research_experience": (
+        "postdoctoral_training", "academic_appointments", "hospital_appointments",
+        "professional_positions", "clinical_activities",
+    ),
+    "research_skills": ("contributions", "personal_statement", "narrative_report"),
+    # Conference papers are deliberately not a synonym for invited talks. If
+    # VitaMine has no matching data, the source block becomes a manual section.
+    "conference_papers": (),
+}
+
+MANUAL_SECTION_PLACEHOLDER = "[Please fill this section manually.]"
+MANUAL_ONLY_SECTION_KEYS = {"conference_papers"}
 
 STATIC_LABELS = {
     "dates", "date", "years", "year", "degree", "field of study", "institution",
@@ -234,15 +268,20 @@ def paragraphs_in_container(container: Any) -> Iterable[Paragraph]:
 
 def all_document_paragraphs(document: DocumentObject) -> Iterable[Paragraph]:
     yield from paragraphs_in_container(document)
-    seen_parts: set[str] = set()
-    for section in document.sections:
-        for container in (section.header, section.first_page_header, section.even_page_header,
-                          section.footer, section.first_page_footer, section.even_page_footer):
-            part_name = str(container.part.partname)
-            if part_name in seen_parts:
+    # Accessing ``section.header.part`` creates empty header/footer package
+    # parts in python-docx.  Traverse only relationships that already existed
+    # in the uploaded document so a plain CV remains a plain CV.
+    seen_elements: set[int] = set()
+    for relationship in document.part.rels.values():
+        if relationship.reltype not in {RT.HEADER, RT.FOOTER}:
+            continue
+        root = relationship.target_part.element
+        for element in root.iter(qn("w:p")):
+            marker = id(element)
+            if marker in seen_elements:
                 continue
-            seen_parts.add(part_name)
-            yield from paragraphs_in_container(container)
+            seen_elements.add(marker)
+            yield Paragraph(element, document)
 
 
 def paragraph_is_bold(paragraph: Paragraph) -> bool:
@@ -265,13 +304,53 @@ def probable_heading(unit: Unit) -> bool:
     return bool(letters) and len(text) <= 100 and sum(character.isupper() for character in letters) / len(letters) > 0.82
 
 
+def paragraph_heading_level(paragraph: Paragraph) -> int | None:
+    name = str(paragraph.style.name if paragraph.style else "")
+    match = re.match(r"heading\s+(\d+)", name, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def unit_heading_level(unit: Unit) -> int | None:
+    levels = [level for paragraph in unit.paragraphs if (level := paragraph_heading_level(paragraph)) is not None]
+    return min(levels) if levels else None
+
+
+def mostly_uppercase(value: str) -> bool:
+    letters = [character for character in value if character.isalpha()]
+    return bool(letters) and sum(character.isupper() for character in letters) / len(letters) > 0.82
+
+
+def probable_section_heading(unit: Unit) -> bool:
+    """Return whether *unit* is a section boundary rather than an entry title.
+
+    CVs commonly use Heading 2 for individual jobs.  Treating every styled
+    heading as a section caused those job titles, their bullets, and later
+    sections to bleed into one another.  Heading 1, explicit aliases, and
+    short all-caps labels are much safer section signals.
+    """
+
+    if alias_section_key(unit.text):
+        return True
+    if unit_heading_level(unit) == 1:
+        return True
+    words = re.findall(r"[A-Za-zÄÖÜäöüß]+", unit.text)
+    return bool(unit.text) and len(unit.text) <= 100 and len(words) >= 2 and mostly_uppercase(unit.text)
+
+
 def alias_section_key(value: str) -> str | None:
     normalized = normalized_heading(value)
     if not normalized:
         return None
+    # Exact matches must win before fuzzy suffix matches.  Otherwise
+    # "Research Experience" is swallowed by the generic alias "Experience".
+    for section_key, aliases in SECTION_ALIASES.items():
+        if normalized in aliases:
+            return section_key
     for section_key, aliases in SECTION_ALIASES.items():
         for alias in aliases:
-            if normalized == alias or normalized.startswith(f"{alias} ") or normalized.endswith(f" {alias}"):
+            if len(alias) >= 12 and " " in alias and (
+                normalized.startswith(f"{alias} ") or normalized.endswith(f" {alias}")
+            ):
                 return section_key
     return None
 
@@ -326,16 +405,19 @@ def deterministic_profile(text: str, *, page_count: int | None, heading_count: i
         return "biosketch", "biosketch structure"
     if (page_count == 1 and words <= 1_600 and heading_count <= 10) or (words <= 750 and heading_count <= 8):
         return "one_page", "one-page or very compact structure"
-    if (page_count is not None and page_count >= 6) or words >= 2_400 or heading_count >= 12:
+    # A curated 2-5 page CV can have many visible headings because role titles
+    # often use Heading 2.  Length, not raw heading count, distinguishes it
+    # from VitaMine's comprehensive long profile.
+    if (page_count is not None and page_count >= 6) or words >= 2_400:
         return "long", "comprehensive multi-section structure"
-    return "short", "compact academic CV structure"
+    return "short", "curated multi-page academic CV structure"
 
 
 def llm_prompt(units: list[Unit], page_count: int | None, deterministic: str) -> str:
     candidates = []
     for unit in units:
         text = unit.text
-        if text and len(text) <= 220 and (probable_heading(unit) or alias_section_key(text)):
+        if text and len(text) <= 220 and probable_section_heading(unit):
             candidates.append(text)
         if len(candidates) >= 120:
             break
@@ -344,7 +426,11 @@ def llm_prompt(units: list[Unit], page_count: int | None, deterministic: str) ->
     return f"""Analyze the structure of this academic CV Word document for a reusable export template.
 
 Classify its content shape as exactly one of long, short, one_page, or biosketch.
+Use short for a curated 2-5 page CV with selected entries. Use long only for a
+comprehensive CV that is generally at least 6 pages or roughly 2,400 words.
 Map only headings that appear verbatim in the candidate list to the closest allowed section key.
+Leave a heading unmapped when none of the allowed section keys describes it; VitaMine will preserve
+that source section with a manual-fill placeholder instead of inventing content for it.
 Do not treat a person's name, institution, degree, date, or CV title as a section heading.
 Allowed section keys: {allowed}
 
@@ -383,6 +469,109 @@ def section_slots(units: list[Unit], mappings: dict[str, str]) -> tuple[list[dic
             }
         )
     return slots, mapped_sections
+
+
+def masthead_identity_slots(units: list[Unit], mappings: dict[str, str]) -> list[dict[str, Any]]:
+    """Identify the visible name/contact block before the first CV section."""
+
+    first_section = next(
+        (unit.index for unit in units if mapped_section_key(unit.text, mappings)),
+        len(units),
+    )
+    candidates = [
+        unit for unit in units[:first_section]
+        if unit.text and normalized_heading(unit.text) not in {"cv", "curriculum vitae"}
+    ]
+    if not candidates:
+        return []
+    slots: list[dict[str, Any]] = []
+    name_assigned = False
+    for unit in candidates:
+        text = unit.text
+        if not name_assigned and len(text) <= 100 and not re.search(r"@|https?://|\d{3,}", text):
+            role = "display_name"
+            name_assigned = True
+        elif re.search(r"@|\b(?:tel|phone|fax)\b|\d{4,}|\b(?:road|street|strasse|straße|avenue|university|department)\b", text, re.IGNORECASE):
+            role = "contact_line"
+        else:
+            role = "position_title"
+        slots.append({"unit_index": unit.index, "role": role})
+    return slots
+
+
+def entry_anchor(unit: Unit) -> bool:
+    """Return whether a source paragraph is the reusable anchor for one record."""
+
+    if unit.kind != "paragraph" or not unit.text:
+        return False
+    paragraph = unit.paragraphs[0]
+    numbered = paragraph._p.pPr is not None and paragraph._p.pPr.numPr is not None
+    level = unit_heading_level(unit)
+    if level is not None and level >= 2 and not mostly_uppercase(unit.text):
+        return True
+    return not numbered and len(unit.text) <= 220 and paragraph_is_bold(paragraph)
+
+
+def semantic_section_blueprint(
+    units: list[Unit], mappings: dict[str, str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Describe source sections without allowing content to bleed across headings."""
+
+    first_section = next(
+        (unit.index for unit in units if mapped_section_key(unit.text, mappings)),
+        None,
+    )
+    if first_section is None:
+        return [], []
+
+    sections: list[dict[str, Any]] = []
+    mapped_sections: list[str] = []
+    current: dict[str, Any] | None = None
+    unknown_counter = 0
+    for unit in units[first_section:]:
+        section_key = mapped_section_key(unit.text, mappings)
+        if section_key:
+            current = {
+                "section_key": section_key,
+                "source_heading": unit.text,
+                "heading_unit_index": unit.index,
+                "body_unit_indices": [],
+            }
+            sections.append(current)
+            if section_key not in mapped_sections:
+                mapped_sections.append(section_key)
+            continue
+        if probable_section_heading(unit):
+            unknown_counter += 1
+            current = {
+                "section_key": f"__unmapped_{unknown_counter}",
+                "source_heading": unit.text,
+                "heading_unit_index": unit.index,
+                "body_unit_indices": [],
+            }
+            sections.append(current)
+            continue
+        if current is not None:
+            current["body_unit_indices"].append(unit.index)
+
+    by_index = {unit.index: unit for unit in units}
+    for section in sections:
+        body_units = [by_index[index] for index in section["body_unit_indices"] if index in by_index]
+        content_units = [unit for unit in body_units if unit.text and content_unit(unit)]
+        anchors = [unit for unit in content_units if entry_anchor(unit)]
+        numbered_units = [
+            unit for unit in content_units
+            if unit.kind == "paragraph"
+            and unit.paragraphs[0]._p.pPr is not None
+            and unit.paragraphs[0]._p.pPr.numPr is not None
+        ]
+        record_units = anchors or numbered_units or content_units
+        record_indices = {unit.index for unit in record_units}
+        section["record_unit_indices"] = [unit.index for unit in record_units]
+        section["discard_unit_indices"] = [
+            unit.index for unit in body_units if unit.text and unit.index not in record_indices
+        ]
+    return sections, mapped_sections
 
 
 def content_unit(unit: Unit) -> bool:
@@ -426,7 +615,18 @@ def replace_paragraph_text(paragraph: Paragraph, old: str, new: str) -> bool:
 def set_unit_values(unit: Unit, values: list[str]) -> None:
     values = [clean_text(value) for value in values]
     if unit.kind == "paragraph":
-        set_paragraph_text(unit.paragraphs[0], " · ".join(value for value in values if value))
+        populated = [value for value in values if value]
+        if len(populated) == 2 and re.fullmatch(r"\d+[.)]", populated[0]):
+            rendered = populated[1]
+        elif len(populated) >= 2 and re.fullmatch(
+            r"(?:\d{1,2}[./-]){0,2}\d{2,4}(?:\s*[-–—]\s*(?:present|current|heute|\d{2,4})?)?",
+            populated[0],
+            flags=re.IGNORECASE,
+        ):
+            rendered = f"{' · '.join(populated[1:])} ({populated[0]})"
+        else:
+            rendered = " · ".join(populated)
+        set_paragraph_text(unit.paragraphs[0], rendered)
         return
     count = len(unit.cell_paragraphs)
     if count <= 1:
@@ -457,11 +657,20 @@ def skeletonize_person(document: DocumentObject, units: list[Unit], values: dict
         for unit in units[:first_heading]
         for paragraph in unit.paragraphs
     }
+    existing_part_paragraph_ids = {
+        id(paragraph._p)
+        for paragraph in all_document_paragraphs(document)
+        if id(paragraph._p) not in {
+            id(body_paragraph._p)
+            for body_unit in units
+            for body_paragraph in body_unit.paragraphs
+        }
+    }
+    eligible_paragraph_ids = body_paragraph_ids | existing_part_paragraph_ids
     fields: list[str] = []
     candidates = sorted(values.items(), key=lambda item: len(item[1]), reverse=True)
     for paragraph in all_document_paragraphs(document):
-        is_header_or_footer = str(paragraph.part.partname).startswith(("/word/header", "/word/footer"))
-        if not is_header_or_footer and id(paragraph._p) not in body_paragraph_ids:
+        if id(paragraph._p) not in eligible_paragraph_ids:
             continue
         for field, value in candidates:
             if len(value) < 4 or field in fields and f"{{{{VITAMINE_PERSON_{field.upper()}}}}}" in paragraph.text:
@@ -483,6 +692,22 @@ def skeletonize_slots(units: list[Unit], slots: list[dict[str, Any]]) -> None:
         counters[section_key] += 1
         token = f"{{{{VITAMINE_{section_key.upper()}_{counters[section_key]}}}}}"
         set_unit_values(unit, [token] * max(1, int(slot.get("columns") or 1)))
+
+
+def skeletonize_semantic_blueprint(
+    units: list[Unit], identity_slots: list[dict[str, Any]], sections: list[dict[str, Any]]
+) -> None:
+    by_index = {unit.index: unit for unit in units}
+    for slot in identity_slots:
+        unit = by_index.get(int(slot["unit_index"]))
+        if unit is not None:
+            set_unit_values(unit, [f"{{{{VITAMINE_IDENTITY_{str(slot['role']).upper()}}}}}"])
+    for section_number, section in enumerate(sections, 1):
+        indices = list(section.get("record_unit_indices") or []) + list(section.get("discard_unit_indices") or [])
+        for item_number, unit_index in enumerate(indices, 1):
+            unit = by_index.get(int(unit_index))
+            if unit is not None:
+                set_unit_values(unit, [f"{{{{VITAMINE_SECTION_{section_number}_{item_number}}}}}"])
 
 
 def scrub_core_properties(document: DocumentObject, name: str) -> None:
@@ -593,7 +818,7 @@ def analyze_and_skeletonize(
     units = document_units(document)
     text = "\n".join(unit.text for unit in units if unit.text)
     page_count = page_count_from_docx(data)
-    headings = [unit for unit in units if probable_heading(unit)]
+    headings = [unit for unit in units if probable_section_heading(unit)]
     profile, reason = deterministic_profile(text, page_count=page_count, heading_count=len(headings))
     mappings = {
         normalized_heading(unit.text): section_key
@@ -602,7 +827,7 @@ def analyze_and_skeletonize(
     }
     method = "deterministic"
     llm_warning = ""
-    configured = settings or {}
+    configured = settings_for_llm_task(settings or {}, "custom_template_analysis")
     if llm_json is not None and str(configured.get("provider") or "none") != "none" and text:
         try:
             result, warning = llm_json(llm_prompt(units, page_count, profile), LLM_ANALYSIS_SCHEMA, configured)
@@ -612,33 +837,43 @@ def analyze_and_skeletonize(
         if isinstance(result, dict):
             proposed_profile = str(result.get("content_profile") or "")
             confidence = str(result.get("confidence") or "")
-            if proposed_profile in CONTENT_PROFILES and confidence in {"high", "medium"}:
+            compact_long_conflict = (
+                proposed_profile == "long"
+                and page_count is not None
+                and page_count <= 5
+                and len(re.findall(r"\b\w+\b", text)) < 2_400
+            )
+            if proposed_profile in CONTENT_PROFILES and confidence in {"high", "medium"} and not compact_long_conflict:
                 profile = proposed_profile
                 reason = f"LLM classification ({confidence} confidence)"
             exact_texts = {unit.text: normalized_heading(unit.text) for unit in units if unit.text}
+            section_heading_texts = {unit.text for unit in units if unit.text and probable_section_heading(unit)}
             for item in result.get("heading_mappings") or []:
                 if not isinstance(item, dict):
                     continue
                 source_text = clean_text(item.get("source_text") or "")
                 section_key = str(item.get("section_key") or "")
-                if source_text in exact_texts and section_key in SECTION_ALIASES:
-                    mappings[exact_texts[source_text]] = section_key
+                if source_text in exact_texts and source_text in section_heading_texts and section_key in SECTION_ALIASES:
+                    normalized_source = exact_texts[source_text]
+                    if normalized_source not in mappings:
+                        mappings[normalized_source] = section_key
             method = "llm+deterministic"
-    slots, mapped_sections = section_slots(units, mappings)
-    if not slots:
+    sections, mapped_sections = semantic_section_blueprint(units, mappings)
+    identity_slots = masthead_identity_slots(units, mappings)
+    if not any(section.get("record_unit_indices") for section in sections if not str(section["section_key"]).startswith("__unmapped_")):
         raise ValueError(
             "VitaMine could not identify reusable content sections in this Word CV. "
             "Use a DOCX with visible academic section headings and at least one entry."
         )
     person_fields = skeletonize_person(document, units, person_values(con), mappings)
-    skeletonize_slots(units, slots)
+    skeletonize_semantic_blueprint(units, identity_slots, sections)
     scrub_core_properties(document, name)
     buffer = io.BytesIO()
     document.save(buffer)
     skeleton = clean_docx_package(buffer.getvalue())
     validate_docx_bytes(skeleton)
     analysis = {
-        "schema_version": 1,
+        "schema_version": 2,
         "content_profile": profile,
         "classification_reason": reason,
         "analysis_method": method,
@@ -647,8 +882,15 @@ def analyze_and_skeletonize(
         "body_units": len(units),
         "table_rows": sum(unit.kind == "row" for unit in units),
         "mapped_sections": mapped_sections,
+        "manual_sections": [
+            clean_text(section.get("source_heading") or section.get("section_key") or "")
+            for section in sections
+            if str(section.get("section_key") or "").startswith("__unmapped_")
+            or str(section.get("section_key") or "") in MANUAL_ONLY_SECTION_KEYS
+        ],
         "heading_mappings": mappings,
-        "slots": slots,
+        "identity_slots": identity_slots,
+        "sections": sections,
         "person_fields": person_fields,
         "llm_warning": llm_warning,
     }
@@ -664,8 +906,64 @@ def canonical_content(document: DocumentObject) -> dict[str, list[list[str]]]:
             current = section_key
             continue
         if current and unit.text and content_unit(unit):
+            # The formal long-CV builder stores every publication as a
+            # paragraph inside one single-cell table row.  A row-level join
+            # turned hundreds of citations into one 50k-character paragraph.
+            if unit.kind == "row" and len(unit.cell_paragraphs) == 1:
+                paragraph_values = [clean_text(paragraph.text) for paragraph in unit.cell_paragraphs[0]]
+                paragraph_values = [value for value in paragraph_values if value]
+                if len(paragraph_values) > 1:
+                    content[current].extend([[value] for value in paragraph_values])
+                    continue
             content[current].append(unit.values)
     return content
+
+
+def database_research_skill_items(con: sqlite3.Connection) -> list[list[str]]:
+    try:
+        exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='biosketch_contributions'"
+        ).fetchone()
+        if not exists:
+            return []
+        rows = con.execute(
+            "SELECT title, narrative FROM biosketch_contributions ORDER BY ordinal, id LIMIT 8"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    skills: list[list[str]] = []
+    for row in rows:
+        title = clean_text(row["title"] if isinstance(row, sqlite3.Row) else row[0])
+        narrative = clean_text(row["narrative"] if isinstance(row, sqlite3.Row) else row[1])
+        value = title or re.split(r"(?<=[.!?])\s+", narrative, maxsplit=1)[0]
+        if value:
+            skills.append([value])
+    return skills
+
+
+def source_section_items(
+    section_key: str, items: dict[str, list[list[str]]], con: sqlite3.Connection
+) -> list[list[str]]:
+    if section_key in SOURCE_SECTION_FALLBACKS:
+        combined: list[list[str]] = []
+        for canonical_key in SOURCE_SECTION_FALLBACKS[section_key]:
+            combined.extend(items.get(canonical_key, []))
+        if section_key == "research_skills" and not combined:
+            combined.extend(database_research_skill_items(con))
+        return combined
+    return list(items.get(section_key, []))
+
+
+def identity_value(role: str, values: dict[str, str]) -> str:
+    if role == "display_name":
+        return values.get("display_name") or values.get("full_name", "")
+    if role == "position_title":
+        return values.get("position_title", "")
+    if role == "contact_line":
+        address = values.get("office_address") or values.get("home_address") or ""
+        pieces = [clean_text(address), values.get("work_phone", ""), values.get("work_email", "")]
+        return ", ".join(piece for piece in pieces if piece)
+    return ""
 
 
 def clone_unit_after(unit: Unit) -> Unit:
@@ -686,6 +984,17 @@ def remove_unit(unit: Unit) -> None:
         parent.remove(unit.element)
 
 
+def placeholder_unit_after(heading: Unit) -> Unit:
+    """Create a plain body paragraph after a section heading when needed."""
+
+    if heading.kind != "paragraph":
+        return clone_unit_after(heading)
+    element = OxmlElement("w:p")
+    heading.element.addnext(element)
+    paragraph = Paragraph(element, heading.parent)
+    return Unit(-1, "paragraph", element, heading.parent, [paragraph], [])
+
+
 def render_template(
     skeleton: bytes,
     blueprint: dict[str, Any],
@@ -702,32 +1011,100 @@ def render_template(
     units = document_units(document)
     by_index = {unit.index: unit for unit in units}
     items = canonical_content(canonical)
-    slots_by_section: dict[str, list[Unit]] = defaultdict(list)
-    for slot in blueprint.get("slots") or []:
-        try:
-            unit = by_index[int(slot["unit_index"])]
-        except (KeyError, TypeError, ValueError):
-            continue
-        section_key = str(slot.get("section_key") or "")
-        if section_key:
-            slots_by_section[section_key].append(unit)
     rendered_sections: list[str] = []
+    manual_sections: list[str] = []
     rendered_items = 0
-    for section_key, target_units in slots_by_section.items():
-        source_items = items.get(section_key, [])
-        if not target_units:
-            continue
-        while len(target_units) < len(source_items):
-            target_units.append(clone_unit_after(target_units[-1]))
-        for index, unit in enumerate(target_units):
-            if index < len(source_items):
-                set_unit_values(unit, source_items[index])
-                rendered_items += 1
-            else:
-                remove_unit(unit)
-        if source_items:
-            rendered_sections.append(section_key)
     values = person_values(con)
+    if int(blueprint.get("schema_version") or 1) >= 2 and blueprint.get("sections"):
+        for slot in blueprint.get("identity_slots") or []:
+            try:
+                unit = by_index[int(slot["unit_index"])]
+            except (KeyError, TypeError, ValueError):
+                continue
+            set_unit_values(unit, [identity_value(str(slot.get("role") or ""), values)])
+
+        for section in blueprint.get("sections") or []:
+            section_key = str(section.get("section_key") or "")
+            try:
+                heading = by_index[int(section["heading_unit_index"])]
+            except (KeyError, TypeError, ValueError):
+                heading = None
+            body_units = [
+                by_index[index]
+                for raw_index in section.get("body_unit_indices") or []
+                if isinstance(raw_index, int) and (index := raw_index) in by_index
+            ]
+            target_units = [
+                by_index[index]
+                for raw_index in section.get("record_unit_indices") or []
+                if isinstance(raw_index, int) and (index := raw_index) in by_index
+            ]
+            discard_units = [
+                by_index[index]
+                for raw_index in section.get("discard_unit_indices") or []
+                if isinstance(raw_index, int) and (index := raw_index) in by_index
+            ]
+            manual_only = section_key.startswith("__unmapped_") or section_key in MANUAL_ONLY_SECTION_KEYS
+            if manual_only:
+                placeholder_unit = target_units[0] if target_units else (
+                    placeholder_unit_after(heading) if heading is not None else None
+                )
+                if placeholder_unit is not None:
+                    set_unit_values(placeholder_unit, [MANUAL_SECTION_PLACEHOLDER])
+                    for unit in body_units:
+                        if unit.element is not placeholder_unit.element:
+                            remove_unit(unit)
+                    manual_sections.append(
+                        clean_text(section.get("source_heading") or (heading.text if heading is not None else section_key))
+                    )
+                elif heading is not None:
+                    remove_unit(heading)
+                continue
+            source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
+            if not source_items or not target_units:
+                if heading is not None:
+                    remove_unit(heading)
+                for unit in body_units:
+                    remove_unit(unit)
+                continue
+            while len(target_units) < len(source_items):
+                target_units.append(clone_unit_after(target_units[-1]))
+            for index, unit in enumerate(target_units):
+                if index < len(source_items):
+                    set_unit_values(unit, source_items[index])
+                    rendered_items += 1
+                else:
+                    remove_unit(unit)
+            for unit in discard_units:
+                remove_unit(unit)
+            rendered_sections.append(section_key)
+    else:
+        # Backward compatibility for templates uploaded before semantic
+        # blueprint v2. Re-uploading them is recommended because their stored
+        # skeleton cannot recover content that v1 misidentified as a slot.
+        slots_by_section: dict[str, list[Unit]] = defaultdict(list)
+        for slot in blueprint.get("slots") or []:
+            try:
+                unit = by_index[int(slot["unit_index"])]
+            except (KeyError, TypeError, ValueError):
+                continue
+            section_key = str(slot.get("section_key") or "")
+            if section_key:
+                slots_by_section[section_key].append(unit)
+        for section_key, target_units in slots_by_section.items():
+            source_items = items.get(section_key, [])
+            if not target_units:
+                continue
+            while len(target_units) < len(source_items):
+                target_units.append(clone_unit_after(target_units[-1]))
+            for index, unit in enumerate(target_units):
+                if index < len(source_items):
+                    set_unit_values(unit, source_items[index])
+                    rendered_items += 1
+                else:
+                    remove_unit(unit)
+            if source_items:
+                rendered_sections.append(section_key)
     for paragraph in all_document_paragraphs(document):
         for field in blueprint.get("person_fields") or []:
             token = f"{{{{VITAMINE_PERSON_{str(field).upper()}}}}}"
@@ -744,6 +1121,7 @@ def render_template(
     return {
         "rendered_sections": rendered_sections,
         "rendered_items": rendered_items,
+        "manual_sections": manual_sections,
         "unmapped_sections": sorted(set(items) - set(rendered_sections)),
     }
 
