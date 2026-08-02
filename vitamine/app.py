@@ -94,6 +94,7 @@ from .custom_docx_templates import (
     render_template as render_custom_docx_template,
     template_sha256,
 )
+from .cv_dates import cv_entry_sort_key
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -2928,19 +2929,19 @@ def list_entries(section: str | None = None, q: str | None = None, limit: int = 
         needle = f"%{q}%"
         params.extend([needle, needle, needle, needle, needle, needle, needle, needle])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.append(limit)
     with connect() as con:
         rows = rows_dict(
             con.execute(
                 f"""
                 SELECT * FROM cv_entries
                 {where}
-                ORDER BY section_key, start_date, id
-                LIMIT ?
                 """,
                 params,
             ).fetchall()
         )
+        rows.sort(key=cv_entry_sort_key)
+        if limit >= 0:
+            rows = rows[:limit]
         entry_ids = [row["id"] for row in rows]
         if entry_ids:
             placeholders = ", ".join("?" for _ in entry_ids)
