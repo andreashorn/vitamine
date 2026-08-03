@@ -293,11 +293,11 @@ def remove_numbering(paragraph) -> None:
 
 
 def set_run_font(run, *, bold: bool = False, italic: bool = False, underline: bool = False, color: str = "111111") -> None:
-    run.font.name = "Arial"
-    run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Arial")
-    run._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
-    run.font.size = Pt(10.15)
+    run.font.name = "Helvetica"
+    run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Helvetica")
+    run._element.rPr.rFonts.set(qn("w:hAnsi"), "Helvetica")
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
+    run.font.size = Pt(9.8)
     run.bold = bold
     run.italic = italic
     run.underline = underline
@@ -308,6 +308,10 @@ def add_text(paragraph, parts: list[tuple[str, bool]]) -> None:
     clear_paragraph(paragraph)
     for text, bold in parts:
         run = paragraph.add_run(text)
+        run.font.name = "Helvetica"
+        run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Helvetica")
+        run._element.rPr.rFonts.set(qn("w:hAnsi"), "Helvetica")
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
         run.bold = bold
 
 
@@ -362,7 +366,7 @@ def add_hyperlink(paragraph, url: str, display: str) -> None:
     properties = OxmlElement("w:rPr")
     fonts = OxmlElement("w:rFonts")
     for attribute in ("ascii", "hAnsi", "eastAsia"):
-        fonts.set(qn(f"w:{attribute}"), "Arial")
+        fonts.set(qn(f"w:{attribute}"), "Helvetica")
     properties.append(fonts)
     size = OxmlElement("w:sz")
     size.set(qn("w:val"), "20")
@@ -592,7 +596,7 @@ def build_html_document(publication_limit_value: int) -> str:
   <meta charset="utf-8">
   <title>Tabular One Page CV</title>
   <style>
-    body {{ font-family: Arial, Helvetica, sans-serif; max-width: 850px; margin: 28px auto; color: #111; font-size: 12px; line-height: 1.32; }}
+    body {{ font-family: Helvetica, Arial, sans-serif; max-width: 850px; margin: 28px auto; color: #111; font-size: 12px; line-height: 1.32; }}
     h1 {{ font-size: 22px; margin: 0 0 4px; }}
     .subtitle {{ font-weight: 700; margin: 0 0 14px; }}
     h2 {{ font-size: 14px; margin: 14px 0 5px; border-bottom: 1px solid #999; }}
@@ -618,7 +622,7 @@ def build_typst_document(publication_limit_value: int) -> str:
     edu_three_columns = [list(row[:3]) for row in edu]
     lines = [
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.72in, right: 0.72in, top: 0.58in, bottom: 0.58in))',
-        f'#set text(font: "Arial", size: 10.2pt, lang: "{LANG}", fill: black)',
+        f'#set text(font: "Helvetica", size: 10.2pt, lang: "{LANG}", fill: black)',
         "#set par(leading: 0.78em, spacing: 0pt)",
         text(heading_name, bold=True, size="11.2pt"),
         "#linebreak()",

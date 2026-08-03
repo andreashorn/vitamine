@@ -80,14 +80,14 @@
       "length": "Short · legacy layout",
       "focus": ["project fit", "contributions to science", "selected products"],
       "audience": "Internal drafting and reuse of biosketch material.",
-      "preview": "/static/export-previews/nih-biosketch.svg",
+      "preview": "/static/export-previews/nih-biosketch.svg?v=20260803-green-word-ready",
       "preinstalled": true,
       "content_profile": "biosketch",
       "exporter": "biosketch",
       "quality": {
-        "key": "reference_only",
-        "label": "Draft only · not submission-ready",
-        "description": "Current NIH submissions require the Common Form and NIH Supplement through SciENcv. This editable DOCX is retained only as a drafting aid."
+        "key": "word_ready",
+        "label": "Word-ready draft",
+        "description": "The editable Word layout is ready for drafting. Current NIH submissions still require the Common Form and NIH Supplement through SciENcv."
       },
       "source": {
         "kind": "official_requirement",

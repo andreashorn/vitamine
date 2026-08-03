@@ -959,7 +959,7 @@ def markdown_to_html(markdown: str) -> tuple[str, str | None]:
   <title>Long CV Preview</title>
   <style>
     @page {{ size: letter; margin: 0.65in; }}
-    body {{ font-family: Arial, Helvetica, sans-serif; margin: 28px auto; max-width: 980px; line-height: 1.28; color: #111; font-size: 11px; }}
+    body {{ font-family: Helvetica, Arial, sans-serif; margin: 28px auto; max-width: 980px; line-height: 1.28; color: #111; font-size: 11px; }}
     .cv-kicker {{ font-weight: 700; text-align: center; margin-bottom: 8px; }}
     h1 {{ font-size: 18px; text-align: center; margin: 6px 0 14px; }}
     h2 {{ font-size: 13px; margin: 20px 0 6px; font-weight: 700; }}
@@ -991,8 +991,8 @@ def output_stem() -> str:
 
 
 def set_run_font(run, *, size: float = 11, bold: bool | None = None, italic: bool | None = None, underline: bool | None = None) -> None:
-    run.font.name = "Arial"
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.name = "Helvetica"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
     run.font.size = Pt(size)
     if bold is not None:
         run.bold = bold

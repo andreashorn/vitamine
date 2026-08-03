@@ -34,7 +34,7 @@ SECTION_TITLES = {
     "hospital_appointments": "Hospital Appointments",
     "honors": "Selected Honors",
     "funding": "Selected Funding",
-    "mentoring": "Mentoring",
+    "mentoring": "Selected Mentoring",
     "invited_presentations": "Selected Presentations",
 }
 
@@ -45,7 +45,7 @@ SECTION_TITLES_DE = {
     "hospital_appointments": "Klinische Positionen",
     "honors": "Ausgewählte Auszeichnungen",
     "funding": "Ausgewählte Forschungsförderung",
-    "mentoring": "Betreuung",
+    "mentoring": "Ausgewählte Betreuung",
     "invited_presentations": "Ausgewählte Vorträge",
 }
 
@@ -209,6 +209,18 @@ def normalize_text(value: str) -> str:
     return re.sub(r"\W+", " ", value.casefold()).strip()
 
 
+def unique_detail_parts(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = normalize_text(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(value)
+    return unique
+
+
 def entry_detail(row: sqlite3.Row) -> str:
     title = row_value(row, "title")
     organization = row_value(row, "organization")
@@ -231,7 +243,7 @@ def entry_detail(row: sqlite3.Row) -> str:
     parts = [title, organization, role, amount]
     if description and "|" not in description:
         parts.append(description)
-    return "; ".join(part for part in parts if part)
+    return "; ".join(unique_detail_parts(parts))
 
 
 def citation(row: sqlite3.Row) -> str:
@@ -284,6 +296,21 @@ def load_data() -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row
             ORDER BY section_key, start_date, id
             """
         ).fetchall()
+        if not any(row["section_key"] == "mentoring" for row in entries):
+            entries.extend(
+                con.execute(
+                    """
+                    SELECT *
+                    FROM cv_entries
+                    WHERE section_key='mentoring'
+                      AND include_long=1
+                    ORDER BY COALESCE(NULLIF(end_date, ''), start_date) DESC,
+                             start_date DESC,
+                             id DESC
+                    LIMIT 6
+                    """
+                ).fetchall()
+            )
         pubs = selected_or_fallback_publications(con, profile="short", limit=publication_limit)
     return person, entries, pubs
 
@@ -333,7 +360,7 @@ def build_html() -> str:
   <meta charset="utf-8">
   <title>Short CV</title>
   <style>
-    body {{ font-family: Arial, Helvetica, sans-serif; max-width: 900px; margin: 28px auto; color: #111; font-size: 12px; line-height: 1.32; }}
+    body {{ font-family: Helvetica, Arial, sans-serif; max-width: 900px; margin: 28px auto; color: #111; font-size: 12px; line-height: 1.32; }}
     h1 {{ font-size: 22px; margin: 0 0 4px; }}
     .subtitle {{ font-weight: 700; margin-bottom: 16px; }}
     h2 {{ font-size: 14px; margin: 16px 0 6px; border-bottom: 1px solid #999; }}
@@ -355,7 +382,7 @@ def build_typst() -> str:
     title = clean(person["position_title"] if person else "")
     lines = [
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.65in, right: 0.65in, top: 0.65in, bottom: 0.58in))',
-        f'#set text(font: "Arial", size: 10pt, lang: "{LANG}")',
+        f'#set text(font: "Helvetica", size: 10pt, lang: "{LANG}")',
         "#set par(leading: 0.45em)",
         text(name, bold=True, size="16pt"),
     ]
@@ -411,8 +438,8 @@ def remove_table_borders(table) -> None:
 
 def set_paragraph_font(paragraph, *, size: float = 8.7, bold: bool = False, color: str = "111827") -> None:
     for run in paragraph.runs:
-        run.font.name = "Arial"
-        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+        run.font.name = "Helvetica"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
         run.font.size = Pt(size)
         run.bold = bold
         run.font.color.rgb = RGBColor.from_string(color)
@@ -422,8 +449,8 @@ def set_paragraph_font(paragraph, *, size: float = 8.7, bold: bool = False, colo
 
 
 def set_run_font(run, *, size: float = 8.0, bold: bool = False, italic: bool = False, underline: bool = False, color: str = "111827") -> None:
-    run.font.name = "Arial"
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.name = "Helvetica"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
     run.font.size = Pt(size)
     run.bold = bold
     run.italic = italic
@@ -455,7 +482,7 @@ def add_hyperlink(paragraph, url: str, display: str) -> None:
     properties = OxmlElement("w:rPr")
     fonts = OxmlElement("w:rFonts")
     for attribute in ("ascii", "hAnsi", "eastAsia"):
-        fonts.set(qn(f"w:{attribute}"), "Arial")
+        fonts.set(qn(f"w:{attribute}"), "Helvetica")
     properties.append(fonts)
     size = OxmlElement("w:sz")
     size.set(qn("w:val"), "16")
@@ -526,8 +553,8 @@ def add_compact_heading(doc: Document, label: str) -> None:
     borders.append(top)
     p_pr.append(borders)
     run = paragraph.add_run(label)
-    run.font.name = "Arial"
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.name = "Helvetica"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
     run.font.size = Pt(9.3)
     run.bold = True
     run.font.color.rgb = RGBColor.from_string("111827")
@@ -626,22 +653,22 @@ def build_docx(path: Path) -> Path:
     section.left_margin = Inches(0.58)
     section.right_margin = Inches(0.58)
     styles = doc.styles
-    styles["Normal"].font.name = "Arial"
-    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    styles["Normal"].font.name = "Helvetica"
+    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
     styles["Normal"].font.size = Pt(8.6)
 
     title_p = doc.add_paragraph()
     title_p.paragraph_format.space_after = Pt(1)
     run = title_p.add_run(name)
-    run.font.name = "Arial"
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.name = "Helvetica"
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
     run.font.size = Pt(15)
     run.bold = True
     run.font.color.rgb = RGBColor.from_string("111827")
     if title:
         run = title_p.add_run(f"  {title}")
-        run.font.name = "Arial"
-        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+        run.font.name = "Helvetica"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Helvetica")
         run.font.size = Pt(8.8)
         run.bold = True
         run.font.color.rgb = RGBColor.from_string("334155")

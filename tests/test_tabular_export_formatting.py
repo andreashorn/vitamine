@@ -53,7 +53,7 @@ class TabularExportFormattingTests(unittest.TestCase):
         self.assertTrue(paragraph.text.startswith("1.\t"))
         self.assertIn("et al. (2026).", paragraph.text)
         self.assertIsNone(paragraph._p.pPr.find(qn("w:numPr")))
-        self.assertTrue(all(run.font.name == "Arial" for run in paragraph.runs))
+        self.assertTrue(all(run.font.name == "Helvetica" for run in paragraph.runs))
         venue_runs = [run for run in paragraph.runs if "Nature Communications" in run.text]
         self.assertEqual(len(venue_runs), 1)
         self.assertTrue(venue_runs[0].italic)

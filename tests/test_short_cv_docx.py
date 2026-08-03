@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -10,7 +11,9 @@ from vitamine.scripts.build_short_cv import (
     add_compact_heading,
     remove_table_borders,
     set_table_width,
+    unique_detail_parts,
 )
+from vitamine.scripts import build_short_cv
 
 
 class ShortCvDocxTests(unittest.TestCase):
@@ -51,6 +54,41 @@ class ShortCvDocxTests(unittest.TestCase):
 
         self.assertEqual(top.get(qn("w:val")), "single")
         self.assertEqual(top.get(qn("w:color")), "111111")
+
+    def test_recent_mentoring_is_included_when_none_is_explicitly_selected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / "short.sqlite"
+            import sqlite3
+
+            with sqlite3.connect(database) as connection:
+                connection.executescript((Path(__file__).parents[1] / "vitamine" / "schema.sql").read_text())
+                connection.execute(
+                    "INSERT INTO documents (id, slug, title, source_path, source_format, imported_at) "
+                    "VALUES (1, 'test', 'Test', 'test.docx', 'docx', '2026-08-03')"
+                )
+                connection.execute(
+                    "INSERT INTO cv_entries (document_id, section_key, start_date, title, raw_text, include_long, include_short) "
+                    "VALUES (1, 'education', '2020', 'Selected education', 'Selected education', 1, 1)"
+                )
+                for year in range(2018, 2025):
+                    connection.execute(
+                        "INSERT INTO cv_entries (document_id, section_key, start_date, title, raw_text, include_long, include_short) "
+                        "VALUES (1, 'mentoring', ?, ?, ?, 1, 0)",
+                        (str(year), f'Trainee {year}', f'Trainee {year}'),
+                    )
+
+            with patch.object(build_short_cv, "DB", database):
+                _person, entries, _publications = build_short_cv.load_data()
+
+            mentoring = [row for row in entries if row["section_key"] == "mentoring"]
+            self.assertEqual(len(mentoring), 6)
+            self.assertEqual({row["start_date"] for row in mentoring}, {"2019", "2020", "2021", "2022", "2023", "2024"})
+
+    def test_repeated_entry_details_are_removed_without_name_specific_rules(self):
+        self.assertEqual(
+            unique_detail_parts(["Trainee / PhD / University", "Trainee / PhD / University", "Supervisor"]),
+            ["Trainee / PhD / University", "Supervisor"],
+        )
 
 
 if __name__ == "__main__":
