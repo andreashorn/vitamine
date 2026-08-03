@@ -89,6 +89,42 @@ def oxford_like_document_bytes() -> bytes:
     return output.getvalue()
 
 
+def dfg_like_document_bytes() -> bytes:
+    document = Document()
+    document.add_paragraph("Curriculum Vitae")
+    document.add_paragraph("Personal Data").runs[0].bold = True
+    personal = document.add_table(rows=1, cols=2)
+    personal.cell(0, 0).text = "Name"
+    personal.cell(0, 1).text = "Jane Example"
+    document.add_paragraph("Qualifications and Career").runs[0].bold = True
+    career = document.add_table(rows=2, cols=2)
+    career.cell(0, 0).text = "Stages"
+    career.cell(0, 1).text = "Periods and Details"
+    career.cell(1, 0).text = "Professor"
+    career.cell(1, 1).text = "Example University, since 2020"
+    document.add_paragraph("Supplementary Career Information").runs[0].bold = True
+    document.add_paragraph("Source-only optional career context")
+    document.add_paragraph("Activities in the Research System").runs[0].bold = True
+    document.add_paragraph("Journal editor", style="List Paragraph")
+    document.add_paragraph("Supervision of Researchers in Early Career Phases (selection)").runs[0].bold = True
+    document.add_paragraph("2019-2025 · Researcher · PhD student")
+    document.add_paragraph("Scientific Results").runs[0].bold = True
+    document.add_paragraph(
+        "Category A – Articles in peer-reviewed journals, contributions to peer-reviewed "
+        "conferences or to anthology volumes, and book publications"
+    ).runs[0].bold = True
+    document.add_paragraph("Source publication", style="List Paragraph")
+    document.add_paragraph("Category B – Any other form of published results").runs[0].bold = True
+    document.add_paragraph("Source-only other result")
+    document.add_paragraph("Academic Distinctions").runs[0].bold = True
+    document.add_paragraph("Source distinction")
+    document.add_paragraph("Data protection and consent to the processing of optional data").runs[0].bold = True
+    document.add_paragraph("Required DFG consent wording remains unchanged.")
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
 def semantic_canonical(path: Path) -> None:
     document = Document()
     document.add_heading("Academic Appointments", level=1)
@@ -139,6 +175,25 @@ def memory_database() -> sqlite3.Connection:
 
 
 class CustomDocxTemplateUnitTests(unittest.TestCase):
+    def test_dfg_cv_uses_explicit_semantics_and_preserves_consent_text(self):
+        con = memory_database()
+        skeleton, blueprint = analyze_and_skeletonize(
+            dfg_like_document_bytes(),
+            "DFG CV and publication list",
+            con,
+            settings={"provider": "none"},
+        )
+        for section_key in (
+            "qualifications_and_career", "research_system_activities", "mentoring",
+            "dfg_category_a", "dfg_category_b", "honors", "dfg_data_protection",
+        ):
+            self.assertIn(section_key, blueprint["mapped_sections"])
+        self.assertIn("Supplementary Career Information", blueprint["manual_sections"])
+        self.assertIn("Category B – Any other form of published results", blueprint["manual_sections"])
+        skeleton_document = Document(io.BytesIO(skeleton))
+        skeleton_text = "\n".join(paragraph.text for paragraph in skeleton_document.paragraphs)
+        self.assertIn("Required DFG consent wording remains unchanged.", skeleton_text)
+
     def test_template_analysis_uses_its_task_model_without_changing_the_default(self):
         observed = {}
 

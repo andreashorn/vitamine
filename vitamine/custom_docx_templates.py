@@ -55,6 +55,8 @@ PERSON_FIELDS = (
 )
 
 SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "qualifications_and_career": ("qualifications and career",),
+    "research_system_activities": ("activities in the research system",),
     "research_experience": (
         "research experience", "research employment", "research positions",
         "scientific experience", "wissenschaftliche erfahrung",
@@ -101,7 +103,7 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "honors": (
         "honors", "honours", "honors and prizes", "honors and awards", "awards",
-        "awards and honors", "selected honors", "distinctions", "auszeichnungen",
+        "awards and honors", "selected honors", "distinctions", "academic distinctions", "auszeichnungen",
         "ausgewählte auszeichnungen", "auszeichnungen und preise",
     ),
     "funding": (
@@ -114,6 +116,7 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "mentoring": (
         "mentoring", "supervision", "research supervisory and training responsibilities",
+        "supervision of researchers in early career phases selection",
         "trainees", "nachwuchsförderung", "betreuung und ausbildung",
     ),
     "invited_presentations": (
@@ -135,6 +138,13 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
         "bibliography", "scientific output", "works", "publikationen", "ausgewählte publikationen",
         "veröffentlichungen",
     ),
+    "dfg_category_a": (
+        "category a articles in peer-reviewed journals contributions to peer-reviewed conferences or to anthology volumes and book publications",
+    ),
+    "dfg_category_b": ("category b any other form of published results",),
+    "supplementary_career_information": ("supplementary career information",),
+    "dfg_data_protection": ("data protection and consent to the processing of optional data",),
+    "dfg_scientific_results": ("scientific results",),
     "personal_statement": (
         "personal statement", "summary statement", "research profile", "profile", "profil",
     ),
@@ -152,6 +162,15 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 SOURCE_SECTION_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "qualifications_and_career": (
+        "education", "postdoctoral_training", "academic_appointments",
+        "hospital_appointments", "professional_positions",
+    ),
+    "research_system_activities": (
+        "editorial_activities", "grant_review", "committee_service",
+        "professional_societies", "community_service", "invited_presentations",
+    ),
+    "dfg_category_a": ("publications",),
     "research_experience": (
         "postdoctoral_training", "academic_appointments", "hospital_appointments",
         "professional_positions", "clinical_activities",
@@ -163,7 +182,10 @@ SOURCE_SECTION_FALLBACKS: dict[str, tuple[str, ...]] = {
 }
 
 MANUAL_SECTION_PLACEHOLDER = "[Please fill this section manually.]"
-MANUAL_ONLY_SECTION_KEYS = {"conference_papers"}
+MANUAL_ONLY_SECTION_KEYS = {
+    "conference_papers", "dfg_category_b", "supplementary_career_information",
+}
+PRESERVED_SECTION_KEYS = {"dfg_data_protection", "dfg_scientific_results"}
 
 STATIC_LABELS = {
     "dates", "date", "years", "year", "degree", "field of study", "institution",
@@ -228,7 +250,8 @@ def normalized_heading(value: str) -> str:
     text = clean_text(value).casefold()
     text = re.sub(r"^[a-z0-9ivx]+[.)]\s+", "", text)
     text = text.rstrip(":.- ")
-    return re.sub(r"[^\wäöüß/&+ -]+", "", text).strip()
+    text = re.sub(r"[^\wäöüß/&+ -]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def unique_cells(row: _Row) -> list[Any]:
@@ -721,6 +744,8 @@ def skeletonize_semantic_blueprint(
         if unit is not None:
             set_unit_values(unit, [f"{{{{VITAMINE_IDENTITY_{str(slot['role']).upper()}}}}}"])
     for section_number, section in enumerate(sections, 1):
+        if str(section.get("section_key") or "") in PRESERVED_SECTION_KEYS:
+            continue
         indices = list(section.get("record_unit_indices") or []) + list(section.get("discard_unit_indices") or [])
         for item_number, unit_index in enumerate(indices, 1):
             unit = by_index.get(int(unit_index))
@@ -1060,6 +1085,8 @@ def render_template(
 
         for section in blueprint.get("sections") or []:
             section_key = str(section.get("section_key") or "")
+            if section_key in PRESERVED_SECTION_KEYS:
+                continue
             try:
                 heading = by_index[int(section["heading_unit_index"])]
             except (KeyError, TypeError, ValueError):
