@@ -1575,7 +1575,7 @@ def normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:
     data["section_key"] = data["section_key"] or "honors"
     if data["section_key"] == "funding":
         status = str(data.get("grant_status") or "funded").strip().casefold()
-        data["grant_status"] = status if status in {"planned", "submitted", "funded", "past"} else "funded"
+        data["grant_status"] = status if status in {"planned", "submitted", "rejected", "funded", "past"} else "funded"
         if grant_end_has_passed(data.get("end_date")):
             data["grant_status"] = "past"
     else:

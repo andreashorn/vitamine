@@ -369,6 +369,7 @@ def entry_rows(con: sqlite3.Connection, section_key: str) -> list[sqlite3.Row]:
         SELECT * FROM cv_entries
         WHERE section_key = ?
           AND include_long = 1
+          AND (section_key != 'funding' OR COALESCE(grant_status, 'funded') IN ('funded', 'past'))
         ORDER BY id
         """,
         (section_key,),

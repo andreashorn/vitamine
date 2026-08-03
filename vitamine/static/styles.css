@@ -41,6 +41,7 @@ html::-webkit-scrollbar {
 .grantStatus-funded { border-color: #78aa92; color: #246843; }
 .grantStatus-submitted { border-color: #879ec4; color: #355b91; }
 .grantStatus-planned { border-color: #c6a96a; color: #806019; }
+.grantStatus-rejected { border-color: #c18a8a; color: #8b3434; }
 .grantStatus-past { opacity: 0.72; }
 
 body {
