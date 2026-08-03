@@ -23,7 +23,7 @@ class CloudExportDownloadTests(unittest.TestCase):
     def test_cloud_workspace_hides_internal_database_panel(self):
         self.assertIn('id="databasePanel"', self.page)
         self.assertIn('databasePanel.hidden = true', self.script)
-        self.assertIn("20260803-custom-word-templates-vitamine-plus-dev-toggle", self.page)
+        self.assertIn("20260803-export-format-label", self.page)
 
 
 if __name__ == "__main__":

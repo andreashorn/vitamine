@@ -2589,9 +2589,8 @@ function exportFormatCard(format) {
     : "";
   let actions = "";
   if (format.installed) {
-    const buildLabel = quality.key === "reference_only" ? "Export draft" : "Export Word document";
     const buildButton = format.exporter
-      ? `<button class="formatActionButton formatBuildButton" data-format-id="${escapeHtml(format.id)}" type="button">${buildLabel}</button>`
+      ? `<button class="formatActionButton formatBuildButton" data-format-id="${escapeHtml(format.id)}" type="button">Export CV in this format</button>`
       : `<button type="button" disabled title="The Word exporter has not been implemented yet">Export coming later</button>`;
     const artifactLink = artifact.docx && !state.cloud.enabled
       ? `<a href="${escapeHtml(artifact.docx)}" title="${escapeHtml(artifact.docx_path || "")}" target="_blank" rel="noopener">Open last export</a>`

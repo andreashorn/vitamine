@@ -41,6 +41,12 @@ class ExportFormatCatalogTests(unittest.TestCase):
         self.assertIn("format.content_profile_label", script)
         self.assertIn('format.content_profile === "long"', script)
 
+    def test_export_buttons_use_format_focused_wording(self):
+        script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("Export CV in this format", script)
+        self.assertNotIn("Export Word document", script)
+
 
 if __name__ == "__main__":
     unittest.main()
