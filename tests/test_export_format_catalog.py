@@ -49,9 +49,11 @@ class ExportFormatCatalogTests(unittest.TestCase):
         dfg = next(item for item in formats if item["id"] == "vitamine.dfg-research-cv")
         self.assertEqual(dfg["exporter"], "bundled_docx")
         self.assertEqual(dfg["languages"], ["en"])
+        self.assertEqual(dfg["page_limit"], 4)
 
         script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn("qualityReadyIcon", script)
+        self.assertIn("Fixed limit:", script)
 
     def test_export_buttons_use_format_focused_wording(self):
         script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")

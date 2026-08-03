@@ -107,6 +107,8 @@
       "preview": "/static/export-previews/dfg-research.svg",
       "preinstalled": false,
       "content_profile": "short",
+      "page_limit": 4,
+      "selection_strategy": "Automatic high-yield selection across page-limited sections",
       "exporter": "bundled_docx",
       "languages": ["en"],
       "template": {

@@ -93,6 +93,7 @@ from .custom_docx_templates import (
     MAX_TEMPLATE_BYTES,
     analyze_and_skeletonize,
     render_template as render_custom_docx_template,
+    select_dfg_page_limited_items,
     template_sha256,
 )
 from .cv_dates import cv_end_date, cv_entry_sort_key
@@ -6463,10 +6464,19 @@ def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSO
     output_path = OUTPUT / f"dfg_cv_publication_list_{lang}.docx"
     try:
         with connect() as con:
-            render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+            settings = cv_import_settings(con, include_secret=True)
+            section_overrides, page_selection = select_dfg_page_limited_items(
+                con,
+                llm_json=llm_json if hosted_vitamine_plus_active() else None,
+                settings=settings,
+            )
+            render_report = render_custom_docx_template(
+                source_docx, blueprint, canonical_path, output_path, con,
+                section_item_overrides=section_overrides,
+            )
+            render_report["page_selection"] = page_selection
             quality_audit = {"status": "not_available", "applied_count": 0, "review_count": 0, "issues": []}
             if hosted_vitamine_plus_active():
-                settings = cv_import_settings(con, include_secret=True)
                 quality_audit = run_export_quality_audit(con, output_path, llm_json, settings)
         if quality_audit.get("applied_count"):
             rebuilt = builder(lang)
@@ -6475,7 +6485,11 @@ def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSO
             canonical_payload = json.loads(rebuilt.body)
             canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
             with connect() as con:
-                render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+                render_report = render_custom_docx_template(
+                    source_docx, blueprint, canonical_path, output_path, con,
+                    section_item_overrides=section_overrides,
+                )
+                render_report["page_selection"] = page_selection
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"ok": False, "stderr": str(exc)[:1000]}, status_code=500)
     return JSONResponse(build_response(

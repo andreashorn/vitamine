@@ -2617,6 +2617,9 @@ function exportFormatCard(format) {
   const qualityMark = quality.key === "ready"
     ? '<span class="qualityReadyIcon" aria-label="Ready" title="Ready">✓</span>'
     : `<span class="qualityBadge quality-${escapeHtml(quality.key || "preview")}" title="${escapeHtml(quality.description || "")}">${escapeHtml(quality.label || "")}</span>`;
+  const pageLimit = Number(format.page_limit) > 0
+    ? `<span class="pageLimitBadge" title="VitaMine automatically selects high-yield records to stay within this limit">Fixed limit: ${Number(format.page_limit)} pages</span>`
+    : "";
   return `<article class="formatCard ${format.installed ? "installed" : ""}">
     <div class="formatPreview">
       ${preview}
@@ -2630,6 +2633,7 @@ function exportFormatCard(format) {
         ${format.preinstalled ? '<span class="defaultBadge">Included</span>' : ""}
       </div>
       <span class="formatLength">${escapeHtml(format.length || "")}</span>
+      ${pageLimit}
       <span class="contentProfileBadge" title="${escapeHtml(format.content_profile_description || "Controls which CV content-selection routine is used.")}">${escapeHtml(profileLabel)} content</span>
       <p>${escapeHtml(format.summary || "")}</p>
       ${analysis}

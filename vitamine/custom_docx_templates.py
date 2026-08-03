@@ -33,6 +33,7 @@ from docx.text.paragraph import Paragraph
 from lxml import etree
 
 from .llm_routing import settings_for_llm_task
+from .scripts.export_publication_selection import fallback_score, researcher_authorship, researcher_name_terms
 
 
 MAX_TEMPLATE_BYTES = 20 * 1024 * 1024
@@ -189,6 +190,14 @@ MANUAL_ONLY_SECTION_KEYS = {
     "dfg_other_information",
 }
 PRESERVED_SECTION_KEYS = {"dfg_data_protection", "dfg_scientific_results"}
+
+DFG_PAGE_LIMIT = 4
+DFG_SECTION_LIMITS = {
+    "research_system_activities": 8,
+    "mentoring": 7,
+    "dfg_category_b": 4,
+    "honors": 10,
+}
 
 STATIC_LABELS = {
     "dates", "date", "years", "year", "degree", "field of study", "institution",
@@ -802,6 +811,18 @@ def clean_word_xml(data: bytes) -> bytes:
     except etree.XMLSyntaxError:
         return data
     namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    # External relationships are removed from reusable templates.  Leaving a
+    # w:hyperlink behind with its now-missing r:id makes Word repair the file
+    # on open, so preserve the visible runs while unwrapping the link itself.
+    for node in root.xpath("//w:hyperlink", namespaces=namespaces):
+        parent = node.getparent()
+        if parent is None:
+            continue
+        position = parent.index(node)
+        for child in list(node):
+            parent.insert(position, child)
+            position += 1
+        parent.remove(node)
     for node in root.xpath("//w:del|//w:commentRangeStart|//w:commentRangeEnd|//w:commentReference", namespaces=namespaces):
         parent = node.getparent()
         if parent is not None:
@@ -1042,6 +1063,275 @@ def source_section_items(
     return list(items.get(section_key, []))
 
 
+def _row_text(row: sqlite3.Row, *fields: str, separator: str = "; ") -> str:
+    return separator.join(clean_text(row[field]) for field in fields if field in row.keys() and clean_text(row[field]))
+
+
+def _entry_period(row: sqlite3.Row) -> str:
+    start = clean_text(row["start_date"])
+    end = clean_text(row["end_date"])
+    if start and end and start != end:
+        return f"{start}-{end}"
+    return start or end
+
+
+def _entry_detail(row: sqlite3.Row) -> str:
+    title = clean_text(row["title"])
+    organization = clean_text(row["organization"])
+    role = clean_text(row["role"])
+    description = clean_text(row["description"])
+    if "|" in description:
+        parts = [clean_text(value) for value in description.split("|") if clean_text(value)]
+        title = title or (parts[0] if parts else "")
+        organization = organization or (parts[1] if len(parts) > 1 else "")
+        role = role or (parts[2] if len(parts) > 2 else "")
+        description = ""
+    values = [value for value in (title, organization, role, description) if value]
+    deduplicated: list[str] = []
+    for value in values:
+        if not any(normalized_heading(value) == normalized_heading(existing) for existing in deduplicated):
+            deduplicated.append(value)
+    return "; ".join(deduplicated)
+
+
+def _publication_citation(row: sqlite3.Row) -> str:
+    authors = [part.strip() for part in clean_text(row["authors"]).split(",") if part.strip()]
+    compact_authors = ", ".join(authors[:3]) + (", et al." if len(authors) > 3 else "")
+    pieces = [compact_authors, _row_text(row, "title"), _row_text(row, "venue"), _row_text(row, "year")]
+    citation = ". ".join(piece.rstrip(".") for piece in pieces if piece)
+    doi = clean_text(row["doi"])
+    if citation:
+        return f"{citation}. https://doi.org/{doi}" if doi else citation
+    return clean_text(row["raw_citation"])
+
+
+def _honor_values(row: sqlite3.Row) -> list[str]:
+    title = clean_text(row["title"])
+    organization = clean_text(row["organization"])
+    description = clean_text(row["description"])
+    parts = [clean_text(value) for value in description.split("|") if clean_text(value)]
+    if len(parts) >= 3:
+        title, organization, description = parts[0], parts[1], "; ".join(parts[2:])
+    elif normalized_heading(description) in {normalized_heading(title), normalized_heading(organization)}:
+        description = ""
+    return [_entry_period(row), title, organization, description]
+
+
+def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    """Return DFG-ready records without relying on generic short-CV flags."""
+
+    candidates: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    activity_sections = (
+        "editorial_activities", "grant_review", "committee_service",
+        "professional_societies", "community_service",
+    )
+    placeholders = ",".join("?" for _ in activity_sections)
+    for row in con.execute(
+        f"SELECT * FROM cv_entries WHERE section_key IN ({placeholders}) ORDER BY id",
+        activity_sections,
+    ).fetchall():
+        detail = _entry_detail(row)
+        if detail:
+            normalized = normalized_heading(detail)
+            priority = 4 if row["section_key"] in {"editorial_activities", "grant_review"} else 2
+            priority += 18 if "associate editor" in normalized else 0
+            priority += 12 if "editor" in normalized or "grant" in normalized else 0
+            priority += 8 if "board" in normalized or "organizer" in normalized or "advisory" in normalized else 0
+            priority -= min(len(detail) / 250, 5)
+            candidates["research_system_activities"].append({
+                "id": f"activity:{row['id']}", "values": [detail], "score": priority,
+            })
+
+    achievement_rows: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    try:
+        for row in con.execute("SELECT * FROM trainee_achievements ORDER BY trainee_id, id").fetchall():
+            achievement_rows[int(row["trainee_id"])].append(row)
+        trainees = con.execute("SELECT * FROM trainees ORDER BY id").fetchall()
+    except sqlite3.OperationalError:
+        trainees = []
+    for row in trainees:
+        achievements = achievement_rows.get(int(row["id"]), [])
+        identity = _row_text(row, "name", "degree", "institution", separator=" / ")
+        context = _row_text(row, "career_stage", "mentoring_role")
+        achievement_texts = []
+        for item in achievements:
+            title = clean_text(item["title"])
+            organization = clean_text(item["organization"])
+            amount = clean_text(item["amount"])
+            pieces = [title]
+            if organization and normalized_heading(organization) not in normalized_heading(title):
+                pieces.append(organization)
+            if amount and normalized_heading(amount) not in normalized_heading(title):
+                pieces.append(amount)
+            achievement_texts.append(", ".join(piece for piece in pieces if piece))
+        achievement_texts = [value for value in achievement_texts if value]
+        detail_parts = [identity, context]
+        if achievement_texts:
+            detail_parts.append("Selected achievements: " + "; ".join(achievement_texts[:3]))
+        detail = "; ".join(value for value in detail_parts if value)
+        if detail:
+            score = len(achievements) * 3 + sum(bool(clean_text(item["amount"])) for item in achievements) * 2
+            candidates["mentoring"].append({
+                "id": f"trainee:{row['id']}",
+                "values": [f"{clean_text(row['start_date'])}-{clean_text(row['end_date'])}".strip("-"), detail],
+                "score": score,
+            })
+
+    person = con.execute("SELECT full_name, display_name FROM person WHERE id=1").fetchone()
+    terms = researcher_name_terms(person)
+    category_b_rows = con.execute(
+        """
+        SELECT * FROM publications
+        WHERE COALESCE(suppress_display, 0)=0
+          AND category IN ('patents', 'patent', 'books_chapters', 'preprints')
+        """
+    ).fetchall()
+    for row in category_b_rows:
+        authorship = researcher_authorship(row["authors"], terms)
+        score = fallback_score(row, authorship)
+        if row["category"] in {"patents", "patent"}:
+            score += 1_000
+        elif row["category"] == "books_chapters":
+            score += 500
+        candidates["dfg_category_b"].append({
+            "id": f"publication:{row['id']}", "values": [_publication_citation(row)], "score": score,
+        })
+    # Older imports sometimes retained patents only inside a structured
+    # section's raw Markdown instead of creating a publication record.  Keep
+    # that evidence usable without inventing bibliographic fields.
+    try:
+        patent_sections = con.execute(
+            "SELECT id, raw_markdown FROM sections WHERE lower(COALESCE(raw_markdown, '')) LIKE '%patent%'"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        patent_sections = []
+    seen_patent_text: set[str] = set()
+    for row in patent_sections:
+        lines = [clean_text(re.sub(r"^[|:#*\-\s]+|[|\s]+$", "", line)) for line in str(row["raw_markdown"] or "").splitlines()]
+        for index, line in enumerate(lines):
+            if "patent" not in line.casefold() or len(line) < 20:
+                continue
+            marker = normalized_heading(line)
+            if marker in seen_patent_text:
+                continue
+            seen_patent_text.add(marker)
+            candidates["dfg_category_b"].append({
+                "id": f"section:{row['id']}:patent:{index}", "values": [line], "score": 900,
+            })
+
+    honor_candidates: list[dict[str, Any]] = []
+    for row in con.execute("SELECT * FROM cv_entries WHERE section_key='honors' ORDER BY id").fetchall():
+        values = _honor_values(row)
+        if any(values):
+            year_match = re.search(r"\d{4}", values[0])
+            year_score = int(year_match.group()) - 2000 if year_match else 0
+            candidate = {
+                "id": f"honor:{row['id']}", "values": values, "score": year_score,
+            }
+            normalized_title = normalized_heading(values[1])
+            duplicate_index = next((
+                index for index, existing in enumerate(honor_candidates)
+                if existing["values"][0] == values[0]
+                and normalized_title
+                and normalized_heading(existing["values"][1])
+                and (
+                    normalized_title.startswith(normalized_heading(existing["values"][1]))
+                    or normalized_heading(existing["values"][1]).startswith(normalized_title)
+                )
+            ), None)
+            if duplicate_index is None:
+                honor_candidates.append(candidate)
+            elif sum(bool(value) for value in values) > sum(bool(value) for value in honor_candidates[duplicate_index]["values"]):
+                honor_candidates[duplicate_index] = candidate
+    candidates["honors"].extend(honor_candidates)
+    return candidates
+
+
+def select_page_limited_items(
+    candidates: dict[str, list[dict[str, Any]]],
+    *,
+    page_limit: int,
+    section_limits: dict[str, int],
+    llm_json: Callable[[str, dict[str, Any], dict[str, str]], tuple[dict[str, Any] | None, str | None]] | None = None,
+    settings: dict[str, str] | None = None,
+) -> tuple[dict[str, list[list[str]]], dict[str, Any]]:
+    """Select bounded high-yield records for a page-limited export."""
+
+    ranked: dict[str, list[dict[str, Any]]] = {
+        key: sorted(rows, key=lambda row: (-float(row["score"]), str(row["id"])))[:30]
+        for key, rows in candidates.items() if key in section_limits
+    }
+    chosen_ids: dict[str, list[str]] = {
+        key: [str(row["id"]) for row in rows[:section_limits[key]]]
+        for key, rows in ranked.items()
+    }
+    method = "deterministic"
+    warning = ""
+    if llm_json is not None and settings and str(settings.get("provider") or "none") != "none":
+        properties = {
+            key: {
+                "type": "array", "maxItems": section_limits[key],
+                "items": {"type": "string", "enum": [str(row["id"]) for row in rows]},
+            }
+            for key, rows in ranked.items() if rows
+        }
+        schema = {
+            "type": "object", "additionalProperties": False,
+            "required": list(properties), "properties": properties,
+        }
+        prompt_payload = {
+            key: [
+                {"id": row["id"], "text": " | ".join(row["values"]), "characters": sum(map(len, row["values"]))}
+                for row in rows
+            ]
+            for key, rows in ranked.items() if rows
+        }
+        prompt = (
+            f"Select the strongest, most relevant academic CV records for a fixed {page_limit}-page form. "
+            "Prefer demonstrable trainee outcomes, selective research-system service, major distinctions, "
+            "and Category B outputs with patents/books ahead of preprints. Balance quality, diversity, recency, "
+            "and text length. Return only candidate IDs, never rewrite content.\n" +
+            json.dumps(prompt_payload, ensure_ascii=False)
+        )
+        response, warning = (llm_json(
+            prompt, schema, settings_for_llm_task(settings, "page_limited_export_selection")
+        ) if properties else (None, None))
+        if response:
+            for key, ids in response.items():
+                valid = {str(row["id"]) for row in ranked.get(key, [])}
+                selected = [str(value) for value in ids if str(value) in valid]
+                if selected:
+                    chosen_ids[key] = selected[:section_limits[key]]
+            method = "llm+deterministic"
+    overrides: dict[str, list[list[str]]] = {}
+    for key, rows in ranked.items():
+        lookup = {str(row["id"]): row for row in rows}
+        overrides[key] = [lookup[item_id]["values"] for item_id in chosen_ids.get(key, []) if item_id in lookup]
+    return overrides, {
+        "page_limit": page_limit,
+        "selection_method": method,
+        "selected_counts": {key: len(value) for key, value in overrides.items()},
+        "warning": warning or "",
+    }
+
+
+def select_dfg_page_limited_items(
+    con: sqlite3.Connection,
+    *,
+    llm_json: Callable[[str, dict[str, Any], dict[str, str]], tuple[dict[str, Any] | None, str | None]] | None = None,
+    settings: dict[str, str] | None = None,
+) -> tuple[dict[str, list[list[str]]], dict[str, Any]]:
+    """Select high-yield records for the fixed four-page DFG form."""
+
+    return select_page_limited_items(
+        dfg_page_limited_candidates(con),
+        page_limit=DFG_PAGE_LIMIT,
+        section_limits=DFG_SECTION_LIMITS,
+        llm_json=llm_json,
+        settings=settings,
+    )
+
+
 def identity_value(role: str, values: dict[str, str]) -> str:
     if role == "display_name":
         return values.get("display_name") or values.get("full_name", "")
@@ -1111,6 +1401,7 @@ def render_template(
     canonical_docx: Path,
     output: Path,
     con: sqlite3.Connection,
+    section_item_overrides: dict[str, list[list[str]]] | None = None,
 ) -> dict[str, Any]:
     validate_docx_bytes(skeleton)
     try:
@@ -1157,8 +1448,14 @@ def render_template(
                 for raw_index in section.get("discard_unit_indices") or []
                 if isinstance(raw_index, int) and (index := raw_index) in by_index
             ]
-            source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
-            manual_only = section_key.startswith("__unmapped_") or section_key in MANUAL_ONLY_SECTION_KEYS
+            has_override = section_item_overrides is not None and section_key in section_item_overrides
+            if has_override:
+                source_items = section_item_overrides[section_key]
+            else:
+                source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
+            manual_only = section_key.startswith("__unmapped_") or (
+                section_key in MANUAL_ONLY_SECTION_KEYS and not has_override
+            )
             if manual_only or not source_items:
                 placeholder_unit = target_units[0] if target_units else (
                     placeholder_unit_after(heading) if heading is not None else None

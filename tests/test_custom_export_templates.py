@@ -11,6 +11,7 @@ from unittest.mock import patch
 from docx import Document
 from docx.shared import Inches, Pt
 from fastapi.testclient import TestClient
+from lxml import etree
 
 from vitamine.app import app
 from vitamine.custom_docx_templates import (
@@ -18,6 +19,7 @@ from vitamine.custom_docx_templates import (
     canonical_content,
     deterministic_profile,
     render_template,
+    select_dfg_page_limited_items,
 )
 from vitamine.paths import create_blank_database
 
@@ -238,6 +240,62 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
         self.assertIn("First current paper", rendered_text)
         self.assertIn("If you provide voluntary information", rendered_text)
         self.assertIn("dfg_category_a", report["rendered_sections"])
+
+    def test_dfg_page_selector_uses_database_sections_and_llm_choices(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / "selection.vitamine"
+            create_blank_database(database)
+            with sqlite3.connect(database) as con:
+                con.row_factory = sqlite3.Row
+                document_id = con.execute("SELECT id FROM documents LIMIT 1").fetchone()[0]
+                activity_id = con.execute(
+                    "INSERT INTO cv_entries (document_id, section_key, title, organization, raw_text) "
+                    "VALUES (?, 'editorial_activities', 'Associate Editor', 'Current Journal', 'Associate Editor')",
+                    (document_id,),
+                ).lastrowid
+                honor_id = con.execute(
+                    "INSERT INTO cv_entries (document_id, section_key, start_date, title, organization, description, raw_text) "
+                    "VALUES (?, 'honors', '2026', 'Current Prize', 'Prize Foundation', 'Research distinction', 'Current Prize')",
+                    (document_id,),
+                ).lastrowid
+                mentoring_id = con.execute(
+                    "INSERT INTO cv_entries (document_id, section_key, start_date, title, raw_text) "
+                    "VALUES (?, 'mentoring', '2020', 'Ada Trainee', 'Ada Trainee')",
+                    (document_id,),
+                ).lastrowid
+                trainee_id = con.execute(
+                    "INSERT INTO trainees (cv_entry_id, name, degree, career_stage, institution, start_date, end_date, mentoring_role) "
+                    "VALUES (?, 'Ada Trainee', 'PhD', 'PhD student', 'Current University', '2020', '2025', 'Supervisor')",
+                    (mentoring_id,),
+                ).lastrowid
+                con.execute(
+                    "INSERT INTO trainee_achievements (trainee_id, achievement_type, title, organization) "
+                    "VALUES (?, 'award', 'Young Scientist Award', 'Science Society')",
+                    (trainee_id,),
+                )
+                book_id = con.execute(
+                    "INSERT INTO publications (document_id, category, authors, title, venue, year, raw_citation) "
+                    "VALUES (?, 'books_chapters', 'Example J', 'Current Research Book', 'Academic Press', '2025', 'Example J. Current Research Book. 2025.')",
+                    (document_id,),
+                ).lastrowid
+
+                def choose(_prompt, _schema, _settings):
+                    return {
+                        "research_system_activities": [f"activity:{activity_id}"],
+                        "mentoring": [f"trainee:{trainee_id}"],
+                        "dfg_category_b": [f"publication:{book_id}"],
+                        "honors": [f"honor:{honor_id}"],
+                    }, None
+
+                selected, report = select_dfg_page_limited_items(
+                    con, llm_json=choose, settings={"provider": "openai", "api_model": "test"}
+                )
+        self.assertEqual(report["page_limit"], 4)
+        self.assertEqual(report["selection_method"], "llm+deterministic")
+        self.assertIn("Associate Editor", selected["research_system_activities"][0][0])
+        self.assertIn("Young Scientist Award", selected["mentoring"][0][1])
+        self.assertIn("Current Research Book", selected["dfg_category_b"][0][0])
+        self.assertEqual(selected["honors"][0], ["2026", "Current Prize", "Prize Foundation", "Research distinction"])
 
     def test_template_analysis_uses_its_task_model_without_changing_the_default(self):
         observed = {}
@@ -529,6 +587,43 @@ class CustomDocxTemplateApiTests(unittest.TestCase):
         self.assertIn("renameCustomExportTemplate", script.text)
 
     def test_store_dfg_format_installs_and_exports_a_word_document(self):
+        with sqlite3.connect(self.database) as con:
+            document_id = con.execute("SELECT id FROM documents LIMIT 1").fetchone()[0]
+            con.execute(
+                "INSERT INTO cv_entries (document_id, section_key, title, organization, raw_text) "
+                "VALUES (?, 'editorial_activities', 'Associate Editor', 'Current Journal', 'Associate Editor')",
+                (document_id,),
+            )
+            mentoring_id = con.execute(
+                "INSERT INTO cv_entries (document_id, section_key, start_date, title, raw_text) "
+                "VALUES (?, 'mentoring', '2020', 'Ada Trainee', 'Ada Trainee')",
+                (document_id,),
+            ).lastrowid
+            trainee_id = con.execute(
+                "INSERT INTO trainees (cv_entry_id, name, degree, institution, start_date, end_date, mentoring_role) "
+                "VALUES (?, 'Ada Trainee', 'PhD', 'Current University', '2020', '2025', 'Supervisor')",
+                (mentoring_id,),
+            ).lastrowid
+            con.execute(
+                "INSERT INTO trainee_achievements (trainee_id, achievement_type, title, organization) "
+                "VALUES (?, 'award', 'Young Scientist Award', 'Science Society')",
+                (trainee_id,),
+            )
+            con.execute(
+                "INSERT INTO cv_entries (document_id, section_key, start_date, title, organization, description, raw_text) "
+                "VALUES (?, 'honors', '2026', 'Current Prize', 'Prize Foundation', 'Research distinction', 'Current Prize')",
+                (document_id,),
+            )
+            con.execute(
+                "INSERT INTO publications (document_id, category, authors, title, venue, year, raw_citation) "
+                "VALUES (?, 'books_chapters', 'Example J', 'Current Research Book', 'Academic Press', '2025', 'Example J. Current Research Book. 2025.')",
+                (document_id,),
+            )
+            con.execute(
+                "INSERT INTO sections (document_id, section_key, title, ordinal, raw_markdown) "
+                "VALUES (?, 'clinical_activities', 'Clinical innovations', 99, 'Candidate method; patent filed as TEST-123.')",
+                (document_id,),
+            )
         preferences = {}
 
         def read_preferences():
@@ -558,7 +653,18 @@ class CustomDocxTemplateApiTests(unittest.TestCase):
         self.assertIn("Jane", export_text)
         self.assertIn("Example", export_text)
         self.assertIn("An updated paper", export_text)
+        self.assertIn("Associate Editor", export_text)
+        self.assertIn("Ada Trainee", export_text)
+        self.assertIn("Young Scientist Award", export_text)
+        self.assertIn("Current Research Book", export_text)
+        self.assertIn("patent filed as TEST-123", export_text)
         self.assertIn("Data protection and consent", export_text)
+        distinctions = document.tables[-1]
+        prize = next(row for row in distinctions.rows if row.cells[1].text == "Current Prize")
+        self.assertEqual([cell.text for cell in prize.cells], ["2026", "Current Prize", "Prize Foundation", "Research distinction"])
+        with zipfile.ZipFile(export_path) as archive:
+            document_xml = etree.fromstring(archive.read("word/document.xml"))
+            self.assertFalse(document_xml.xpath("//w:hyperlink", namespaces={"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}))
 
     def test_stale_remove_action_deletes_a_custom_template(self):
         created = self.client.post(
