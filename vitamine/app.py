@@ -99,6 +99,18 @@ from .cv_dates import cv_entry_sort_key
 
 PROJECT = Path(__file__).resolve().parent
 
+
+def hosted_vitamine_plus_active() -> bool:
+    return os.environ.get("VITAMINE_CLOUD_WORKER") != "1" or os.environ.get("VITAMINE_PLUS_ACTIVE") == "1"
+
+
+def require_hosted_vitamine_plus() -> None:
+    if not hosted_vitamine_plus_active():
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "vitamine_plus_required", "message": "This feature is part of VitaMine+."},
+        )
+
 SECTION_LABELS = {
     "education": "Education",
     "postdoctoral_training": "Postdoctoral Training",
@@ -2006,6 +2018,7 @@ def metrics() -> dict[str, Any]:
 
 @app.get("/api/collaboration-map")
 def collaboration_map(mode: str = "collaborations") -> dict[str, Any]:
+    require_hosted_vitamine_plus()
     mode = str(mode or "collaborations").strip().casefold()
     if mode not in {"collaborations", "citations"}:
         raise HTTPException(status_code=422, detail="Choose collaborations or citations.")
@@ -5301,6 +5314,7 @@ def get_export_prompt_plan(format_id: str) -> dict[str, Any]:
 
 @app.post("/api/export-formats/{format_id}/prompt-plan")
 async def create_export_prompt_plan(format_id: str, request: Request) -> dict[str, Any]:
+    require_hosted_vitamine_plus()
     item = export_format_by_id(format_id, export_format_catalog())
     exporter = str(item.get("exporter") or "")
     content_profile = str(item["content_profile"])
@@ -6107,6 +6121,7 @@ async def update_cv_import_settings(request: Request) -> dict[str, Any]:
 
 @app.post("/api/cv-import/upload")
 async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
+    require_hosted_vitamine_plus()
     if not files:
         raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
     upload_dir = DATA / "cv-imports"
@@ -6242,6 +6257,7 @@ def enrich_doi_action() -> JSONResponse:
 
 @app.post("/api/actions/enrich-cv")
 def enrich_cv_action() -> JSONResponse:
+    require_hosted_vitamine_plus()
     try:
         payload = enrich_cv_job(update_last_run=True)
         schedule_background_refresh(publications_changed=True)
@@ -6400,6 +6416,15 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
     payload = json.loads(response.body)
     relative_docx = str(payload.get("docx_path") or "")
     docx_path = built_docx_path(relative_docx) if relative_docx else Path()
+    if not hosted_vitamine_plus_active():
+        payload["quality_audit"] = {
+            "status": "not_available",
+            "applied_count": 0,
+            "review_count": 0,
+            "warning": "VitaMine+ is required for the intelligent export check.",
+            "issues": [],
+        }
+        return JSONResponse(payload)
     try:
         with connect() as con:
             settings = cv_import_settings(con, include_secret=True)

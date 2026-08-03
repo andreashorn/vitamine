@@ -4458,12 +4458,26 @@ def set_plus_developer_toggle(
     if not bool(member["plus_dev_toggle_enabled"]):
         raise HTTPException(status_code=404, detail="Developer entitlement control is not available.")
     with connect() as con:
+        workspace = con.execute(
+            "SELECT * FROM workspace_sessions WHERE member_id=?",
+            (member["id"],),
+        ).fetchone()
+        if workspace is not None and workspace_has_active_job(workspace):
+            raise HTTPException(status_code=409, detail="Wait for the active background job before switching plans.")
         con.execute(
             "UPDATE members SET plus_dev_override=? WHERE id=? AND plus_dev_toggle_enabled=1",
             (1 if payload.active else 0, member["id"]),
         )
         updated = con.execute("SELECT * FROM members WHERE id=?", (member["id"],)).fetchone()
-    return {"ok": True, "plus": vitamine_plus_status(updated)}
+    if workspace is not None:
+        stop_workspace(workspace, remove_files=False)
+        with connect() as con:
+            con.execute("UPDATE workspace_sessions SET pid=NULL WHERE id=?", (workspace["id"],))
+    return {
+        "ok": True,
+        "plus": vitamine_plus_status(updated),
+        "workspace_worker_restarted": workspace is not None,
+    }
 
 
 @app.post("/api/account/premium-account/paypal-beta-topup")
