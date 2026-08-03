@@ -48,7 +48,7 @@ class ExportFormatCatalogTests(unittest.TestCase):
         self.assertTrue(all(item["quality"]["key"] == "ready" for item in preinstalled))
         dfg = next(item for item in formats if item["id"] == "vitamine.dfg-research-cv")
         self.assertEqual(dfg["exporter"], "bundled_docx")
-        self.assertEqual(dfg["languages"], ["en"])
+        self.assertEqual(dfg["languages"], ["en", "secondary"])
         self.assertEqual(dfg["page_limit"], 4)
 
         script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")

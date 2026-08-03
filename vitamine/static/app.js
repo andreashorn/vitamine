@@ -2321,8 +2321,13 @@ async function loadExportSettings() {
   const data = await api("/api/export-settings");
   state.exportSettings = data;
   const label = data.home_language_label || "Deutsch";
+  const code = data.home_language_code || "de";
   $("#homeLanguageLabel").value = label;
+  $("#homeLanguageCode").value = code;
   $("#homeLanguageOption").textContent = label;
+  $("#additionalLanguageLegend").textContent = label;
+  $("#translateEntryToAdditional").textContent = `Translate English → ${label}`;
+  $("#translateEntryToEnglish").textContent = `Translate ${label} → English`;
   const citationStyle = $("#exportCitationStyle");
   if (citationStyle) {
     const styleGroups = new Map();
@@ -2551,16 +2556,23 @@ function selectedLongPublicationCategories() {
 
 async function saveExportSettings() {
   const label = $("#homeLanguageLabel").value.trim() || "Deutsch";
+  const code = $("#homeLanguageCode").value.trim().toLowerCase() || "de";
   const categories = selectedLongPublicationCategories();
   $("#homeLanguageLabel").value = label;
+  $("#homeLanguageCode").value = code;
   $("#homeLanguageOption").textContent = label;
+  $("#additionalLanguageLegend").textContent = label;
+  $("#translateEntryToAdditional").textContent = `Translate English → ${label}`;
+  $("#translateEntryToEnglish").textContent = `Translate ${label} → English`;
   state.exportSettings.home_language_label = label;
+  state.exportSettings.home_language_code = code;
   state.exportSettings.long_cv_publication_categories = categories;
   state.exportSettings.citation_style = $("#exportCitationStyle")?.value || "vitamine-long";
   await api("/api/export-settings", {
     method: "PUT",
     body: JSON.stringify({
       home_language_label: label,
+      home_language_code: code,
       citation_style: state.exportSettings.citation_style,
       long_cv_publication_categories: categories,
     }),
@@ -3013,6 +3025,31 @@ async function saveEntry(event) {
     payload: entryPayload(),
   };
   await runEntryAutosave();
+}
+
+async function translateSelectedEntry(direction) {
+  if (state.entryAutosave.pending) await runEntryAutosave();
+  const id = $("#entryId").value;
+  if (!id) {
+    setStatus("Save the entry before translating it.");
+    return;
+  }
+  const buttons = [$("#translateEntryToAdditional"), $("#translateEntryToEnglish")];
+  buttons.forEach((button) => { button.disabled = true; });
+  setStatus("Translating entry…");
+  try {
+    const data = await api(`/api/entries/${id}/translate`, {
+      method: "POST",
+      body: JSON.stringify({ direction }),
+    });
+    mergeSavedEntry(id, data.entry);
+    selectEntry(Number(id));
+    setStatus(`Entry translated from ${data.source_language} to ${data.target_language}`);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 
 async function deleteEntry() {
@@ -4423,6 +4460,8 @@ async function init() {
   $("#deletePublication").addEventListener("click", deletePublication);
   $("#newEntry").addEventListener("click", clearEntryForm);
   $("#entryForm").addEventListener("submit", saveEntry);
+  $("#translateEntryToAdditional").addEventListener("click", () => translateSelectedEntry("primary_to_additional"));
+  $("#translateEntryToEnglish").addEventListener("click", () => translateSelectedEntry("additional_to_primary"));
   $("#entrySection").addEventListener("change", updateGrantStatusVisibility);
   $$("#entryForm input, #entryForm textarea, #entryForm select").forEach((field) => {
     if (field.type !== "hidden") field.addEventListener("input", scheduleEntryAutosave);
@@ -4479,6 +4518,7 @@ async function init() {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });
   $("#homeLanguageLabel").addEventListener("change", saveExportSettings);
+  $("#homeLanguageCode").addEventListener("change", saveExportSettings);
   $("#exportCitationStyle").addEventListener("change", async () => {
     await saveExportSettings();
     const label = $("#exportCitationStyle").selectedOptions[0]?.textContent || "Citation style";

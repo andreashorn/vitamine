@@ -110,15 +110,18 @@
       "page_limit": 4,
       "selection_strategy": "Automatic high-yield selection across page-limited sections",
       "exporter": "bundled_docx",
-      "languages": ["en"],
+      "languages": ["en", "secondary"],
       "template": {
         "docx": "dfg-research-cv.docx",
-        "blueprint": "dfg-research-cv.json"
+        "blueprint": "dfg-research-cv.json",
+        "language_variants": {
+          "de": "dfg-research-cv-de.docx"
+        }
       },
       "quality": {
         "key": "working_draft",
         "label": "Working draft",
-        "description": "A functional English working template based on a successfully submitted CV; check it against the current call requirements before submission."
+        "description": "Functional English and official-heading German working templates; check the result against the current call requirements before submission."
       },
       "source": {
         "kind": "official_requirement",

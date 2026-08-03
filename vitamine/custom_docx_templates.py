@@ -724,6 +724,95 @@ def clear_direct_emphasis(unit: Unit) -> None:
                     properties.remove(child)
 
 
+def translate_template_headings(
+    skeleton: bytes,
+    blueprint: dict[str, Any],
+    *,
+    target_language: str,
+    target_language_code: str,
+    llm_json: Callable[[str, dict[str, Any], dict[str, str]], tuple[dict[str, Any] | None, str | None]],
+    settings: dict[str, str],
+) -> tuple[bytes, dict[str, Any]]:
+    """Translate fixed template labels while leaving CV record slots untouched."""
+
+    validate_docx_bytes(skeleton)
+    document = Document(io.BytesIO(skeleton))
+    units = document_units(document)
+    by_index = {unit.index: unit for unit in units}
+    targets: dict[str, list[Paragraph]] = defaultdict(list)
+    heading_indices = [
+        int(section["heading_unit_index"])
+        for section in blueprint.get("sections") or []
+        if isinstance(section.get("heading_unit_index"), int)
+    ]
+    first_heading = min(heading_indices) if heading_indices else len(units)
+    for unit in units[:first_heading]:
+        if unit.kind == "paragraph" and unit.text and "{{VITAMINE_" not in unit.text and len(unit.text) <= 120:
+            targets[unit.text].append(unit.paragraphs[0])
+    for section in blueprint.get("sections") or []:
+        index = section.get("heading_unit_index")
+        if isinstance(index, int) and index in by_index:
+            unit = by_index[index]
+            if unit.text:
+                targets[unit.text].append(unit.paragraphs[0])
+    for slot in blueprint.get("identity_slots") or []:
+        index = slot.get("unit_index")
+        cell_index = slot.get("cell_index")
+        if not isinstance(index, int) or index not in by_index or not isinstance(cell_index, int):
+            continue
+        unit = by_index[index]
+        if unit.kind != "row" or cell_index <= 0 or not unit.cell_paragraphs:
+            continue
+        label_paragraphs = unit.cell_paragraphs[cell_index - 1]
+        if label_paragraphs and label_paragraphs[0].text:
+            targets[label_paragraphs[0].text].append(label_paragraphs[0])
+    source_labels = list(targets)
+    if not source_labels:
+        return skeleton, {"method": "none", "translated_labels": 0, "warning": ""}
+    schema = {
+        "type": "object", "additionalProperties": False, "required": ["translations"],
+        "properties": {
+            "translations": {
+                "type": "array", "minItems": len(source_labels), "maxItems": len(source_labels),
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["source", "translated"],
+                    "properties": {
+                        "source": {"type": "string", "enum": source_labels},
+                        "translated": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+    prompt = (
+        f"Translate these fixed academic-CV template headings and field labels into {target_language} "
+        f"(language code {target_language_code}). Preserve acronyms such as ORCID, DFG, DOI, and category letters. "
+        "Use concise, formal terminology. Return every source exactly once; do not translate or invent CV content.\n"
+        + json.dumps(source_labels, ensure_ascii=False)
+    )
+    result, warning = llm_json(
+        prompt, schema, settings_for_llm_task(settings, "template_heading_translation")
+    )
+    if not result:
+        raise ValueError(warning or f"The template headings could not be translated into {target_language}.")
+    translated = {
+        str(item.get("source") or ""): clean_text(item.get("translated"))
+        for item in result.get("translations", []) if isinstance(item, dict)
+    }
+    if any(not translated.get(source) for source in source_labels):
+        raise ValueError(f"The template heading translation into {target_language} was incomplete.")
+    for source, paragraphs in targets.items():
+        for paragraph in paragraphs:
+            set_paragraph_text(paragraph, translated[source])
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return clean_docx_package(buffer.getvalue()), {
+        "method": "llm", "translated_labels": len(source_labels), "warning": warning or "",
+        "target_language": target_language, "target_language_code": target_language_code,
+    }
+
+
 def set_identity_slot_value(unit: Unit, slot: dict[str, Any], value: str) -> None:
     cell_index = slot.get("cell_index")
     if unit.kind == "row" and isinstance(cell_index, int) and 0 <= cell_index < len(unit.cell_paragraphs):

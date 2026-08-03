@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260803-custom-word-templates-vitamine-plus-dev-toggle-grant-status-dfg-store-format-repair-export-visibility-word-icon">
+  <link rel="stylesheet" href="/static/styles.css?v=20260803-generic-entry-translation">
 </head>
 <body>
   <header class="topbar">
@@ -307,7 +307,7 @@
             <label class="exportLanguageControl">Language
               <select id="exportLanguage">
                 <option value="en">English</option>
-                <option id="homeLanguageOption" value="de">Deutsch</option>
+                <option id="homeLanguageOption" value="secondary">Deutsch</option>
               </select>
             </label>
             <label class="exportCitationControl">Citation style
@@ -443,8 +443,12 @@
             <label>Amount<input name="amount" id="entryAmount"></label>
             <label>Description<textarea name="description" id="entryDescription" rows="6"></textarea></label>
           </fieldset>
+          <div class="entryTranslationControls" aria-label="Translate this entry">
+            <button id="translateEntryToAdditional" type="button">Translate English → additional language</button>
+            <button id="translateEntryToEnglish" type="button">Translate additional language → English</button>
+          </div>
           <fieldset>
-            <legend>German</legend>
+            <legend id="additionalLanguageLegend">Deutsch</legend>
             <label>Title<input name="title_de" id="entryTitleDe"></label>
             <label>Organization<input name="organization_de" id="entryOrganizationDe"></label>
             <label>Location<input name="location_de" id="entryLocationDe"></label>
@@ -532,6 +536,7 @@
         <label>Degrees<input name="degrees"></label>
         <label>Position title<input name="position_title"></label>
         <label>Native / Second CV Language<input id="homeLanguageLabel" maxlength="40" value="Deutsch"></label>
+        <label>Language code<input id="homeLanguageCode" maxlength="12" value="de" placeholder="e.g. de, fr, es"></label>
         <label>Office address<input name="office_address"></label>
         <label>Home address<input name="home_address"></label>
         <label>Work phone<input name="work_phone"></label>
@@ -853,6 +858,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=20260803-export-format-label-grant-export-visibility"></script>
+  <script src="/static/app.js?v=20260803-export-format-label-generic-entry-translation"></script>
 </body>
 </html>

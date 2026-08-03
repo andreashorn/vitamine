@@ -20,6 +20,7 @@ from vitamine.custom_docx_templates import (
     deterministic_profile,
     render_template,
     select_dfg_page_limited_items,
+    translate_template_headings,
 )
 from vitamine.paths import create_blank_database
 
@@ -90,6 +91,54 @@ def oxford_like_document_bytes() -> bytes:
     output = io.BytesIO()
     document.save(output)
     return output.getvalue()
+
+
+class TemplateHeadingTranslationTests(unittest.TestCase):
+    def test_llm_fallback_translates_only_fixed_template_labels(self):
+        asset_dir = Path(__file__).resolve().parents[1] / "vitamine" / "static" / "export-templates"
+        skeleton = (asset_dir / "dfg-research-cv.docx").read_bytes()
+        blueprint = json.loads((asset_dir / "dfg-research-cv.json").read_text(encoding="utf-8"))
+
+        def fake_llm(prompt, schema, settings):
+            labels = schema["properties"]["translations"]["items"]["properties"]["source"]["enum"]
+            return {
+                "translations": [
+                    {"source": label, "translated": f"FR: {label}"}
+                    for label in labels
+                ]
+            }, None
+
+        translated, report = translate_template_headings(
+            skeleton,
+            blueprint,
+            target_language="Français",
+            target_language_code="fr",
+            llm_json=fake_llm,
+            settings={"provider": "openai", "api_model": "test"},
+        )
+        document = Document(io.BytesIO(translated))
+        text = "\n".join(
+            [paragraph.text for paragraph in document.paragraphs]
+            + [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+        )
+        self.assertEqual(report["method"], "llm")
+        self.assertIn("FR: Qualifications and Career", text)
+        self.assertIn("{{VITAMINE_IDENTITY_FIRST_NAME}}", text)
+
+    def test_german_dfg_variant_uses_official_headings_and_keeps_slots(self):
+        asset = (
+            Path(__file__).resolve().parents[1]
+            / "vitamine/static/export-templates/dfg-research-cv-de.docx"
+        )
+        document = Document(asset)
+        text = "\n".join(
+            [paragraph.text for paragraph in document.paragraphs]
+            + [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+        )
+        self.assertIn("Qualifizierung und Werdegang", text)
+        self.assertIn("Engagement im Wissenschaftssystem", text)
+        self.assertIn("Kategorie B – Jede weitere Form öffentlich gemachter Ergebnisse", text)
+        self.assertIn("{{VITAMINE_IDENTITY_FIRST_NAME}}", text)
 
 
 def dfg_like_document_bytes() -> bytes:
@@ -708,8 +757,22 @@ class CustomDocxTemplateApiTests(unittest.TestCase):
             installed = self.client.post("/api/export-formats/vitamine.dfg-research-cv/install")
             self.assertEqual(installed.status_code, 200, installed.text)
             exported = self.client.post("/api/actions/export/vitamine.dfg-research-cv?lang=en")
+            exported_de = self.client.post("/api/actions/export/vitamine.dfg-research-cv?lang=secondary")
 
         self.assertEqual(exported.status_code, 200, exported.text)
+        self.assertEqual(exported_de.status_code, 200, exported_de.text)
+        german_export_path = self.output / Path(exported_de.json()["docx_path"]).name
+        german_document = Document(german_export_path)
+        german_text = "\n".join(
+            [paragraph.text for paragraph in german_document.paragraphs]
+            + [cell.text for table in german_document.tables for row in table.rows for cell in row.cells]
+        )
+        self.assertIn("Qualifizierung und Werdegang", german_text)
+        self.assertIn("Engagement im Wissenschaftssystem", german_text)
+        self.assertEqual(
+            exported_de.json()["template_render"]["template_translation"]["method"],
+            "official_variant",
+        )
         export_path = self.output / Path(exported.json()["docx_path"]).name
         self.assertTrue(export_path.exists())
         document = Document(export_path)

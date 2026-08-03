@@ -89,12 +89,14 @@ from .enrichment_guard import (
     review_nonpublications,
 )
 from .export_quality import run_export_quality_audit
+from .llm_routing import settings_for_llm_task
 from .custom_docx_templates import (
     MAX_TEMPLATE_BYTES,
     analyze_and_skeletonize,
     render_template as render_custom_docx_template,
     select_dfg_page_limited_items,
     template_sha256,
+    translate_template_headings,
 )
 from .cv_dates import cv_end_date, cv_entry_sort_key
 
@@ -173,6 +175,14 @@ ENTRY_FIELDS = [
     "include_biosketch",
     "language",
 ]
+
+ENTRY_TRANSLATION_FIELDS = ("title", "organization", "location", "role", "description")
+ENTRY_TRANSLATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(ENTRY_TRANSLATION_FIELDS),
+    "properties": {field: {"type": "string"} for field in ENTRY_TRANSLATION_FIELDS},
+}
 
 LLM_POLICY = llm_policy()
 
@@ -3061,6 +3071,72 @@ async def update_entry(entry_id: int, request: Request) -> dict[str, Any]:
     return {"ok": True, "entry": {**payload, "id": entry_id}}
 
 
+@app.post("/api/entries/{entry_id}/translate")
+async def translate_entry(entry_id: int, request: Request) -> dict[str, Any]:
+    require_hosted_vitamine_plus()
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    if direction not in {"primary_to_additional", "additional_to_primary"}:
+        raise HTTPException(status_code=422, detail="Choose a translation direction.")
+    with connect() as con:
+        ensure_german_columns(con)
+        row = con.execute("SELECT * FROM cv_entries WHERE id=?", (entry_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Entry not found")
+        additional_language = get_setting(con, "home_language_label") or "Deutsch"
+        settings = settings_for_llm_task(
+            cv_import_settings(con, include_secret=True), "entry_translation"
+        )
+        source_suffix, target_suffix = (
+            ("", "_de") if direction == "primary_to_additional" else ("_de", "")
+        )
+        source_language, target_language = (
+            ("English", additional_language)
+            if direction == "primary_to_additional"
+            else (additional_language, "English")
+        )
+        source = {
+            field: str(row[f"{field}{source_suffix}"] or "")
+            for field in ENTRY_TRANSLATION_FIELDS
+        }
+        prompt = (
+            f"Translate this single academic-CV entry from {source_language} to {target_language}. "
+            "Preserve names, institutions, grant references, identifiers, dates, currency values, and technical meaning. "
+            "Keep empty fields empty and return only the translated fields. Do not add facts.\n"
+            + json.dumps(source, ensure_ascii=False)
+        )
+        translated, warning = llm_json(prompt, ENTRY_TRANSLATION_SCHEMA, settings)
+        if not translated:
+            raise HTTPException(status_code=502, detail=warning or "The entry could not be translated.")
+        assignments: list[str] = []
+        values: list[str] = []
+        for field in ENTRY_TRANSLATION_FIELDS:
+            assignments.append(f"{field}{target_suffix}=?")
+            values.append(str(translated.get(field) or "").strip())
+        amount_target = f"amount{target_suffix}"
+        amount_source = f"amount{source_suffix}"
+        assignments.append(f"{amount_target}=?")
+        values.append(str(row[amount_source] or ""))
+        raw_target = f"raw_text{target_suffix}"
+        translated_description = values[ENTRY_TRANSLATION_FIELDS.index("description")]
+        translated_title = values[ENTRY_TRANSLATION_FIELDS.index("title")]
+        assignments.append(f"{raw_target}=?")
+        values.append(translated_description or translated_title)
+        con.execute(
+            f"UPDATE cv_entries SET {', '.join(assignments)} WHERE id=?",
+            (*values, entry_id),
+        )
+        con.commit()
+        updated = row_dict(con.execute("SELECT * FROM cv_entries WHERE id=?", (entry_id,)).fetchone())
+    return {
+        "ok": True,
+        "entry": updated,
+        "direction": direction,
+        "source_language": source_language,
+        "target_language": target_language,
+    }
+
+
 @app.delete("/api/entries/{entry_id}")
 def delete_entry(entry_id: int) -> dict[str, Any]:
     with connect() as con:
@@ -5531,6 +5607,7 @@ def export_settings() -> dict[str, Any]:
             categories = [key for key in LONG_CV_PUBLICATION_CATEGORIES if key in DEFAULT_LONG_CV_PUBLICATION_CATEGORIES]
         return {
             "home_language_label": get_setting(con, "home_language_label") or "Deutsch",
+            "home_language_code": get_setting(con, "home_language_code") or "de",
             "citation_style": validate_citation_style(get_setting(con, "export_citation_style")),
             "citation_style_options": CITATION_STYLES,
             "long_cv_publication_categories": categories,
@@ -5545,6 +5622,7 @@ def export_settings() -> dict[str, Any]:
 async def update_export_settings(request: Request) -> dict[str, Any]:
     payload = await request.json()
     label = str(payload.get("home_language_label") or "").strip() or "Deutsch"
+    code = re.sub(r"[^a-zA-Z-]+", "", str(payload.get("home_language_code") or "").strip()).lower() or "de"
     requested_categories = payload.get("long_cv_publication_categories")
     citation_style = validate_citation_style(str(payload.get("citation_style") or DEFAULT_CITATION_STYLE))
     categories: list[str] = []
@@ -5552,6 +5630,7 @@ async def update_export_settings(request: Request) -> dict[str, Any]:
         categories = [str(item) for item in requested_categories if str(item) in LONG_CV_PUBLICATION_CATEGORIES]
     with connect() as con:
         set_setting(con, "home_language_label", label[:40])
+        set_setting(con, "home_language_code", code[:12])
         set_setting(con, "export_citation_style", citation_style)
         if isinstance(requested_categories, list):
             set_setting(con, "long_cv_publication_categories", ",".join(categories))
@@ -5559,6 +5638,7 @@ async def update_export_settings(request: Request) -> dict[str, Any]:
     return {
         "ok": True,
         "home_language_label": label[:40],
+        "home_language_code": code[:12],
         "citation_style": citation_style,
         "long_cv_publication_categories": categories,
     }
@@ -6323,7 +6403,7 @@ def sync_orcid_action() -> JSONResponse:
 
 @app.post("/api/actions/build-long")
 def build_long_action(lang: str = "en") -> JSONResponse:
-    lang = "de" if lang == "de" else "en"
+    lang = "de" if lang in {"de", "secondary"} else "en"
     result = run_script("build_long_cv.py", "--lang", lang)
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
@@ -6333,7 +6413,7 @@ def build_long_action(lang: str = "en") -> JSONResponse:
 
 @app.post("/api/actions/build-short")
 def build_short_action(lang: str = "en") -> JSONResponse:
-    lang = "de" if lang == "de" else "en"
+    lang = "de" if lang in {"de", "secondary"} else "en"
     with connect() as con:
         has_prompt_plan = bool(get_setting(con, export_plan_setting_key("vitamine.short-academic")))
     curated = None if has_prompt_plan else run_script("curate_short_cv.py")
@@ -6349,7 +6429,7 @@ def build_short_action(lang: str = "en") -> JSONResponse:
 
 @app.post("/api/actions/build-ultrashort-tabular")
 def build_ultrashort_tabular_action(lang: str = "en") -> JSONResponse:
-    lang = "de" if lang == "de" else "en"
+    lang = "de" if lang in {"de", "secondary"} else "en"
     result = run_script("build_ultrashort_tabular_cv.py", "--lang", lang)
     if result.returncode != 0:
         return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
@@ -6359,7 +6439,7 @@ def build_ultrashort_tabular_action(lang: str = "en") -> JSONResponse:
 
 @app.post("/api/actions/build-biosketch")
 def build_biosketch_action(lang: str = "en") -> JSONResponse:
-    lang = "de" if lang == "de" else "en"
+    lang = "de" if lang in {"de", "secondary"} else "en"
     imported_stdout = ""
     with connect() as con:
         contribution_count = int(con.execute("SELECT COUNT(*) FROM biosketch_contributions").fetchone()[0])
@@ -6384,8 +6464,19 @@ def built_docx_path(relative_docx: str) -> Path:
     return (ROOT / relative).resolve()
 
 
+def requested_export_language(lang: str) -> str:
+    return "secondary" if lang in {"secondary", "de"} else "en"
+
+
+def additional_language_settings(con: sqlite3.Connection) -> tuple[str, str]:
+    return (
+        get_setting(con, "home_language_label") or "Deutsch",
+        get_setting(con, "home_language_code") or "de",
+    )
+
+
 def build_custom_export_template(template_id: str, lang: str = "en") -> JSONResponse:
-    lang = "de" if lang == "de" else "en"
+    lang = requested_export_language(lang)
     with connect() as con:
         row = custom_export_template_row(con, template_id)
         source_docx = bytes(row["source_docx"])
@@ -6401,27 +6492,39 @@ def build_custom_export_template(template_id: str, lang: str = "en") -> JSONResp
     builder = builders.get(profile)
     if builder is None:
         raise HTTPException(status_code=422, detail="This custom template has an unsupported content classification.")
-    canonical_response = builder(lang)
+    content_lang = "de" if lang == "secondary" else "en"
+    canonical_response = builder(content_lang)
     if canonical_response.status_code >= 400:
         return canonical_response
     canonical_payload = json.loads(canonical_response.body)
     canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
     safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", template_name).strip("._-") or "custom_cv"
-    suffix = "_de" if lang == "de" else ""
+    with connect() as con:
+        additional_label, additional_code = additional_language_settings(con)
+        settings = cv_import_settings(con, include_secret=True)
+    translation_report = {"method": "source", "translated_labels": 0, "warning": ""}
+    if lang == "secondary":
+        source_docx, translation_report = translate_template_headings(
+            source_docx, blueprint,
+            target_language=additional_label, target_language_code=additional_code,
+            llm_json=llm_json, settings=settings,
+        )
+    suffix = f"_{additional_code}" if lang == "secondary" else ""
     output_path = OUTPUT / f"{safe_stem[:80]}_{template_id.rsplit('.', 1)[-1][:8]}{suffix}.docx"
     try:
         with connect() as con:
             render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
-            settings = cv_import_settings(con, include_secret=True)
             quality_audit = run_export_quality_audit(con, output_path, llm_json, settings)
+            render_report["template_translation"] = translation_report
         if quality_audit["applied_count"]:
-            canonical_response = builder(lang)
+            canonical_response = builder(content_lang)
             if canonical_response.status_code >= 400:
                 return canonical_response
             canonical_payload = json.loads(canonical_response.body)
             canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
             with connect() as con:
                 render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+                render_report["template_translation"] = translation_report
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"ok": False, "stderr": str(exc)[:1000]}, status_code=500)
     cache_key = str(int(time.time()))
@@ -6439,10 +6542,21 @@ def build_custom_export_template(template_id: str, lang: str = "en") -> JSONResp
 
 
 def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSONResponse:
-    if lang not in (item.get("languages") or ["en", "de"]):
+    lang = requested_export_language(lang)
+    if lang not in (item.get("languages") or ["en", "secondary"]):
         raise HTTPException(status_code=422, detail="This working template is currently available in English only.")
     template = item.get("template") if isinstance(item.get("template"), dict) else {}
-    source_path = BUNDLED_EXPORT_TEMPLATES / Path(str(template.get("docx") or "")).name
+    with connect() as con:
+        additional_label, additional_code = additional_language_settings(con)
+        settings = cv_import_settings(con, include_secret=True)
+    variants = template.get("language_variants") if isinstance(template.get("language_variants"), dict) else {}
+    variant = (
+        variants.get(additional_code) or variants.get(additional_code.split("-", 1)[0])
+        if lang == "secondary"
+        else None
+    )
+    source_name = str(variant or template.get("docx") or "")
+    source_path = BUNDLED_EXPORT_TEMPLATES / Path(source_name).name
     blueprint_path = BUNDLED_EXPORT_TEMPLATES / Path(str(template.get("blueprint") or "")).name
     try:
         source_docx = source_path.read_bytes()
@@ -6456,15 +6570,26 @@ def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSO
         "biosketch": build_biosketch_action,
     }
     builder = builders[str(item["content_profile"])]
-    canonical_response = builder(lang)
+    content_lang = "de" if lang == "secondary" else "en"
+    canonical_response = builder(content_lang)
     if canonical_response.status_code >= 400:
         return canonical_response
     canonical_payload = json.loads(canonical_response.body)
     canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
-    output_path = OUTPUT / f"dfg_cv_publication_list_{lang}.docx"
+    output_language = additional_code if lang == "secondary" else "en"
+    output_path = OUTPUT / f"dfg_cv_publication_list_{output_language}.docx"
+    translation_report = {
+        "method": "official_variant" if variant else "source", "translated_labels": 0,
+        "warning": "", "target_language": additional_label if lang == "secondary" else "English",
+    }
     try:
         with connect() as con:
-            settings = cv_import_settings(con, include_secret=True)
+            if lang == "secondary" and not variant:
+                source_docx, translation_report = translate_template_headings(
+                    source_docx, blueprint,
+                    target_language=additional_label, target_language_code=additional_code,
+                    llm_json=llm_json, settings=settings,
+                )
             section_overrides, page_selection = select_dfg_page_limited_items(
                 con,
                 llm_json=llm_json if hosted_vitamine_plus_active() else None,
@@ -6475,11 +6600,12 @@ def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSO
                 section_item_overrides=section_overrides,
             )
             render_report["page_selection"] = page_selection
+            render_report["template_translation"] = translation_report
             quality_audit = {"status": "not_available", "applied_count": 0, "review_count": 0, "issues": []}
             if hosted_vitamine_plus_active():
                 quality_audit = run_export_quality_audit(con, output_path, llm_json, settings)
         if quality_audit.get("applied_count"):
-            rebuilt = builder(lang)
+            rebuilt = builder(content_lang)
             if rebuilt.status_code >= 400:
                 return rebuilt
             canonical_payload = json.loads(rebuilt.body)
@@ -6490,6 +6616,7 @@ def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSO
                     section_item_overrides=section_overrides,
                 )
                 render_report["page_selection"] = page_selection
+                render_report["template_translation"] = translation_report
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         return JSONResponse({"ok": False, "stderr": str(exc)[:1000]}, status_code=500)
     return JSONResponse(build_response(
