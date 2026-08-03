@@ -69,7 +69,16 @@ def accessible_libraries(api_key: str) -> list[dict[str, str]]:
             }
         except Exception:
             group_names = {}
-    for group_id, permissions in groups.items():
+    group_permissions = {
+        str(group_id): permissions
+        for group_id, permissions in groups.items()
+        if str(group_id) != "all"
+    }
+    all_group_permissions = groups.get("all")
+    if isinstance(all_group_permissions, dict) and all_group_permissions.get("library"):
+        for group_id in group_names:
+            group_permissions.setdefault(group_id, all_group_permissions)
+    for group_id, permissions in group_permissions.items():
         if isinstance(permissions, dict) and not permissions.get("library"):
             continue
         libraries.append({"type": "groups", "id": str(group_id), "name": group_names.get(str(group_id)) or f"Group {group_id}"})

@@ -53,11 +53,14 @@ class CloudAppTests(unittest.TestCase):
         self.environment.start()
         self.mail_delivery = patch("vitamine.cloud_app.send_verification_email")
         self.send_verification_email = self.mail_delivery.start()
+        self.password_mail_delivery = patch("vitamine.cloud_app.send_password_reset_email")
+        self.send_password_reset_email = self.password_mail_delivery.start()
         self.client = TestClient(app)
 
     def tearDown(self):
         self.client.close()
         self.mail_delivery.stop()
+        self.password_mail_delivery.stop()
         self.environment.stop()
         self.directory.cleanup()
 
@@ -93,62 +96,82 @@ class CloudAppTests(unittest.TestCase):
         self.register(email=email, token=token)
         return token
 
-    def test_new_account_receives_non_enforcing_premium_credit(self):
+    def test_new_account_starts_with_plus_trial_and_zero_usage_cost(self):
         self.create_account()
         response = self.client.get("/api/account/premium-account")
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
-        self.assertEqual(payload["balance_microusd"], 3_000_000)
-        self.assertEqual(payload["credited_microusd"], 3_000_000)
+        self.assertEqual(payload["balance_microusd"], 0)
+        self.assertEqual(payload["credited_microusd"], 0)
         self.assertEqual(payload["charged_microusd"], 0)
         self.assertFalse(payload["enforcement_enabled"])
         self.assertFalse(payload["top_up"]["enabled"])
+        account = self.client.get("/api/account/databases").json()
+        self.assertTrue(account["plus"]["active"])
+        self.assertEqual(account["plus"]["plan"], "trial")
 
-    def test_trusted_beta_paypal_topup_is_immediate_and_idempotent(self):
+    def test_expired_plus_account_keeps_core_access_but_llm_jobs_require_upgrade(self):
+        self.create_account()
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("UPDATE members SET plus_trial_ends_at='2020-01-01T00:00:00+00:00'")
+            con.commit()
+        account = self.client.get("/api/account/databases").json()
+        self.assertFalse(account["plus"]["active"])
+        self.assertEqual(account["plus"]["plan"], "free")
+        page = self.client.get("/")
+        self.assertIn('id="plusStatusButton"', page.text)
+        self.assertIn("Upgrade to +", self.client.get("/assets/account.js").text)
+        self.assertNotIn("Premium features account balance", page.text)
+        created = self.client.post("/gateway/workspace/new")
+        self.assertEqual(created.status_code, 200, created.text)
+        blocked = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(blocked.status_code, 402, blocked.text)
+        self.assertEqual(blocked.json()["detail"]["code"], "vitamine_plus_required")
+
+    def test_plus_developer_toggle_is_account_scoped(self):
+        self.create_account()
+        hidden = self.client.put("/api/account/plus-developer-toggle", json={"active": False})
+        self.assertEqual(hidden.status_code, 404)
+        with sqlite3.connect(self.db_path) as con:
+            con.execute("UPDATE members SET plus_dev_toggle_enabled=1")
+            con.commit()
+        disabled = self.client.put("/api/account/plus-developer-toggle", json={"active": False})
+        self.assertEqual(disabled.status_code, 200, disabled.text)
+        self.assertFalse(disabled.json()["plus"]["active"])
+        self.assertEqual(disabled.json()["plus"]["plan"], "developer")
+        enabled = self.client.put("/api/account/plus-developer-toggle", json={"active": True})
+        self.assertTrue(enabled.json()["plus"]["active"])
+
+    def test_legacy_paypal_topup_is_retired_without_creating_credit(self):
         self.create_account()
         with patch.dict(
             os.environ,
             {"VITAMINE_PAYPAL_BETA_TOPUP_URL": "https://paypal.me/tester/5USD"},
         ):
-            summary = self.client.get("/api/account/premium-account")
-            self.assertTrue(summary.json()["top_up"]["enabled"])
-            self.assertEqual(summary.json()["top_up"]["amount_microusd"], 5_000_000)
-
             headers = {"Idempotency-Key": "paypal-test-claim-1"}
             first = self.client.post(
                 "/api/account/premium-account/paypal-beta-topup",
                 headers=headers,
                 json={"acknowledged_paid": True},
             )
-            self.assertEqual(first.status_code, 200, first.text)
-            self.assertTrue(first.json()["credited"])
-            self.assertEqual(first.json()["balance_microusd"], 8_000_000)
-
-            repeated = self.client.post(
-                "/api/account/premium-account/paypal-beta-topup",
-                headers=headers,
-                json={"acknowledged_paid": True},
-            )
-            self.assertEqual(repeated.status_code, 200, repeated.text)
-            self.assertFalse(repeated.json()["credited"])
-            self.assertEqual(repeated.json()["balance_microusd"], 8_000_000)
+            self.assertEqual(first.status_code, 410, first.text)
 
         with sqlite3.connect(self.db_path) as con:
             claims = con.execute("SELECT COUNT(*) FROM paypal_beta_topups").fetchone()[0]
             credits = con.execute(
                 "SELECT COUNT(*) FROM premium_account_transactions WHERE kind='paypal_beta_topup'"
             ).fetchone()[0]
-        self.assertEqual(claims, 1)
-        self.assertEqual(credits, 1)
+        self.assertEqual(claims, 0)
+        self.assertEqual(credits, 0)
 
-    def test_paypal_topup_requires_configuration_confirmation_and_idempotency(self):
+    def test_retired_paypal_topup_requires_authentication(self):
         self.create_account()
         unavailable = self.client.post(
             "/api/account/premium-account/paypal-beta-topup",
             headers={"Idempotency-Key": "paypal-test-claim-2"},
             json={"acknowledged_paid": True},
         )
-        self.assertEqual(unavailable.status_code, 503)
+        self.assertEqual(unavailable.status_code, 410)
         with patch.dict(
             os.environ,
             {"VITAMINE_PAYPAL_BETA_TOPUP_URL": "https://paypal.me/tester/5USD"},
@@ -158,12 +181,12 @@ class CloudAppTests(unittest.TestCase):
                 headers={"Idempotency-Key": "paypal-test-claim-3"},
                 json={"acknowledged_paid": False},
             )
-            self.assertEqual(unconfirmed.status_code, 422)
+            self.assertEqual(unconfirmed.status_code, 410)
             missing_key = self.client.post(
                 "/api/account/premium-account/paypal-beta-topup",
                 json={"acknowledged_paid": True},
             )
-            self.assertEqual(missing_key.status_code, 400)
+            self.assertEqual(missing_key.status_code, 410)
 
     def test_new_account_requires_one_time_email_confirmation(self):
         _, token = self.redeem()
@@ -194,6 +217,38 @@ class CloudAppTests(unittest.TestCase):
             follow_redirects=False,
         )
         self.assertEqual(reused.headers["location"], "/?email_confirmation=invalid")
+
+    def test_password_reset_is_single_use_and_revokes_existing_sessions(self):
+        self.create_account()
+        requested = self.client.post(
+            "/api/account/password-reset/request", json={"email": "tester@example.org"}
+        )
+        self.assertEqual(requested.status_code, 200, requested.text)
+        reset_token = self.send_password_reset_email.call_args.args[1]
+        completed = self.client.post(
+            "/api/account/password-reset/complete",
+            json={"token": reset_token, "password": "a-new-correct-horse-password"},
+        )
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual(self.client.get("/api/session").status_code, 401)
+        reused = self.client.post(
+            "/api/account/password-reset/complete",
+            json={"token": reset_token, "password": "another-correct-horse-password"},
+        )
+        self.assertEqual(reused.status_code, 400)
+        signed_in = self.client.post(
+            "/api/account/login",
+            json={"email": "tester@example.org", "password": "a-new-correct-horse-password"},
+        )
+        self.assertEqual(signed_in.status_code, 200, signed_in.text)
+
+    def test_password_reset_request_does_not_disclose_unknown_accounts(self):
+        self.redeem()
+        response = self.client.post(
+            "/api/account/password-reset/request", json={"email": "unknown@example.org"}
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.send_password_reset_email.assert_not_called()
 
     def test_workspace_worker_liveness_rejects_a_reused_pid(self):
         row = {"pid": 987654, "port": 58153}

@@ -100,6 +100,18 @@ from .cv_dates import cv_end_date, cv_entry_sort_key
 
 PROJECT = Path(__file__).resolve().parent
 
+
+def hosted_vitamine_plus_active() -> bool:
+    return os.environ.get("VITAMINE_CLOUD_WORKER") != "1" or os.environ.get("VITAMINE_PLUS_ACTIVE") == "1"
+
+
+def require_hosted_vitamine_plus() -> None:
+    if not hosted_vitamine_plus_active():
+        raise HTTPException(
+            status_code=402,
+            detail={"code": "vitamine_plus_required", "message": "This feature is part of VitaMine+."},
+        )
+
 SECTION_LABELS = {
     "education": "Education",
     "postdoctoral_training": "Postdoctoral Training",
@@ -498,7 +510,6 @@ def clean_template_name(value: str | None, fallback: str = "My Word CV") -> str:
     if len(name) > 100:
         raise HTTPException(status_code=400, detail="Keep the template name below 100 characters.")
     return name
-
 
 
 def normalized_institution_name(name: str | None) -> str:
@@ -1115,7 +1126,16 @@ def zotero_accessible_libraries(api_key: str) -> tuple[dict[str, Any], list[dict
         )
     groups = access.get("groups") if isinstance(access.get("groups"), dict) else {}
     group_names = zotero_group_names(api_key, user_id) if user_id and groups else {}
-    for group_id, permissions in groups.items():
+    group_permissions = {
+        str(group_id): permissions
+        for group_id, permissions in groups.items()
+        if str(group_id) != "all"
+    }
+    all_group_permissions = groups.get("all")
+    if isinstance(all_group_permissions, dict) and all_group_permissions.get("library"):
+        for group_id in group_names:
+            group_permissions.setdefault(group_id, all_group_permissions)
+    for group_id, permissions in group_permissions.items():
         if isinstance(permissions, dict) and not permissions.get("library"):
             continue
         libraries.append(
@@ -1532,7 +1552,6 @@ def ensure_export_templates_table(con: sqlite3.Connection) -> None:
         )
         """
     )
-
 
 
 def ensure_manual_document(con: sqlite3.Connection) -> int:
@@ -2048,6 +2067,7 @@ def metrics() -> dict[str, Any]:
 
 @app.get("/api/collaboration-map")
 def collaboration_map(mode: str = "collaborations") -> dict[str, Any]:
+    require_hosted_vitamine_plus()
     mode = str(mode or "collaborations").strip().casefold()
     if mode not in {"collaborations", "citations"}:
         raise HTTPException(status_code=422, detail="Choose collaborations or citations.")
@@ -2394,7 +2414,6 @@ def get_connections() -> dict[str, Any]:
         api_key = zotero_runtime_api_key(con)
         library_type = get_setting(con, "zotero_library_type") or "users"
         library_id = get_setting(con, "zotero_library_id")
-        stored_policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
         return {
             "orcid_id": (identifier["identifier_value"] if identifier else None) or (person["orcid_id"] if person else "") or "",
             "zotero_api_key_set": bool(api_key),
@@ -2405,8 +2424,6 @@ def get_connections() -> dict[str, Any]:
             "zotero_source_mode": get_setting(con, "zotero_source_mode") or "my_publications",
             "zotero_collection_key": get_setting(con, "zotero_collection_key"),
             "zotero_collection_name": get_setting(con, "zotero_collection_name"),
-            "publication_source_policy": stored_policy,
-            "effective_publication_source_policy": publication_source_policy(con),
         }
 
 
@@ -2434,14 +2451,6 @@ async def update_connections(request: Request) -> dict[str, Any]:
     collection_name = str(payload.get("zotero_collection_name") or "").strip()
     if source_mode == "collection" and not collection_key:
         raise HTTPException(status_code=400, detail="Choose a Zotero collection.")
-    source_policy = str(payload.get("publication_source_policy") or "zotero_primary_orcid_validation").strip()
-    if source_policy not in {
-        "zotero_only",
-        "orcid_only",
-        "zotero_primary_orcid_validation",
-        "orcid_primary_zotero_validation",
-    }:
-        raise HTTPException(status_code=400, detail="Choose a publication source policy.")
     with connect() as con:
         if orcid_id:
             upsert_person_orcid_identifier(con, orcid_id)
@@ -2454,7 +2463,6 @@ async def update_connections(request: Request) -> dict[str, Any]:
         set_setting(con, "zotero_source_mode", source_mode)
         set_setting(con, "zotero_collection_key", collection_key)
         set_setting(con, "zotero_collection_name", collection_name)
-        set_setting(con, "publication_source_policy", source_policy)
         if api_key:
             set_setting(con, "zotero_api_key", api_key)
         effective_key = api_key or zotero_runtime_api_key(con)
@@ -2558,12 +2566,6 @@ def zotero_status() -> dict[str, Any]:
             collection_count = len(zotero_fetch_collections(env["api_key"], chosen["type"], chosen["id"]))
         except Exception:
             collection_count = 0
-        with connect() as con:
-            set_setting(con, "zotero_library_type", chosen["type"])
-            set_setting(con, "zotero_library_id", chosen["id"])
-            if chosen["type"] == "groups":
-                set_setting(con, "zotero_group_name", chosen["name"])
-            con.commit()
         return {
             "ok": True,
             "message": f"Connected to {chosen['name']}.",
@@ -4594,19 +4596,10 @@ def build_response(stdout: str, cache_key: str, extra: dict[str, Any] | None = N
     return payload
 
 
-PUBLICATION_SOURCE_POLICIES = {
-    "zotero_only": ("zotero",),
-    "orcid_only": ("orcid",),
-    "zotero_primary_orcid_validation": ("zotero", "orcid"),
-    "orcid_primary_zotero_validation": ("orcid", "zotero"),
-}
-
-
-def publication_source_policy(con: sqlite3.Connection) -> str:
-    policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
-    if policy not in PUBLICATION_SOURCE_POLICIES:
-        policy = "zotero_primary_orcid_validation"
-    zotero_key = get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
+def connected_publication_sources(con: sqlite3.Connection) -> tuple[str, ...]:
+    sources: list[str] = []
+    if get_setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY"):
+        sources.append("zotero")
     orcid_row = con.execute(
         """
         SELECT
@@ -4618,11 +4611,9 @@ def publication_source_policy(con: sqlite3.Connection) -> str:
         """
     ).fetchone()
     has_orcid = bool(orcid_row and str(orcid_row["orcid_id"] or "").strip())
-    if not zotero_key and has_orcid and "orcid" in PUBLICATION_SOURCE_POLICIES[policy]:
-        return "orcid_only"
-    if not zotero_key and has_orcid and policy == "zotero_only":
-        return "orcid_only"
-    return policy
+    if has_orcid:
+        sources.append("orcid")
+    return tuple(sources)
 
 
 def run_publication_source(source: str, db_path: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -4946,7 +4937,8 @@ def timestamp_text(timestamp: float | None = None) -> str:
 
 
 def ai_web_discovery_enabled(con: sqlite3.Connection) -> bool:
-    return get_setting(con, "ai_web_discovery_enabled") == "1"
+    # Profile discovery is now an unconditional part of enrichment.
+    return True
 
 
 def ai_discovery_source_urls(con: sqlite3.Connection, limit: int = AI_DISCOVERY_MAX_PAGES) -> list[dict[str, str]]:
@@ -5135,13 +5127,12 @@ def enrich_cv_job(
             progress_callback(phase, message, percent)
 
     with connect() as con:
-        policy = publication_source_policy(con)
+        sources = connected_publication_sources(con)
     doi_result = run_script("enrich_publications_by_doi.py", "--resolve-missing")
     if doi_result.returncode != 0:
         raise RuntimeError(doi_result.stderr[-4000:] or "DOI enrichment failed.")
     report_progress("sources", "Checking connected publication sources", 62)
     source_results: list[dict[str, Any]] = []
-    sources = PUBLICATION_SOURCE_POLICIES[policy]
     for index, source in enumerate(sources, start=1):
         source_label = source.replace("_", " ").title()
         report_progress(
@@ -5256,6 +5247,7 @@ async def create_export_template(
     file: UploadFile = File(...),
     name: str = Form(""),
 ) -> dict[str, Any]:
+    require_hosted_vitamine_plus()
     filename = Path(file.filename or "template.docx").name
     if Path(filename).suffix.casefold() != ".docx":
         raise HTTPException(status_code=400, detail="Please upload a Word .docx document.")
@@ -5345,6 +5337,7 @@ def get_export_prompt_plan(format_id: str) -> dict[str, Any]:
 
 @app.post("/api/export-formats/{format_id}/prompt-plan")
 async def create_export_prompt_plan(format_id: str, request: Request) -> dict[str, Any]:
+    require_hosted_vitamine_plus()
     item = export_format_by_id(format_id, export_format_catalog())
     exporter = str(item.get("exporter") or "")
     content_profile = str(item["content_profile"])
@@ -5559,14 +5552,9 @@ def enrichment_settings() -> dict[str, Any]:
 
 @app.put("/api/enrichment-settings")
 async def update_enrichment_settings(request: Request) -> dict[str, Any]:
-    payload = await request.json()
-    ai_discovery_enabled = "1" if payload.get("ai_web_discovery_enabled") else "0"
-    with connect() as con:
-        set_setting(con, "ai_web_discovery_enabled", ai_discovery_enabled)
-        con.commit()
     return {
         "ok": True,
-        "ai_web_discovery_enabled": ai_discovery_enabled == "1",
+        "ai_web_discovery_enabled": True,
     }
 
 
@@ -6151,6 +6139,7 @@ async def update_cv_import_settings(request: Request) -> dict[str, Any]:
 
 @app.post("/api/cv-import/upload")
 async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
+    require_hosted_vitamine_plus()
     if not files:
         raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
     upload_dir = DATA / "cv-imports"
@@ -6227,9 +6216,9 @@ def sync_zotero_action() -> JSONResponse:
 @app.post("/api/actions/sync-publication-sources")
 def sync_publication_sources_action() -> JSONResponse:
     with connect() as con:
-        policy = publication_source_policy(con)
+        sources = connected_publication_sources(con)
     results: list[dict[str, Any]] = []
-    for source in PUBLICATION_SOURCE_POLICIES[policy]:
+    for source in sources:
         result = run_publication_source(source)
         results.append(
             {
@@ -6243,7 +6232,7 @@ def sync_publication_sources_action() -> JSONResponse:
             return JSONResponse(
                 {
                     "ok": False,
-                    "policy": policy,
+                    "sources": sources,
                     "results": results,
                     "stderr": result.stderr[-4000:] or f"{source} sync failed.",
                 },
@@ -6253,7 +6242,7 @@ def sync_publication_sources_action() -> JSONResponse:
     return JSONResponse(
         {
             "ok": True,
-            "policy": policy,
+            "sources": sources,
             "results": results,
             "stdout": "\n".join(
                 f"[{row['source']}]\n{row['stdout'].strip()}" for row in results if row["stdout"].strip()
@@ -6286,6 +6275,7 @@ def enrich_doi_action() -> JSONResponse:
 
 @app.post("/api/actions/enrich-cv")
 def enrich_cv_action() -> JSONResponse:
+    require_hosted_vitamine_plus()
     try:
         payload = enrich_cv_job(update_last_run=True)
         schedule_background_refresh(publications_changed=True)
@@ -6367,6 +6357,7 @@ def built_docx_path(relative_docx: str) -> Path:
 
 
 def build_custom_export_template(template_id: str, lang: str = "en") -> JSONResponse:
+    require_hosted_vitamine_plus()
     lang = "de" if lang == "de" else "en"
     with connect() as con:
         row = custom_export_template_row(con, template_id)
@@ -6444,6 +6435,9 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
     payload = json.loads(response.body)
     relative_docx = str(payload.get("docx_path") or "")
     docx_path = built_docx_path(relative_docx) if relative_docx else Path()
+    if not hosted_vitamine_plus_active():
+        payload["quality_audit"] = {"status": "not_available", "applied_count": 0, "review_count": 0, "issues": []}
+        return JSONResponse(payload)
     try:
         with connect() as con:
             settings = cv_import_settings(con, include_secret=True)

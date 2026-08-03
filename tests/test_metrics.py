@@ -134,8 +134,8 @@ class MetricsTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
-        self.assertIn("/static/styles.css?v=20260802-custom-word-templates", document)
-        self.assertIn("/static/app.js?v=20260802-custom-word-templates", document)
+        self.assertIn("20260801-dashboard-citation-map", document)
+        self.assertIn("20260801-enrichment-simplified", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")

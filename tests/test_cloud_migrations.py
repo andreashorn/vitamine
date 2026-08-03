@@ -79,8 +79,10 @@ class CloudMigrationTests(unittest.TestCase):
         self.assertIn("orcid_oauth_connections", tables)
         self.assertIn("zotero_oauth_requests", tables)
         self.assertIn("zotero_oauth_connections", tables)
+        self.assertIn("password_reset_tokens", tables)
+        self.assertIn("passkey_credentials", tables)
 
-    def test_version_seven_usage_is_priced_and_existing_member_is_credited(self):
+    def test_version_seven_usage_is_normalized_to_at_cost_and_trialed(self):
         self.seed_version(7)
         with sqlite3.connect(self.database) as con:
             con.executescript(
@@ -106,9 +108,11 @@ class CloudMigrationTests(unittest.TestCase):
             con.row_factory = sqlite3.Row
             usage = con.execute("SELECT * FROM llm_usage_events WHERE id='usage-1'").fetchone()
             credit = con.execute("SELECT amount_microusd FROM premium_account_transactions").fetchone()
+            member = con.execute("SELECT plus_trial_ends_at FROM members WHERE id='member-1'").fetchone()
         self.assertEqual(usage["wholesale_cost_microusd"], 60)
-        self.assertEqual(usage["charged_cost_microusd"], 120)
-        self.assertEqual(credit["amount_microusd"], 3_000_000)
+        self.assertEqual(usage["charged_cost_microusd"], 60)
+        self.assertIsNone(credit)
+        self.assertTrue(member["plus_trial_ends_at"])
 
     def test_version_one_store_upgrades_without_losing_member_data(self):
         self.seed_version(1)

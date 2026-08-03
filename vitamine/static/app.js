@@ -15,6 +15,7 @@ const state = {
     workspace: null,
     activeJob: null,
     resuming: false,
+    plus: { active: true, plan: "desktop" },
   },
   orcidOauth: null,
   orcidOauthLoaded: false,
@@ -171,8 +172,10 @@ async function api(path, options = {}) {
   });
   const data = await response.json();
   if (!response.ok) {
-    const error = new Error(data.stderr || data.detail || "Request failed");
+    const detail = data.detail;
+    const error = new Error(data.stderr || (typeof detail === "string" ? detail : detail?.message) || "Request failed");
     error.status = response.status;
+    error.code = detail?.code || "";
     throw error;
   }
   return data;
@@ -252,11 +255,48 @@ function setCloudJobControls(running) {
   }
 }
 
+function hasVitaminePlus() {
+  return !state.cloud.enabled || Boolean(state.cloud.plus?.active);
+}
+
+function showWorkspacePlusDialog() {
+  const plus = state.cloud.plus || {};
+  const title = $("#workspacePlusTitle");
+  const status = $("#workspacePlusStatus");
+  if (plus.plan === "trial") {
+    title.textContent = "Your VitaMine+ trial is active.";
+    status.textContent = `All VitaMine+ features are available until ${plus.active_until ? new Date(plus.active_until).toLocaleDateString() : "the end of your trial"}.`;
+  } else if (plus.plan === "paid") {
+    title.textContent = "Your VitaMine+ plan is active.";
+    status.textContent = plus.active_until ? `Your current plan runs through ${new Date(plus.active_until).toLocaleDateString()}.` : "All VitaMine+ features are available.";
+  } else {
+    title.textContent = "More confidence, less maintenance.";
+    status.textContent = "VitaMine stays free and your data remains accessible. Upgrade to use intelligent and advanced features.";
+  }
+  $("#workspacePlusDialog").showModal();
+}
+
+function requirePlusUi() {
+  if (hasVitaminePlus()) return true;
+  showWorkspacePlusDialog();
+  return false;
+}
+
+function configureWorkspacePlus(plus) {
+  const button = $("#workspacePlusButton");
+  button.hidden = false;
+  button.textContent = plus.active ? "VitaMine+" : "Upgrade to +";
+  button.classList.toggle("active", Boolean(plus.active));
+  $(".templateImportPanel")?.classList.toggle("plusLocked", !plus.active);
+}
+
 function configureCloudWorkspace(workspace) {
   state.cloud.enabled = true;
   state.cloud.workspace = workspace;
+  state.cloud.plus = workspace.plus || { active: false, plan: "free" };
   if (state.exportFormats.length) renderExportFormats();
   const account = workspace.account || {};
+  configureWorkspacePlus(state.cloud.plus);
   $("#cloudAccountMenu").hidden = false;
   $("#cloudAccountInitials").textContent = accountInitials(account);
   $("#cloudAccountName").textContent = account.display_name || "VitaMine account";
@@ -1338,6 +1378,7 @@ async function saveCvImportSettings() {
 async function importCvFiles(files) {
   files = Array.from(files || []);
   if (!files.length) return;
+  if (!requirePlusUi()) return;
   if (state.onboarding?.enabled && !state.onboarding.llm_configured) {
     state.pendingCvImportFiles = files;
     const coach = $("#onboardingCoach");
@@ -1437,6 +1478,7 @@ async function saveConnections(event) {
   event.preventDefault();
   const sourceMode = $("#connectionZoteroSource").value;
   const selected = sourceMode === "collection" ? selectedZoteroCollection() : null;
+  const selectedLibrary = selectedZoteroLibrary();
   const orcidId = $("#connectionOrcid").value.trim();
   await api("/api/connections", {
     method: "PUT",
@@ -1444,6 +1486,7 @@ async function saveConnections(event) {
       orcid_id: $("#connectionOrcid").value,
       zotero_api_key: $("#connectionZoteroKey").value,
       zotero_library_value: $("#connectionZoteroLibrary").value,
+      zotero_group_name: selectedLibrary?.type === "groups" ? selectedLibrary.name : "",
       zotero_source_mode: sourceMode,
       zotero_collection_key: selected?.key || "",
       zotero_collection_name: selected?.name || "",
@@ -1486,6 +1529,15 @@ function renderZoteroLibraries() {
       return `<option value="${escapeHtml(`${item.type}:${item.id}`)}">${escapeHtml(label)}</option>`;
     }),
   ].join("");
+}
+
+function selectedZoteroLibrary() {
+  const value = $("#connectionZoteroLibrary").value || "";
+  const separator = value.indexOf(":");
+  if (separator < 0) return null;
+  const type = value.slice(0, separator);
+  const id = value.slice(separator + 1);
+  return state.zoteroLibraries.find((item) => item.type === type && String(item.id) === id) || null;
 }
 
 function selectedZoteroCollection() {
@@ -2030,6 +2082,15 @@ function mapTooltip(node) {
 }
 
 async function loadCollaborationMap() {
+  if (!hasVitaminePlus()) {
+    const container = $("#collaborationMap");
+    container.classList.add("plusMapLocked");
+    container.innerHTML = '<div class="emptyMap"><strong>Collaboration network</strong><span>Detailed institutions, people, and connections are available with VitaMine+.</span></div>';
+    container.onclick = showWorkspacePlusDialog;
+    $("#collaborationMapStats").innerHTML = "";
+    $("#collaborationCountries").innerHTML = "";
+    return;
+  }
   const mode = state.collaborationMap.mode;
   const data = await api(`/api/collaboration-map?mode=${encodeURIComponent(mode)}`);
   state.collaborationMap.datasets[mode] = data;
@@ -2292,6 +2353,7 @@ function customTemplateDefaultName(filename) {
 
 async function importCustomExportTemplate(file) {
   if (!file) return;
+  if (!requirePlusUi()) return;
   if (!/\.docx$/i.test(file.name || "")) {
     setStatus("Please choose a Word .docx document.", { error: true });
     return;
@@ -2410,6 +2472,7 @@ async function loadPromptExportPlan() {
 }
 
 async function createPromptExportPlan() {
+  if (!requirePlusUi()) return;
   const formatId = $("#promptExportFormat")?.value;
   const prompt = $("#promptExportInstructions")?.value.trim();
   if (!formatId || !prompt) {
@@ -2540,7 +2603,8 @@ function exportFormatCard(format) {
   const analysis = format.custom_template && format.template_analysis
     ? `<span class="templateAnalysisNote">${format.template_analysis.page_count ? `${format.template_analysis.page_count} source page${format.template_analysis.page_count === 1 ? "" : "s"} · ` : ""}${format.template_analysis.mapped_sections?.length || 0} mapped sections${format.template_analysis.model ? ` · analyzed with ${escapeHtml(format.template_analysis.model)}` : ""}</span>`
     : "";
-  return `<article class="formatCard ${format.installed ? "installed" : ""}">
+  const plusLocked = format.custom_template && !hasVitaminePlus();
+  return `<article class="formatCard ${format.installed ? "installed" : ""} ${plusLocked ? "plusLocked" : ""}" ${plusLocked ? 'data-plus-locked="true"' : ""}>
     <div class="formatPreview">
       ${preview}
     </div>
@@ -2572,8 +2636,16 @@ function bindExportFormatActions() {
     button.addEventListener("click", () => removeExportFormat(button.dataset.formatId));
   });
   $$(".formatBuildButton").forEach((button) => {
-    button.addEventListener("click", () => buildExportFormat(button.dataset.formatId));
+    button.addEventListener("click", () => {
+      const format = state.exportFormats.find((item) => item.id === button.dataset.formatId);
+      if (format?.custom_template && !requirePlusUi()) return;
+      buildExportFormat(button.dataset.formatId);
+    });
   });
+  $$('[data-plus-locked="true"]').forEach((card) => card.addEventListener("click", (event) => {
+    if (event.target.closest("button")) return;
+    showWorkspacePlusDialog();
+  }));
   $$(".formatRenameTemplateButton").forEach((button) => {
     button.addEventListener("click", () => renameCustomExportTemplate(button.dataset.formatId));
   });
@@ -4192,12 +4264,15 @@ async function init() {
   $("#showSuppressedPubs").addEventListener("change", loadPublications);
   $("#journalMetricSearch").addEventListener("input", debounce(loadJournalMetrics));
   $("#exportFormatSearch").addEventListener("input", renderExportFormats);
-  $("#chooseCustomTemplateFile").addEventListener("click", () => $("#customTemplateFileInput").click());
+  $("#chooseCustomTemplateFile").addEventListener("click", () => {
+    if (!requirePlusUi()) return;
+    $("#customTemplateFileInput").click();
+  });
   $("#customTemplateFileInput").addEventListener("change", (event) => importCustomExportTemplate(event.target.files?.[0]));
   $("#customTemplateDropzone").addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      $("#customTemplateFileInput").click();
+      if (requirePlusUi()) $("#customTemplateFileInput").click();
     }
   });
   $("#customTemplateDropzone").addEventListener("dragover", (event) => {
@@ -4335,6 +4410,7 @@ async function init() {
   $("#deleteIdentifier").addEventListener("click", deleteIdentifier);
   $("#narrativeForm").addEventListener("submit", saveNarrativeReport);
   const enrichCv = async () => {
+    if (!requirePlusUi()) return;
     if (state.onboarding?.step === "enrich") {
       const coach = $("#onboardingCoach");
       if (coach) coach.hidden = true;
@@ -4359,6 +4435,11 @@ async function init() {
     await loadOnboarding();
   };
   $("#enrichCvDashboard").addEventListener("click", enrichCv);
+  $("#workspacePlusButton").addEventListener("click", showWorkspacePlusDialog);
+  $("#closeWorkspacePlusDialog").addEventListener("click", () => $("#workspacePlusDialog").close());
+  $("#workspacePlusDialog").addEventListener("click", (event) => {
+    if (event.target === $("#workspacePlusDialog")) $("#workspacePlusDialog").close();
+  });
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });

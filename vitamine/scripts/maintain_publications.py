@@ -30,10 +30,6 @@ PREPRINT_DOI_PREFIXES = (
     "10.64898/",
 )
 POSTER_TERMS = ("poster", "conference poster", "meeting abstract")
-ORCID_POLICY_NAMES = {
-    "orcid_only",
-    "orcid_primary_zotero_validation",
-}
 LEGACY_ORCID_POLICY_NOTES = (
     "Suppressed ORCID-only record without clear Horn authorship; review before showing in CV.",
     "Suppressed ORCID-only record; use Zotero/manual record as authoritative CV source.",
@@ -96,48 +92,6 @@ def normalize_doi(value: str | None) -> str:
 
 def compact_title(value: str | None) -> str:
     return re.sub(r"\W+", " ", normalize_title(value)).strip()
-
-
-def get_setting(con: sqlite3.Connection, key: str) -> str:
-    table = con.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='app_settings'").fetchone()
-    if not table:
-        return ""
-    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
-    return str(row["value"] or "") if row else ""
-
-
-def effective_publication_source_policy(con: sqlite3.Connection) -> str:
-    policy = get_setting(con, "publication_source_policy") or "zotero_primary_orcid_validation"
-    if policy not in {
-        "zotero_only",
-        "orcid_only",
-        "zotero_primary_orcid_validation",
-        "orcid_primary_zotero_validation",
-    }:
-        policy = "zotero_primary_orcid_validation"
-    zotero_key = get_setting(con, "zotero_api_key")
-    identifiers_table = con.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='person_identifiers'"
-    ).fetchone()
-    orcid_row = con.execute(
-        (
-            """
-            SELECT COALESCE(
-              (SELECT identifier_value FROM person_identifiers WHERE person_id=1 AND lower(platform)='orcid' ORDER BY id LIMIT 1),
-              (SELECT orcid_id FROM person WHERE id=1),
-              ''
-            ) AS orcid_id
-            """
-            if identifiers_table
-            else "SELECT COALESCE((SELECT orcid_id FROM person WHERE id=1), '') AS orcid_id"
-        )
-    ).fetchone()
-    has_orcid = bool(orcid_row and str(orcid_row["orcid_id"] or "").strip())
-    if not zotero_key and has_orcid and policy != "zotero_only":
-        return "orcid_only"
-    if not zotero_key and has_orcid and policy == "zotero_only":
-        return "orcid_only"
-    return policy
 
 
 def name_terms_for_researcher(con: sqlite3.Connection) -> list[str]:
@@ -530,30 +484,12 @@ def suppress_orcid_without_researcher_authorship(con: sqlite3.Connection) -> int
 
 
 def suppress_orcid_only_records(con: sqlite3.Connection) -> int:
-    if effective_publication_source_policy(con) in ORCID_POLICY_NAMES:
-        return 0
-    note = "Suppressed ORCID-only record; use Zotero/manual record as authoritative CV source."
-    cursor = con.execute(
-        """
-        UPDATE publications
-        SET suppress_display=1,
-            include_short=0,
-            include_ultrashort=0,
-            selected_order=NULL,
-            short_selected_order=NULL,
-            ultrashort_selected_order=NULL,
-            quality_note=COALESCE(NULLIF(quality_note, ''), ?)
-        WHERE source='orcid'
-          AND COALESCE(suppress_display, 0)=0
-        """,
-        (note,),
-    )
-    return cursor.rowcount
+    # Connected publication sources are now combined automatically. ORCID-only
+    # records are valid candidates regardless of a legacy source-policy setting.
+    return 0
 
 
 def restore_legacy_orcid_policy_suppression(con: sqlite3.Connection) -> int:
-    if effective_publication_source_policy(con) not in ORCID_POLICY_NAMES:
-        return 0
     placeholders = ", ".join("?" for _ in LEGACY_ORCID_POLICY_NOTES)
     cursor = con.execute(
         f"""

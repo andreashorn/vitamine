@@ -488,17 +488,16 @@ sudo /bin/bash -c 'set -a; . /etc/vitamine-cloud.env; set +a; \
   -m vitamine.scripts.manage_cloud llm-usage --days 30'
 ```
 
-Summarize credit, underlying cost, account debit, and balance for every opaque
-account ID with the same environment wrapper and
-`-m vitamine.scripts.manage_cloud premium-accounts`.
+Summarize the private at-cost usage ledger for every opaque account ID with the
+same environment wrapper and `-m vitamine.scripts.manage_cloud premium-accounts`.
 
-Token counts are operational measurements only. VitaMine does not enforce
-quotas from this table during the pilot.
+Token counts and costs are operational measurements only. They are not shown
+to users and do not represent a prepaid balance.
 
-Schema migration 8 adds the unencrypted central Premium Features Account
-ledger. Each existing and new account receives a $3.00 early-access credit.
-Usage events snapshot the applicable standard OpenAI token prices, the
-underlying API cost, and a 2× account debit. The initial pricing version is
+Schema migration 8 added the unencrypted central Premium Features Account
+ledger. Schema migration 12 retires promotional credits and normalizes the
+ledger to the underlying OpenAI cost with no markup. Usage events snapshot the
+applicable standard OpenAI token prices and underlying API cost. The initial pricing version is
 `openai-standard-2026-07-31`; its source is the official
 [OpenAI API pricing page](https://developers.openai.com/api/docs/pricing).
 Cached input is priced separately, while reasoning tokens are already included
@@ -508,20 +507,21 @@ remain visibly unpriced rather than receiving a guessed charge.
 These accounting tables are deliberately not application-encrypted: they
 contain opaque account/CV/job identifiers, model names, token counts, prices,
 and timestamps, but no prompts, CV text, model output, filename, or credential.
-The account library shows the user's current balance, rounded to two decimal
-places, in the signed-in header. Per-operation charges, the internal markup,
-and usage history are not exposed in the user interface. Negative balances do
-not prevent imports, enrichment, or other premium features during the pilot.
+Schema migration 12 also introduces VitaMine+ entitlements. Existing accounts
+receive a fresh 90-day trial during migration and new accounts receive 90 days
+from registration. After trial expiry, managed LLM operations, CV enrichment,
+custom Word templates, and detailed collaboration maps require VitaMine+.
+Annual access is currently €25 and can be granted with
+`-m vitamine.scripts.manage_cloud grant-plus MEMBER --days 365`.
 
-Schema migration 11 adds an append-only audit table for the trusted-beta
-PayPal top-up flow. Set `VITAMINE_PAYPAL_BETA_TOPUP_URL` to a complete HTTPS
-PayPal.Me payment link to enable the authenticated UI; leaving it empty keeps
-the feature hidden. The fixed $5 top-up is intentionally self-attested: after
-opening PayPal, the tester selects “I've paid” and receives credit immediately.
-VitaMine does not call PayPal or independently verify settlement. Each browser
-confirmation uses an idempotency key, so a retry cannot credit the same claim
-twice. The audit table labels the confirmation mode explicitly and stores only
-the opaque account ID, hashed claim key, amount, currency, and timestamp.
+Schema migration 11's former PayPal top-up tables remain only as historical
+schema. Migration 12 removes credit rows and the authenticated top-up endpoint
+returns HTTP 410.
+
+For entitlement testing, an operator can expose a developer-only Plus switch
+to exactly one account with `-m vitamine.scripts.manage_cloud
+enable-plus-dev-toggle MEMBER`. The switch is otherwise absent and its API
+returns 404; it overrides Plus only for the flagged member.
 
 ## Public profiles
 
