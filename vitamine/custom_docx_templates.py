@@ -25,6 +25,7 @@ from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from docx.oxml.table import CT_Row, CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table, _Row
@@ -1017,6 +1018,18 @@ def placeholder_unit_after(heading: Unit) -> Unit:
     return Unit(-1, "paragraph", element, heading.parent, [paragraph], [])
 
 
+def ensure_section_heading_spacing(heading: Unit | None) -> None:
+    """Add a modest gap when a source heading defines no preceding spacing."""
+
+    if heading is None or heading.kind != "paragraph":
+        return
+    paragraph = heading.paragraphs[0]
+    direct = paragraph.paragraph_format.space_before
+    inherited = paragraph.style.paragraph_format.space_before if paragraph.style else None
+    if direct is None and inherited is None:
+        paragraph.paragraph_format.space_before = Pt(6)
+
+
 def render_template(
     skeleton: bytes,
     blueprint: dict[str, Any],
@@ -1051,6 +1064,7 @@ def render_template(
                 heading = by_index[int(section["heading_unit_index"])]
             except (KeyError, TypeError, ValueError):
                 heading = None
+            ensure_section_heading_spacing(heading)
             body_units = [
                 by_index[index]
                 for raw_index in section.get("body_unit_indices") or []
@@ -1066,8 +1080,9 @@ def render_template(
                 for raw_index in section.get("discard_unit_indices") or []
                 if isinstance(raw_index, int) and (index := raw_index) in by_index
             ]
+            source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
             manual_only = section_key.startswith("__unmapped_") or section_key in MANUAL_ONLY_SECTION_KEYS
-            if manual_only:
+            if manual_only or not source_items:
                 placeholder_unit = target_units[0] if target_units else (
                     placeholder_unit_after(heading) if heading is not None else None
                 )
@@ -1082,8 +1097,7 @@ def render_template(
                 elif heading is not None:
                     remove_unit(heading)
                 continue
-            source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
-            if not source_items or not target_units:
+            if not target_units:
                 if heading is not None:
                     remove_unit(heading)
                 for unit in body_units:

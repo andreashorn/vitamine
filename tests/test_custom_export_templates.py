@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from docx import Document
-from docx.shared import Inches
+from docx.shared import Inches, Pt
 from fastapi.testclient import TestClient
 
 from vitamine.app import app
@@ -51,6 +51,7 @@ def document_bytes(*, biosketch: bool = False) -> bytes:
 def oxford_like_document_bytes() -> bytes:
     document = Document()
     document.sections[0].left_margin = Inches(0.57)
+    document.styles["Heading 1"].paragraph_format.space_before = None
     document.add_paragraph("LAURA SOURCE").runs[0].bold = True
     document.add_paragraph(
         "Department of Example Sciences, Source University, Example Road, Oxford, "
@@ -72,6 +73,13 @@ def oxford_like_document_bytes() -> bytes:
     document.add_heading("TEACHING EXPERIENCE", level=1)
     document.add_heading("Mentor/Supervisor, University of Oxford (2022-2025)", level=2)
     document.add_paragraph("A source-only teaching duty.", style="List Bullet")
+    document.add_heading("ADDITIONAL RELEVANT EXPERIENCE", level=1)
+    document.add_heading("Assistant Information Officer (2015-2016)", level=2)
+    document.add_paragraph("A source-only professional duty.", style="List Bullet")
+    document.add_heading("MEMBERSHIP OF PROFESSIONAL SOCIETIES", level=1)
+    document.add_paragraph("Source Society")
+    document.add_heading("REFEREES", level=1)
+    document.add_paragraph("Prof Source Referee")
     document.add_heading("PUBLICATIONS", level=1)
     document.add_paragraph("A source-only publication")
     document.add_heading("CONFERENCE PAPERS", level=2)
@@ -257,7 +265,10 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
         self.assertIn("research_experience", blueprint["mapped_sections"])
         self.assertIn("research_skills", blueprint["mapped_sections"])
         self.assertIn("conference_papers", blueprint["mapped_sections"])
-        self.assertEqual(blueprint["manual_sections"], ["GENERAL SKILLS & COURSES", "CONFERENCE PAPERS"])
+        self.assertEqual(
+            blueprint["manual_sections"],
+            ["GENERAL SKILLS & COURSES", "REFEREES", "CONFERENCE PAPERS"],
+        )
 
         with tempfile.TemporaryDirectory() as folder:
             canonical_path = Path(folder) / "canonical.docx"
@@ -277,12 +288,22 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
             self.assertIn("Current Research Prize", rendered_text)
             self.assertNotIn("current invited talk", rendered_text)
             self.assertIn("GENERAL SKILLS & COURSES", rendered_text)
+            self.assertIn("RELEVANT RESEARCH SKILLS", rendered_text)
+            self.assertIn("TEACHING EXPERIENCE", rendered_text)
+            self.assertIn("ADDITIONAL RELEVANT EXPERIENCE", rendered_text)
+            self.assertIn("MEMBERSHIP OF PROFESSIONAL SOCIETIES", rendered_text)
+            self.assertIn("REFEREES", rendered_text)
             self.assertIn("CONFERENCE PAPERS", rendered_text)
-            self.assertEqual(rendered_text.count("[Please fill this section manually.]"), 2)
+            self.assertEqual(rendered_text.count("[Please fill this section manually.]"), 7)
             self.assertNotIn("source-only", rendered_text)
             publication_paragraphs = [text for text in paragraphs if "current paper" in text]
             self.assertEqual(publication_paragraphs, ["First current paper", "Second current paper"])
             self.assertLess(max(map(len, publication_paragraphs)), 100)
+            additional_skills = next(
+                paragraph for paragraph in rendered.paragraphs
+                if paragraph.text.strip() == "GENERAL SKILLS & COURSES"
+            )
+            self.assertEqual(additional_skills.paragraph_format.space_before, Pt(6))
 
             with zipfile.ZipFile(output) as archive:
                 self.assertFalse(any(name.startswith("word/header") for name in archive.namelist()))
