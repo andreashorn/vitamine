@@ -21,12 +21,20 @@ feature or deployment batch:
 3. Run the relevant tests.
 4. Stage explicit paths, create a concise descriptive commit, and push it to
    the configured GitHub remote.
+5. For interactive changes that affect the hosted VitaMine application, deploy
+   the pushed commit to production by default and complete the verification in
+   `docs/strato-deployment.md`. Do not leave a finished hosted change merely
+   committed or pushed unless the user explicitly requests a local-only or
+   no-deployment handoff. Documentation and development-only files with no
+   production artifact do not require a service deployment.
 
 Prefer small cohesive commits over one commit per incidental edit. Never commit
 `.env` files, API keys, cloud peppers, invitation codes, cookies, private
 `.vitamine` files, SQLite journals, local build output, or user data. Ask before
 publishing if ownership or scope is genuinely ambiguous; otherwise carry the
 verified Git checkpoint through without requiring a separate reminder.
+Treat commit, push, and (when applicable) deployment as part of completing the
+requested change, rather than as optional follow-up work.
 
 ## Automated development queue
 
