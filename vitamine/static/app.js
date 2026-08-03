@@ -2614,6 +2614,9 @@ function exportFormatCard(format) {
   const analysis = format.custom_template && format.template_analysis
     ? `<span class="templateAnalysisNote">${format.template_analysis.page_count ? `${format.template_analysis.page_count} source page${format.template_analysis.page_count === 1 ? "" : "s"} · ` : ""}${format.template_analysis.mapped_sections?.length || 0} mapped sections${format.template_analysis.model ? ` · analyzed with ${escapeHtml(format.template_analysis.model)}` : ""}</span>`
     : "";
+  const qualityMark = quality.key === "ready"
+    ? '<span class="qualityReadyIcon" aria-label="Ready" title="Ready">✓</span>'
+    : `<span class="qualityBadge quality-${escapeHtml(quality.key || "preview")}" title="${escapeHtml(quality.description || "")}">${escapeHtml(quality.label || "")}</span>`;
   return `<article class="formatCard ${format.installed ? "installed" : ""}">
     <div class="formatPreview">
       ${preview}
@@ -2622,7 +2625,7 @@ function exportFormatCard(format) {
       <div class="formatTitleRow">
         <div>
           <h4>${escapeHtml(format.name)}</h4>
-          <span class="qualityBadge quality-${escapeHtml(quality.key || "preview")}" title="${escapeHtml(quality.description || "")}">${escapeHtml(quality.label || "")}</span>
+          ${qualityMark}
         </div>
         ${format.preinstalled ? '<span class="defaultBadge">Included</span>' : ""}
       </div>

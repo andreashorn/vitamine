@@ -1,0 +1,296 @@
+{
+  "schema_version": 2,
+  "content_profile": "short",
+  "classification_reason": "curated multi-page academic CV structure",
+  "analysis_method": "deterministic",
+  "analysis_model": "",
+  "page_count": 5,
+  "body_units": 93,
+  "table_rows": 37,
+  "mapped_sections": [
+    "qualifications_and_career",
+    "supplementary_career_information",
+    "research_system_activities",
+    "mentoring",
+    "dfg_scientific_results",
+    "dfg_category_a",
+    "dfg_category_b",
+    "honors",
+    "dfg_data_protection"
+  ],
+  "manual_sections": [
+    "Supplementary Career Information",
+    "Category B – Any other form of published results"
+  ],
+  "heading_mappings": {
+    "qualifications and career": "qualifications_and_career",
+    "supplementary career information": "supplementary_career_information",
+    "activities in the research system": "research_system_activities",
+    "supervision of researchers in early career phases selection": "mentoring",
+    "scientific results": "dfg_scientific_results",
+    "category a articles in peer-reviewed journals contributions to peer-reviewed conferences or to anthology volumes and book publications": "dfg_category_a",
+    "category b any other form of published results": "dfg_category_b",
+    "academic distinctions": "honors",
+    "data protection and consent to the processing of optional data": "dfg_data_protection"
+  },
+  "identity_slots": [
+    {
+      "unit_index": 2,
+      "role": "degrees",
+      "cell_index": 1
+    },
+    {
+      "unit_index": 3,
+      "role": "first_name",
+      "cell_index": 1
+    },
+    {
+      "unit_index": 4,
+      "role": "last_name",
+      "cell_index": 1
+    },
+    {
+      "unit_index": 5,
+      "role": "position_title",
+      "cell_index": 1
+    },
+    {
+      "unit_index": 6,
+      "role": "institution",
+      "cell_index": 1
+    },
+    {
+      "unit_index": 7,
+      "role": "orcid_id",
+      "cell_index": 1
+    }
+  ],
+  "sections": [
+    {
+      "section_key": "qualifications_and_career",
+      "source_heading": "Qualifications and Career",
+      "heading_unit_index": 9,
+      "body_unit_indices": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
+      "record_unit_indices": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "supplementary_career_information",
+      "source_heading": "Supplementary Career Information",
+      "heading_unit_index": 22,
+      "body_unit_indices": [
+        23,
+        24
+      ],
+      "record_unit_indices": [
+        23
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "research_system_activities",
+      "source_heading": "Activities in the Research System",
+      "heading_unit_index": 25,
+      "body_unit_indices": [
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35
+      ],
+      "record_unit_indices": [
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "mentoring",
+      "source_heading": "Supervision of Researchers in Early Career Phases (selection)",
+      "heading_unit_index": 36,
+      "body_unit_indices": [
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46
+      ],
+      "record_unit_indices": [
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "dfg_scientific_results",
+      "source_heading": "Scientific Results",
+      "heading_unit_index": 47,
+      "body_unit_indices": [
+        48
+      ],
+      "record_unit_indices": [],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "dfg_category_a",
+      "source_heading": "Category A – Articles in peer-reviewed journals, contributions to peer-reviewed conferences or to anthology volumes, and book publications",
+      "heading_unit_index": 49,
+      "body_unit_indices": [
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60
+      ],
+      "record_unit_indices": [
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "dfg_category_b",
+      "source_heading": "Category B – Any other form of published results",
+      "heading_unit_index": 61,
+      "body_unit_indices": [
+        62,
+        63,
+        64,
+        65,
+        66
+      ],
+      "record_unit_indices": [
+        62,
+        63,
+        64,
+        65
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "honors",
+      "source_heading": "Academic Distinctions",
+      "heading_unit_index": 67,
+      "body_unit_indices": [
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83
+      ],
+      "record_unit_indices": [
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81
+      ],
+      "discard_unit_indices": []
+    },
+    {
+      "section_key": "dfg_data_protection",
+      "source_heading": "Data protection and consent to the processing of optional data",
+      "heading_unit_index": 84,
+      "body_unit_indices": [
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92
+      ],
+      "record_unit_indices": [
+        86,
+        88,
+        90,
+        92
+      ],
+      "discard_unit_indices": []
+    }
+  ],
+  "person_fields": [],
+  "llm_warning": ""
+}

@@ -2227,6 +2227,18 @@ label.invalid input {
   line-height: 1.2;
 }
 
+.qualityReadyIcon {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: #22865c;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .defaultBadge {
   flex: 0 0 auto;
   border-color: #c8d1db;
@@ -2262,6 +2274,12 @@ label.invalid input {
   border-color: #bfc8d4;
   background: #f3f5f8;
   color: #4c5969;
+}
+
+.quality-working_draft {
+  border-color: #9db5cf;
+  background: #edf4fb;
+  color: #24527e;
 }
 
 .formatCardBody > p {

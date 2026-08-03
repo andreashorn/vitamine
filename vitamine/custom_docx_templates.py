@@ -52,6 +52,7 @@ PERSON_FIELDS = (
     "place_of_birth",
     "era_commons",
     "orcid_id",
+    "own_institution_name",
 )
 
 SECTION_ALIASES: dict[str, tuple[str, ...]] = {
@@ -145,6 +146,7 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     "supplementary_career_information": ("supplementary career information",),
     "dfg_data_protection": ("data protection and consent to the processing of optional data",),
     "dfg_scientific_results": ("scientific results",),
+    "dfg_other_information": ("other information",),
     "personal_statement": (
         "personal statement", "summary statement", "research profile", "profile", "profil",
     ),
@@ -184,6 +186,7 @@ SOURCE_SECTION_FALLBACKS: dict[str, tuple[str, ...]] = {
 MANUAL_SECTION_PLACEHOLDER = "[Please fill this section manually.]"
 MANUAL_ONLY_SECTION_KEYS = {
     "conference_papers", "dfg_category_b", "supplementary_career_information",
+    "dfg_other_information",
 }
 PRESERVED_SECTION_KEYS = {"dfg_data_protection", "dfg_scientific_results"}
 
@@ -525,6 +528,24 @@ def masthead_identity_slots(units: list[Unit], mappings: dict[str, str]) -> list
     ]
     if not candidates:
         return []
+    dfg_roles = {
+        "title": "degrees",
+        "first name": "first_name",
+        "name": "last_name",
+        "last name": "last_name",
+        "current position": "position_title",
+        "current institutions/sites country": "institution",
+        "identifiers/orcid": "orcid_id",
+    }
+    dfg_slots: list[dict[str, Any]] = []
+    for unit in candidates:
+        if unit.kind != "row" or len(unit.values) < 2:
+            continue
+        role = dfg_roles.get(normalized_heading(unit.values[0]))
+        if role:
+            dfg_slots.append({"unit_index": unit.index, "role": role, "cell_index": 1})
+    if len(dfg_slots) >= 3:
+        return dfg_slots
     slots: list[dict[str, Any]] = []
     name_assigned = False
     for unit in candidates:
@@ -683,6 +704,18 @@ def set_unit_values(unit: Unit, values: list[str]) -> None:
                 set_paragraph_text(paragraph, "")
 
 
+def set_identity_slot_value(unit: Unit, slot: dict[str, Any], value: str) -> None:
+    cell_index = slot.get("cell_index")
+    if unit.kind == "row" and isinstance(cell_index, int) and 0 <= cell_index < len(unit.cell_paragraphs):
+        paragraphs = unit.cell_paragraphs[cell_index]
+        if paragraphs:
+            set_paragraph_text(paragraphs[0], value)
+            for paragraph in paragraphs[1:]:
+                set_paragraph_text(paragraph, "")
+        return
+    set_unit_values(unit, [value])
+
+
 def person_values(con: sqlite3.Connection) -> dict[str, str]:
     row = con.execute("SELECT * FROM person WHERE id=1").fetchone()
     if row is None:
@@ -742,7 +775,7 @@ def skeletonize_semantic_blueprint(
     for slot in identity_slots:
         unit = by_index.get(int(slot["unit_index"]))
         if unit is not None:
-            set_unit_values(unit, [f"{{{{VITAMINE_IDENTITY_{str(slot['role']).upper()}}}}}"])
+            set_identity_slot_value(unit, slot, f"{{{{VITAMINE_IDENTITY_{str(slot['role']).upper()}}}}}")
     for section_number, section in enumerate(sections, 1):
         if str(section.get("section_key") or "") in PRESERVED_SECTION_KEYS:
             continue
@@ -804,6 +837,8 @@ def clean_relationships(data: bytes) -> bytes:
             or "custom-properties" in rel_type
             or "comments" in target
             or "comments" in rel_type
+            or "thumbnail" in target
+            or "thumbnail" in rel_type
         ):
             root.remove(relationship)
     return etree.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -816,7 +851,7 @@ def clean_content_types(data: bytes) -> bytes:
         return data
     for node in list(root):
         part = node.attrib.get("PartName", "").casefold()
-        if "customxml" in part or "custom.xml" in part or "comments" in part:
+        if "customxml" in part or "custom.xml" in part or "comments" in part or "thumbnail" in part:
             root.remove(node)
     return etree.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -828,7 +863,12 @@ def clean_docx_package(data: bytes) -> bytes:
         for info in source.infolist():
             name = info.filename
             lowered = name.casefold()
-            if lowered.startswith("customxml/") or lowered == "docprops/custom.xml" or "comments" in lowered:
+            if (
+                lowered.startswith("customxml/")
+                or lowered == "docprops/custom.xml"
+                or lowered.startswith("docprops/thumbnail.")
+                or "comments" in lowered
+            ):
                 continue
             content = source.read(name)
             if name.endswith(".rels"):
@@ -1011,6 +1051,16 @@ def identity_value(role: str, values: dict[str, str]) -> str:
         address = values.get("office_address") or values.get("home_address") or ""
         pieces = [clean_text(address), values.get("work_phone", ""), values.get("work_email", "")]
         return ", ".join(piece for piece in pieces if piece)
+    if role == "degrees":
+        return values.get("degrees", "")
+    if role in {"first_name", "last_name"}:
+        name = values.get("full_name") or values.get("display_name", "")
+        pieces = name.split()
+        return " ".join(pieces[:-1]) if role == "first_name" else (pieces[-1] if pieces else "")
+    if role == "institution":
+        return values.get("own_institution_name") or values.get("office_address", "")
+    if role == "orcid_id":
+        return values.get("orcid_id", "")
     return ""
 
 
@@ -1081,7 +1131,7 @@ def render_template(
                 unit = by_index[int(slot["unit_index"])]
             except (KeyError, TypeError, ValueError):
                 continue
-            set_unit_values(unit, [identity_value(str(slot.get("role") or ""), values)])
+            set_identity_slot_value(unit, slot, identity_value(str(slot.get("role") or ""), values))
 
         for section in blueprint.get("sections") or []:
             section_key = str(section.get("section_key") or "")

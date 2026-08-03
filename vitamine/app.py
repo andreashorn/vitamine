@@ -198,6 +198,7 @@ LONG_CV_PUBLICATION_CATEGORIES = {
 
 DEFAULT_LONG_CV_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
 EXPORT_FORMAT_CATALOG = STATIC / "export-formats.json"
+BUNDLED_EXPORT_TEMPLATES = STATIC / "export-templates"
 EXPORT_CONTENT_PROFILES = {
     "long": {
         "label": "Long CV",
@@ -6436,6 +6437,59 @@ def build_custom_export_template(template_id: str, lang: str = "en") -> JSONResp
     return JSONResponse(payload)
 
 
+def build_bundled_export_template(item: dict[str, Any], lang: str = "en") -> JSONResponse:
+    if lang not in (item.get("languages") or ["en", "de"]):
+        raise HTTPException(status_code=422, detail="This working template is currently available in English only.")
+    template = item.get("template") if isinstance(item.get("template"), dict) else {}
+    source_path = BUNDLED_EXPORT_TEMPLATES / Path(str(template.get("docx") or "")).name
+    blueprint_path = BUNDLED_EXPORT_TEMPLATES / Path(str(template.get("blueprint") or "")).name
+    try:
+        source_docx = source_path.read_bytes()
+        blueprint = json.loads(blueprint_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return JSONResponse({"ok": False, "stderr": "The bundled Word template is unavailable."}, status_code=500)
+    builders = {
+        "one_page": build_ultrashort_tabular_action,
+        "short": build_short_action,
+        "long": build_long_action,
+        "biosketch": build_biosketch_action,
+    }
+    builder = builders[str(item["content_profile"])]
+    canonical_response = builder(lang)
+    if canonical_response.status_code >= 400:
+        return canonical_response
+    canonical_payload = json.loads(canonical_response.body)
+    canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
+    output_path = OUTPUT / f"dfg_cv_publication_list_{lang}.docx"
+    try:
+        with connect() as con:
+            render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+            quality_audit = {"status": "not_available", "applied_count": 0, "review_count": 0, "issues": []}
+            if hosted_vitamine_plus_active():
+                settings = cv_import_settings(con, include_secret=True)
+                quality_audit = run_export_quality_audit(con, output_path, llm_json, settings)
+        if quality_audit.get("applied_count"):
+            rebuilt = builder(lang)
+            if rebuilt.status_code >= 400:
+                return rebuilt
+            canonical_payload = json.loads(rebuilt.body)
+            canonical_path = built_docx_path(str(canonical_payload.get("docx_path") or ""))
+            with connect() as con:
+                render_report = render_custom_docx_template(source_docx, blueprint, canonical_path, output_path, con)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return JSONResponse({"ok": False, "stderr": str(exc)[:1000]}, status_code=500)
+    return JSONResponse(build_response(
+        f"docx: output/{output_ref(output_path)}",
+        str(int(time.time())),
+        {
+            "language": lang,
+            "template_id": str(item["id"]),
+            "template_render": render_report,
+            "quality_audit": quality_audit,
+        },
+    ))
+
+
 @app.post("/api/actions/export/{format_id}")
 def build_installed_export_format(format_id: str, lang: str = "en") -> JSONResponse:
     if format_id.startswith("custom."):
@@ -6454,6 +6508,8 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
     }
     if not exporter:
         raise HTTPException(status_code=422, detail="This local format is a preview package; its Word exporter is not implemented yet.")
+    if exporter == "bundled_docx":
+        return build_bundled_export_template(item, lang)
     response = builders[content_profile](lang)
     if response.status_code >= 400:
         return response

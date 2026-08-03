@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -93,9 +94,13 @@ def dfg_like_document_bytes() -> bytes:
     document = Document()
     document.add_paragraph("Curriculum Vitae")
     document.add_paragraph("Personal Data").runs[0].bold = True
-    personal = document.add_table(rows=1, cols=2)
-    personal.cell(0, 0).text = "Name"
-    personal.cell(0, 1).text = "Jane Example"
+    personal = document.add_table(rows=3, cols=2)
+    personal.cell(0, 0).text = "First name"
+    personal.cell(0, 1).text = "Jane"
+    personal.cell(1, 0).text = "Name"
+    personal.cell(1, 1).text = "Example"
+    personal.cell(2, 0).text = "Current position"
+    personal.cell(2, 1).text = "Professor"
     document.add_paragraph("Qualifications and Career").runs[0].bold = True
     career = document.add_table(rows=2, cols=2)
     career.cell(0, 0).text = "Stages"
@@ -191,8 +196,48 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
         self.assertIn("Supplementary Career Information", blueprint["manual_sections"])
         self.assertIn("Category B – Any other form of published results", blueprint["manual_sections"])
         skeleton_document = Document(io.BytesIO(skeleton))
-        skeleton_text = "\n".join(paragraph.text for paragraph in skeleton_document.paragraphs)
+        skeleton_text = "\n".join(
+            [paragraph.text for paragraph in skeleton_document.paragraphs]
+            + [cell.text for table in skeleton_document.tables for row in table.rows for cell in row.cells]
+        )
         self.assertIn("Required DFG consent wording remains unchanged.", skeleton_text)
+        self.assertNotIn("Jane Example", skeleton_text)
+        self.assertIn("First name", skeleton_text)
+        self.assertIn("{{VITAMINE_IDENTITY_FIRST_NAME}}", skeleton_text)
+
+    def test_bundled_dfg_asset_is_private_and_renderable(self):
+        root = Path(__file__).resolve().parents[1]
+        asset_dir = root / "vitamine" / "static" / "export-templates"
+        skeleton = (asset_dir / "dfg-research-cv.docx").read_bytes()
+        blueprint = json.loads((asset_dir / "dfg-research-cv.json").read_text(encoding="utf-8"))
+        with zipfile.ZipFile(io.BytesIO(skeleton)) as archive:
+            self.assertFalse(any("thumbnail" in name.casefold() for name in archive.namelist()))
+        skeleton_document = Document(io.BytesIO(skeleton))
+        skeleton_text = "\n".join(
+            [paragraph.text for paragraph in skeleton_document.paragraphs]
+            + [cell.text for table in skeleton_document.tables for row in table.rows for cell in row.cells]
+        )
+        for private_value in (
+            "Andreas", "Horn", "Cologne", "Charité", "Harvard", "Thiemann",
+            "0000-0002-0695-6025", "Nature Communications",
+        ):
+            self.assertNotIn(private_value, skeleton_text)
+
+        with tempfile.TemporaryDirectory() as folder:
+            canonical_path = Path(folder) / "canonical.docx"
+            semantic_canonical(canonical_path)
+            output = Path(folder) / "dfg.docx"
+            report = render_template(skeleton, blueprint, canonical_path, output, memory_database())
+            rendered = Document(output)
+            rendered_text = "\n".join(
+                [paragraph.text for paragraph in rendered.paragraphs]
+                + [cell.text for table in rendered.tables for row in table.rows for cell in row.cells]
+            )
+        self.assertIn("Jane", rendered_text)
+        self.assertIn("Example", rendered_text)
+        self.assertIn("First current paper", rendered_text)
+        self.assertIn("If you provide voluntary information", rendered_text)
+        self.assertIn("dfg_category_a", report["rendered_sections"])
 
     def test_template_analysis_uses_its_task_model_without_changing_the_default(self):
         observed = {}
@@ -482,6 +527,38 @@ class CustomDocxTemplateApiTests(unittest.TestCase):
         script = self.client.get("/static/app.js")
         self.assertIn("async function importCustomExportTemplate(file)", script.text)
         self.assertIn("renameCustomExportTemplate", script.text)
+
+    def test_store_dfg_format_installs_and_exports_a_word_document(self):
+        preferences = {}
+
+        def read_preferences():
+            return dict(preferences)
+
+        def write_preferences(payload):
+            preferences.clear()
+            preferences.update(payload)
+
+        with (
+            patch("vitamine.app.read_preferences", side_effect=read_preferences),
+            patch("vitamine.app.write_preferences", side_effect=write_preferences),
+            patch("vitamine.app.hosted_vitamine_plus_active", return_value=False),
+        ):
+            installed = self.client.post("/api/export-formats/vitamine.dfg-research-cv/install")
+            self.assertEqual(installed.status_code, 200, installed.text)
+            exported = self.client.post("/api/actions/export/vitamine.dfg-research-cv?lang=en")
+
+        self.assertEqual(exported.status_code, 200, exported.text)
+        export_path = self.output / Path(exported.json()["docx_path"]).name
+        self.assertTrue(export_path.exists())
+        document = Document(export_path)
+        export_text = "\n".join(
+            [paragraph.text for paragraph in document.paragraphs]
+            + [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+        )
+        self.assertIn("Jane", export_text)
+        self.assertIn("Example", export_text)
+        self.assertIn("An updated paper", export_text)
+        self.assertIn("Data protection and consent", export_text)
 
     def test_stale_remove_action_deletes_a_custom_template(self):
         created = self.client.post(
