@@ -713,6 +713,17 @@ def set_unit_values(unit: Unit, values: list[str]) -> None:
                 set_paragraph_text(paragraph, "")
 
 
+def clear_direct_emphasis(unit: Unit) -> None:
+    """Keep a template slot's typography while removing accidental bold/italic."""
+
+    for paragraph in unit.paragraphs:
+        for run in paragraph.runs:
+            properties = run._r.get_or_add_rPr()
+            for tag in ("w:b", "w:bCs", "w:i", "w:iCs"):
+                for child in properties.findall(qn(tag)):
+                    properties.remove(child)
+
+
 def set_identity_slot_value(unit: Unit, slot: dict[str, Any], value: str) -> None:
     cell_index = slot.get("cell_index")
     if unit.kind == "row" and isinstance(cell_index, int) and 0 <= cell_index < len(unit.cell_paragraphs):
@@ -1117,6 +1128,42 @@ def _honor_values(row: sqlite3.Row) -> list[str]:
     return [_entry_period(row), title, organization, description]
 
 
+def _honor_identity(values: list[str]) -> str:
+    """Match sparse and structured imports of the same dated distinction."""
+
+    period, title, organization = (values + ["", "", ""])[:3]
+    year = (re.search(r"\d{4}", period) or re.search(r"\d{4}", title))
+    combined = normalized_heading(" ".join(value for value in (title, organization) if value))
+    return f"{year.group() if year else normalized_heading(period)}:{combined}"
+
+
+def _honor_quality(values: list[str]) -> tuple[int, int, int]:
+    """Prefer a parsed row over a title that merely concatenates all columns."""
+
+    return (sum(bool(value) for value in values), int(bool(values[2])), int(bool(values[3])))
+
+
+PREPRINT_VENUE_MARKERS = (
+    "arxiv", "biorxiv", "medrxiv", "chemrxiv", "psyarxiv", "socarxiv",
+    "research square", "ssrn", "osf preprints", "preprint",
+)
+
+
+def _eligible_dfg_category_b(row: sqlite3.Row, peer_reviewed_titles: set[str]) -> bool:
+    category = clean_text(row["category"]).casefold()
+    if category in {"patent", "patents", "books_chapters"}:
+        return True
+    title_key = normalized_heading(clean_text(row["title"]))
+    if title_key and title_key in peer_reviewed_titles:
+        return False
+    venue = normalized_heading(clean_text(row["venue"]))
+    raw = normalized_heading(clean_text(row["raw_citation"]))
+    # A record imported as a preprint but already carrying a journal venue is
+    # stale publication metadata. Fail closed for the legally constrained DFG
+    # Category B instead of presenting it as non-peer-reviewed output.
+    return not venue or any(marker in venue or marker in raw for marker in PREPRINT_VENUE_MARKERS)
+
+
 def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
     """Return DFG-ready records without relying on generic short-CV flags."""
 
@@ -1179,6 +1226,13 @@ def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[
 
     person = con.execute("SELECT full_name, display_name FROM person WHERE id=1").fetchone()
     terms = researcher_name_terms(person)
+    peer_reviewed_titles = {
+        normalized_heading(clean_text(row["title"]))
+        for row in con.execute(
+            "SELECT title FROM publications WHERE COALESCE(suppress_display, 0)=0 AND category='peer_reviewed'"
+        ).fetchall()
+        if clean_text(row["title"])
+    }
     category_b_rows = con.execute(
         """
         SELECT * FROM publications
@@ -1187,6 +1241,8 @@ def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[
         """
     ).fetchall()
     for row in category_b_rows:
+        if not _eligible_dfg_category_b(row, peer_reviewed_titles):
+            continue
         authorship = researcher_authorship(row["authors"], terms)
         score = fallback_score(row, authorship)
         if row["category"] in {"patents", "patent"}:
@@ -1220,6 +1276,7 @@ def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[
             })
 
     honor_candidates: list[dict[str, Any]] = []
+    honor_indices: dict[str, int] = {}
     for row in con.execute("SELECT * FROM cv_entries WHERE section_key='honors' ORDER BY id").fetchall():
         values = _honor_values(row)
         if any(values):
@@ -1228,20 +1285,12 @@ def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[
             candidate = {
                 "id": f"honor:{row['id']}", "values": values, "score": year_score,
             }
-            normalized_title = normalized_heading(values[1])
-            duplicate_index = next((
-                index for index, existing in enumerate(honor_candidates)
-                if existing["values"][0] == values[0]
-                and normalized_title
-                and normalized_heading(existing["values"][1])
-                and (
-                    normalized_title.startswith(normalized_heading(existing["values"][1]))
-                    or normalized_heading(existing["values"][1]).startswith(normalized_title)
-                )
-            ), None)
+            identity = _honor_identity(values)
+            duplicate_index = honor_indices.get(identity)
             if duplicate_index is None:
+                honor_indices[identity] = len(honor_candidates)
                 honor_candidates.append(candidate)
-            elif sum(bool(value) for value in values) > sum(bool(value) for value in honor_candidates[duplicate_index]["values"]):
+            elif _honor_quality(values) > _honor_quality(honor_candidates[duplicate_index]["values"]):
                 honor_candidates[duplicate_index] = candidate
     candidates["honors"].extend(honor_candidates)
     return candidates
@@ -1482,6 +1531,8 @@ def render_template(
             for index, unit in enumerate(target_units):
                 if index < len(source_items):
                     set_unit_values(unit, source_items[index])
+                    if section_key in {"dfg_category_a", "dfg_category_b"}:
+                        clear_direct_emphasis(unit)
                     rendered_items += 1
                 else:
                     remove_unit(unit)

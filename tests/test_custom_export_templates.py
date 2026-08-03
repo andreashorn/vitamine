@@ -241,6 +241,31 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
         self.assertIn("If you provide voluntary information", rendered_text)
         self.assertIn("dfg_category_a", report["rendered_sections"])
 
+    def test_dfg_render_keeps_qualifications_in_table_and_normalizes_citations(self):
+        root = Path(__file__).resolve().parents[1]
+        asset_dir = root / "vitamine" / "static" / "export-templates"
+        skeleton = (asset_dir / "dfg-research-cv.docx").read_bytes()
+        blueprint = json.loads((asset_dir / "dfg-research-cv.json").read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as folder:
+            canonical_path = Path(folder) / "canonical.docx"
+            semantic_canonical(canonical_path)
+            output = Path(folder) / "dfg.docx"
+            render_template(
+                skeleton, blueprint, canonical_path, output, memory_database(),
+                section_item_overrides={
+                    "qualifications_and_career": [[str(2010 + index), f"Position {index}"] for index in range(9)],
+                    "dfg_category_a": [["Category A citation"]],
+                    "dfg_category_b": [["Category B citation one"], ["Category B citation two"]],
+                },
+            )
+            rendered = Document(output)
+        body_paragraphs = [paragraph.text for paragraph in rendered.paragraphs]
+        self.assertFalse(any("Position 8" in text for text in body_paragraphs))
+        self.assertTrue(any("Position 8" in cell.text for table in rendered.tables for row in table.rows for cell in row.cells))
+        for paragraph in rendered.paragraphs:
+            if paragraph.text.startswith(("Category A citation", "Category B citation")):
+                self.assertFalse(any(run.bold or run.italic for run in paragraph.runs))
+
     def test_dfg_page_selector_uses_database_sections_and_llm_choices(self):
         with tempfile.TemporaryDirectory() as folder:
             database = Path(folder) / "selection.vitamine"
@@ -296,6 +321,46 @@ class CustomDocxTemplateUnitTests(unittest.TestCase):
         self.assertIn("Young Scientist Award", selected["mentoring"][0][1])
         self.assertIn("Current Research Book", selected["dfg_category_b"][0][0])
         self.assertEqual(selected["honors"][0], ["2026", "Current Prize", "Prize Foundation", "Research distinction"])
+
+    def test_dfg_selector_excludes_published_preprint_and_deduplicates_honors(self):
+        with tempfile.TemporaryDirectory() as folder:
+            database = Path(folder) / "selection.vitamine"
+            create_blank_database(database)
+            with sqlite3.connect(database) as con:
+                con.row_factory = sqlite3.Row
+                document_id = con.execute("SELECT id FROM documents LIMIT 1").fetchone()[0]
+                shared_title = "7 Tesla MRI of the ex vivo human brain at 100 micron resolution"
+                con.execute(
+                    "INSERT INTO publications (document_id, category, authors, title, venue, year, doi, raw_citation) "
+                    "VALUES (?, 'preprints', 'Example A', ?, 'Scientific Data', '2019', '10.1101/649822', ?)",
+                    (document_id, shared_title, shared_title),
+                )
+                con.execute(
+                    "INSERT INTO publications (document_id, category, authors, title, venue, year, doi, raw_citation) "
+                    "VALUES (?, 'peer_reviewed', 'Example A', ?, 'Scientific Data', '2019', '10.1038/example', ?)",
+                    (document_id, shared_title, shared_title),
+                )
+                con.execute(
+                    "INSERT INTO publications (document_id, category, authors, title, venue, year, doi, raw_citation) "
+                    "VALUES (?, 'preprints', 'Example B', 'A real preprint', 'bioRxiv', '2026', '10.1101/example', 'A real preprint')",
+                    (document_id,),
+                )
+                con.execute(
+                    "INSERT INTO cv_entries (document_id, section_key, start_date, title, raw_text) "
+                    "VALUES (?, 'honors', '2022', 'Heinz-Maier-Leibnitz Prize, German Research Foundation', 'duplicate')",
+                    (document_id,),
+                )
+                con.execute(
+                    "INSERT INTO cv_entries (document_id, section_key, start_date, title, organization, description, raw_text) "
+                    "VALUES (?, 'honors', '2022', 'Heinz-Maier-Leibnitz Prize', 'German Research Foundation', 'Early Career Recognition', 'structured')",
+                    (document_id,),
+                )
+                selected, _report = select_dfg_page_limited_items(con)
+        category_b_text = "\n".join(value for item in selected["dfg_category_b"] for value in item)
+        self.assertIn("A real preprint", category_b_text)
+        self.assertNotIn("7 Tesla MRI", category_b_text)
+        matching_honors = [item for item in selected["honors"] if "Heinz-Maier-Leibnitz" in " ".join(item)]
+        self.assertEqual(matching_honors, [["2022", "Heinz-Maier-Leibnitz Prize", "German Research Foundation", "Early Career Recognition"]])
 
     def test_template_analysis_uses_its_task_model_without_changing_the_default(self):
         observed = {}
