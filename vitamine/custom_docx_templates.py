@@ -25,6 +25,7 @@ from docx.document import Document as DocumentObject
 from docx.oxml import OxmlElement
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from docx.oxml.table import CT_Row, CT_Tbl
 from docx.oxml.text.paragraph import CT_P
 from docx.table import Table, _Row
@@ -32,6 +33,7 @@ from docx.text.paragraph import Paragraph
 from lxml import etree
 
 from .llm_routing import settings_for_llm_task
+from .scripts.export_publication_selection import fallback_score, researcher_authorship, researcher_name_terms
 
 
 MAX_TEMPLATE_BYTES = 20 * 1024 * 1024
@@ -51,9 +53,12 @@ PERSON_FIELDS = (
     "place_of_birth",
     "era_commons",
     "orcid_id",
+    "own_institution_name",
 )
 
 SECTION_ALIASES: dict[str, tuple[str, ...]] = {
+    "qualifications_and_career": ("qualifications and career",),
+    "research_system_activities": ("activities in the research system",),
     "research_experience": (
         "research experience", "research employment", "research positions",
         "scientific experience", "wissenschaftliche erfahrung",
@@ -100,7 +105,7 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "honors": (
         "honors", "honours", "honors and prizes", "honors and awards", "awards",
-        "awards and honors", "selected honors", "distinctions", "auszeichnungen",
+        "awards and honors", "selected honors", "distinctions", "academic distinctions", "auszeichnungen",
         "ausgewählte auszeichnungen", "auszeichnungen und preise",
     ),
     "funding": (
@@ -113,6 +118,7 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
     ),
     "mentoring": (
         "mentoring", "supervision", "research supervisory and training responsibilities",
+        "supervision of researchers in early career phases selection",
         "trainees", "nachwuchsförderung", "betreuung und ausbildung",
     ),
     "invited_presentations": (
@@ -134,6 +140,14 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
         "bibliography", "scientific output", "works", "publikationen", "ausgewählte publikationen",
         "veröffentlichungen",
     ),
+    "dfg_category_a": (
+        "category a articles in peer-reviewed journals contributions to peer-reviewed conferences or to anthology volumes and book publications",
+    ),
+    "dfg_category_b": ("category b any other form of published results",),
+    "supplementary_career_information": ("supplementary career information",),
+    "dfg_data_protection": ("data protection and consent to the processing of optional data",),
+    "dfg_scientific_results": ("scientific results",),
+    "dfg_other_information": ("other information",),
     "personal_statement": (
         "personal statement", "summary statement", "research profile", "profile", "profil",
     ),
@@ -151,6 +165,15 @@ SECTION_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 SOURCE_SECTION_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "qualifications_and_career": (
+        "education", "postdoctoral_training", "academic_appointments",
+        "hospital_appointments", "professional_positions",
+    ),
+    "research_system_activities": (
+        "editorial_activities", "grant_review", "committee_service",
+        "professional_societies", "community_service", "invited_presentations",
+    ),
+    "dfg_category_a": ("publications",),
     "research_experience": (
         "postdoctoral_training", "academic_appointments", "hospital_appointments",
         "professional_positions", "clinical_activities",
@@ -162,7 +185,19 @@ SOURCE_SECTION_FALLBACKS: dict[str, tuple[str, ...]] = {
 }
 
 MANUAL_SECTION_PLACEHOLDER = "[Please fill this section manually.]"
-MANUAL_ONLY_SECTION_KEYS = {"conference_papers"}
+MANUAL_ONLY_SECTION_KEYS = {
+    "conference_papers", "dfg_category_b", "supplementary_career_information",
+    "dfg_other_information",
+}
+PRESERVED_SECTION_KEYS = {"dfg_data_protection", "dfg_scientific_results"}
+
+DFG_PAGE_LIMIT = 4
+DFG_SECTION_LIMITS = {
+    "research_system_activities": 8,
+    "mentoring": 7,
+    "dfg_category_b": 4,
+    "honors": 10,
+}
 
 STATIC_LABELS = {
     "dates", "date", "years", "year", "degree", "field of study", "institution",
@@ -227,7 +262,8 @@ def normalized_heading(value: str) -> str:
     text = clean_text(value).casefold()
     text = re.sub(r"^[a-z0-9ivx]+[.)]\s+", "", text)
     text = text.rstrip(":.- ")
-    return re.sub(r"[^\wäöüß/&+ -]+", "", text).strip()
+    text = re.sub(r"[^\wäöüß/&+ -]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def unique_cells(row: _Row) -> list[Any]:
@@ -501,6 +537,24 @@ def masthead_identity_slots(units: list[Unit], mappings: dict[str, str]) -> list
     ]
     if not candidates:
         return []
+    dfg_roles = {
+        "title": "degrees",
+        "first name": "first_name",
+        "name": "last_name",
+        "last name": "last_name",
+        "current position": "position_title",
+        "current institutions/sites country": "institution",
+        "identifiers/orcid": "orcid_id",
+    }
+    dfg_slots: list[dict[str, Any]] = []
+    for unit in candidates:
+        if unit.kind != "row" or len(unit.values) < 2:
+            continue
+        role = dfg_roles.get(normalized_heading(unit.values[0]))
+        if role:
+            dfg_slots.append({"unit_index": unit.index, "role": role, "cell_index": 1})
+    if len(dfg_slots) >= 3:
+        return dfg_slots
     slots: list[dict[str, Any]] = []
     name_assigned = False
     for unit in candidates:
@@ -659,6 +713,118 @@ def set_unit_values(unit: Unit, values: list[str]) -> None:
                 set_paragraph_text(paragraph, "")
 
 
+def clear_direct_emphasis(unit: Unit) -> None:
+    """Keep a template slot's typography while removing accidental bold/italic."""
+
+    for paragraph in unit.paragraphs:
+        for run in paragraph.runs:
+            properties = run._r.get_or_add_rPr()
+            for tag in ("w:b", "w:bCs", "w:i", "w:iCs"):
+                for child in properties.findall(qn(tag)):
+                    properties.remove(child)
+
+
+def translate_template_headings(
+    skeleton: bytes,
+    blueprint: dict[str, Any],
+    *,
+    target_language: str,
+    target_language_code: str,
+    llm_json: Callable[[str, dict[str, Any], dict[str, str]], tuple[dict[str, Any] | None, str | None]],
+    settings: dict[str, str],
+) -> tuple[bytes, dict[str, Any]]:
+    """Translate fixed template labels while leaving CV record slots untouched."""
+
+    validate_docx_bytes(skeleton)
+    document = Document(io.BytesIO(skeleton))
+    units = document_units(document)
+    by_index = {unit.index: unit for unit in units}
+    targets: dict[str, list[Paragraph]] = defaultdict(list)
+    heading_indices = [
+        int(section["heading_unit_index"])
+        for section in blueprint.get("sections") or []
+        if isinstance(section.get("heading_unit_index"), int)
+    ]
+    first_heading = min(heading_indices) if heading_indices else len(units)
+    for unit in units[:first_heading]:
+        if unit.kind == "paragraph" and unit.text and "{{VITAMINE_" not in unit.text and len(unit.text) <= 120:
+            targets[unit.text].append(unit.paragraphs[0])
+    for section in blueprint.get("sections") or []:
+        index = section.get("heading_unit_index")
+        if isinstance(index, int) and index in by_index:
+            unit = by_index[index]
+            if unit.text:
+                targets[unit.text].append(unit.paragraphs[0])
+    for slot in blueprint.get("identity_slots") or []:
+        index = slot.get("unit_index")
+        cell_index = slot.get("cell_index")
+        if not isinstance(index, int) or index not in by_index or not isinstance(cell_index, int):
+            continue
+        unit = by_index[index]
+        if unit.kind != "row" or cell_index <= 0 or not unit.cell_paragraphs:
+            continue
+        label_paragraphs = unit.cell_paragraphs[cell_index - 1]
+        if label_paragraphs and label_paragraphs[0].text:
+            targets[label_paragraphs[0].text].append(label_paragraphs[0])
+    source_labels = list(targets)
+    if not source_labels:
+        return skeleton, {"method": "none", "translated_labels": 0, "warning": ""}
+    schema = {
+        "type": "object", "additionalProperties": False, "required": ["translations"],
+        "properties": {
+            "translations": {
+                "type": "array", "minItems": len(source_labels), "maxItems": len(source_labels),
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["source", "translated"],
+                    "properties": {
+                        "source": {"type": "string", "enum": source_labels},
+                        "translated": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+    prompt = (
+        f"Translate these fixed academic-CV template headings and field labels into {target_language} "
+        f"(language code {target_language_code}). Preserve acronyms such as ORCID, DFG, DOI, and category letters. "
+        "Use concise, formal terminology. Return every source exactly once; do not translate or invent CV content.\n"
+        + json.dumps(source_labels, ensure_ascii=False)
+    )
+    result, warning = llm_json(
+        prompt, schema, settings_for_llm_task(settings, "template_heading_translation")
+    )
+    if not result:
+        raise ValueError(warning or f"The template headings could not be translated into {target_language}.")
+    translated = {
+        str(item.get("source") or ""): clean_text(item.get("translated"))
+        for item in result.get("translations", []) if isinstance(item, dict)
+    }
+    if any(not translated.get(source) for source in source_labels):
+        raise ValueError(f"The template heading translation into {target_language} was incomplete.")
+    for source, paragraphs in targets.items():
+        for paragraph in paragraphs:
+            set_paragraph_text(paragraph, translated[source])
+    buffer = io.BytesIO()
+    document.save(buffer)
+    return clean_docx_package(buffer.getvalue()), {
+        "method": "llm", "translated_labels": len(source_labels), "warning": warning or "",
+        "target_language": target_language, "target_language_code": target_language_code,
+    }
+
+
+def set_identity_slot_value(unit: Unit, slot: dict[str, Any], value: str) -> None:
+    cell_index = slot.get("cell_index")
+    if unit.kind == "row" and isinstance(cell_index, int) and 0 <= cell_index < len(unit.cell_paragraphs):
+        paragraphs = unit.cell_paragraphs[cell_index]
+        if paragraphs:
+            set_paragraph_text(paragraphs[0], value)
+            for paragraph in paragraphs[1:]:
+                set_paragraph_text(paragraph, "")
+        return
+    set_unit_values(unit, [value])
+
+
 def person_values(con: sqlite3.Connection) -> dict[str, str]:
     row = con.execute("SELECT * FROM person WHERE id=1").fetchone()
     if row is None:
@@ -718,8 +884,10 @@ def skeletonize_semantic_blueprint(
     for slot in identity_slots:
         unit = by_index.get(int(slot["unit_index"]))
         if unit is not None:
-            set_unit_values(unit, [f"{{{{VITAMINE_IDENTITY_{str(slot['role']).upper()}}}}}"])
+            set_identity_slot_value(unit, slot, f"{{{{VITAMINE_IDENTITY_{str(slot['role']).upper()}}}}}")
     for section_number, section in enumerate(sections, 1):
+        if str(section.get("section_key") or "") in PRESERVED_SECTION_KEYS:
+            continue
         indices = list(section.get("record_unit_indices") or []) + list(section.get("discard_unit_indices") or [])
         for item_number, unit_index in enumerate(indices, 1):
             unit = by_index.get(int(unit_index))
@@ -743,6 +911,18 @@ def clean_word_xml(data: bytes) -> bytes:
     except etree.XMLSyntaxError:
         return data
     namespaces = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    # External relationships are removed from reusable templates.  Leaving a
+    # w:hyperlink behind with its now-missing r:id makes Word repair the file
+    # on open, so preserve the visible runs while unwrapping the link itself.
+    for node in root.xpath("//w:hyperlink", namespaces=namespaces):
+        parent = node.getparent()
+        if parent is None:
+            continue
+        position = parent.index(node)
+        for child in list(node):
+            parent.insert(position, child)
+            position += 1
+        parent.remove(node)
     for node in root.xpath("//w:del|//w:commentRangeStart|//w:commentRangeEnd|//w:commentReference", namespaces=namespaces):
         parent = node.getparent()
         if parent is not None:
@@ -778,6 +958,8 @@ def clean_relationships(data: bytes) -> bytes:
             or "custom-properties" in rel_type
             or "comments" in target
             or "comments" in rel_type
+            or "thumbnail" in target
+            or "thumbnail" in rel_type
         ):
             root.remove(relationship)
     return etree.tostring(root, encoding="utf-8", xml_declaration=True)
@@ -790,7 +972,7 @@ def clean_content_types(data: bytes) -> bytes:
         return data
     for node in list(root):
         part = node.attrib.get("PartName", "").casefold()
-        if "customxml" in part or "custom.xml" in part or "comments" in part:
+        if "customxml" in part or "custom.xml" in part or "comments" in part or "thumbnail" in part:
             root.remove(node)
     return etree.tostring(root, encoding="utf-8", xml_declaration=True)
 
@@ -802,7 +984,12 @@ def clean_docx_package(data: bytes) -> bytes:
         for info in source.infolist():
             name = info.filename
             lowered = name.casefold()
-            if lowered.startswith("customxml/") or lowered == "docprops/custom.xml" or "comments" in lowered:
+            if (
+                lowered.startswith("customxml/")
+                or lowered == "docprops/custom.xml"
+                or lowered.startswith("docprops/thumbnail.")
+                or "comments" in lowered
+            ):
                 continue
             content = source.read(name)
             if name.endswith(".rels"):
@@ -976,6 +1163,313 @@ def source_section_items(
     return list(items.get(section_key, []))
 
 
+def _row_text(row: sqlite3.Row, *fields: str, separator: str = "; ") -> str:
+    return separator.join(clean_text(row[field]) for field in fields if field in row.keys() and clean_text(row[field]))
+
+
+def _entry_period(row: sqlite3.Row) -> str:
+    start = clean_text(row["start_date"])
+    end = clean_text(row["end_date"])
+    if start and end and start != end:
+        return f"{start}-{end}"
+    return start or end
+
+
+def _entry_detail(row: sqlite3.Row) -> str:
+    title = clean_text(row["title"])
+    organization = clean_text(row["organization"])
+    role = clean_text(row["role"])
+    description = clean_text(row["description"])
+    if "|" in description:
+        parts = [clean_text(value) for value in description.split("|") if clean_text(value)]
+        title = title or (parts[0] if parts else "")
+        organization = organization or (parts[1] if len(parts) > 1 else "")
+        role = role or (parts[2] if len(parts) > 2 else "")
+        description = ""
+    values = [value for value in (title, organization, role, description) if value]
+    deduplicated: list[str] = []
+    for value in values:
+        if not any(normalized_heading(value) == normalized_heading(existing) for existing in deduplicated):
+            deduplicated.append(value)
+    return "; ".join(deduplicated)
+
+
+def _publication_citation(row: sqlite3.Row) -> str:
+    authors = [part.strip() for part in clean_text(row["authors"]).split(",") if part.strip()]
+    compact_authors = ", ".join(authors[:3]) + (", et al." if len(authors) > 3 else "")
+    pieces = [compact_authors, _row_text(row, "title"), _row_text(row, "venue"), _row_text(row, "year")]
+    citation = ". ".join(piece.rstrip(".") for piece in pieces if piece)
+    doi = clean_text(row["doi"])
+    if citation:
+        return f"{citation}. https://doi.org/{doi}" if doi else citation
+    return clean_text(row["raw_citation"])
+
+
+def _honor_values(row: sqlite3.Row) -> list[str]:
+    title = clean_text(row["title"])
+    organization = clean_text(row["organization"])
+    description = clean_text(row["description"])
+    parts = [clean_text(value) for value in description.split("|") if clean_text(value)]
+    if len(parts) >= 3:
+        title, organization, description = parts[0], parts[1], "; ".join(parts[2:])
+    elif normalized_heading(description) in {normalized_heading(title), normalized_heading(organization)}:
+        description = ""
+    return [_entry_period(row), title, organization, description]
+
+
+def _honor_identity(values: list[str]) -> str:
+    """Match sparse and structured imports of the same dated distinction."""
+
+    period, title, organization = (values + ["", "", ""])[:3]
+    year = (re.search(r"\d{4}", period) or re.search(r"\d{4}", title))
+    combined = normalized_heading(" ".join(value for value in (title, organization) if value))
+    return f"{year.group() if year else normalized_heading(period)}:{combined}"
+
+
+def _honor_quality(values: list[str]) -> tuple[int, int, int]:
+    """Prefer a parsed row over a title that merely concatenates all columns."""
+
+    return (sum(bool(value) for value in values), int(bool(values[2])), int(bool(values[3])))
+
+
+PREPRINT_VENUE_MARKERS = (
+    "arxiv", "biorxiv", "medrxiv", "chemrxiv", "psyarxiv", "socarxiv",
+    "research square", "ssrn", "osf preprints", "preprint",
+)
+
+
+def _eligible_dfg_category_b(row: sqlite3.Row, peer_reviewed_titles: set[str]) -> bool:
+    category = clean_text(row["category"]).casefold()
+    if category in {"patent", "patents", "books_chapters"}:
+        return True
+    title_key = normalized_heading(clean_text(row["title"]))
+    if title_key and title_key in peer_reviewed_titles:
+        return False
+    venue = normalized_heading(clean_text(row["venue"]))
+    raw = normalized_heading(clean_text(row["raw_citation"]))
+    # A record imported as a preprint but already carrying a journal venue is
+    # stale publication metadata. Fail closed for the legally constrained DFG
+    # Category B instead of presenting it as non-peer-reviewed output.
+    return not venue or any(marker in venue or marker in raw for marker in PREPRINT_VENUE_MARKERS)
+
+
+def dfg_page_limited_candidates(con: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    """Return DFG-ready records without relying on generic short-CV flags."""
+
+    candidates: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    activity_sections = (
+        "editorial_activities", "grant_review", "committee_service",
+        "professional_societies", "community_service",
+    )
+    placeholders = ",".join("?" for _ in activity_sections)
+    for row in con.execute(
+        f"SELECT * FROM cv_entries WHERE section_key IN ({placeholders}) ORDER BY id",
+        activity_sections,
+    ).fetchall():
+        detail = _entry_detail(row)
+        if detail:
+            normalized = normalized_heading(detail)
+            priority = 4 if row["section_key"] in {"editorial_activities", "grant_review"} else 2
+            priority += 18 if "associate editor" in normalized else 0
+            priority += 12 if "editor" in normalized or "grant" in normalized else 0
+            priority += 8 if "board" in normalized or "organizer" in normalized or "advisory" in normalized else 0
+            priority -= min(len(detail) / 250, 5)
+            candidates["research_system_activities"].append({
+                "id": f"activity:{row['id']}", "values": [detail], "score": priority,
+            })
+
+    achievement_rows: dict[int, list[sqlite3.Row]] = defaultdict(list)
+    try:
+        for row in con.execute("SELECT * FROM trainee_achievements ORDER BY trainee_id, id").fetchall():
+            achievement_rows[int(row["trainee_id"])].append(row)
+        trainees = con.execute("SELECT * FROM trainees ORDER BY id").fetchall()
+    except sqlite3.OperationalError:
+        trainees = []
+    for row in trainees:
+        achievements = achievement_rows.get(int(row["id"]), [])
+        identity = _row_text(row, "name", "degree", "institution", separator=" / ")
+        context = _row_text(row, "career_stage", "mentoring_role")
+        achievement_texts = []
+        for item in achievements:
+            title = clean_text(item["title"])
+            organization = clean_text(item["organization"])
+            amount = clean_text(item["amount"])
+            pieces = [title]
+            if organization and normalized_heading(organization) not in normalized_heading(title):
+                pieces.append(organization)
+            if amount and normalized_heading(amount) not in normalized_heading(title):
+                pieces.append(amount)
+            achievement_texts.append(", ".join(piece for piece in pieces if piece))
+        achievement_texts = [value for value in achievement_texts if value]
+        detail_parts = [identity, context]
+        if achievement_texts:
+            detail_parts.append("Selected achievements: " + "; ".join(achievement_texts[:3]))
+        detail = "; ".join(value for value in detail_parts if value)
+        if detail:
+            score = len(achievements) * 3 + sum(bool(clean_text(item["amount"])) for item in achievements) * 2
+            candidates["mentoring"].append({
+                "id": f"trainee:{row['id']}",
+                "values": [f"{clean_text(row['start_date'])}-{clean_text(row['end_date'])}".strip("-"), detail],
+                "score": score,
+            })
+
+    person = con.execute("SELECT full_name, display_name FROM person WHERE id=1").fetchone()
+    terms = researcher_name_terms(person)
+    peer_reviewed_titles = {
+        normalized_heading(clean_text(row["title"]))
+        for row in con.execute(
+            "SELECT title FROM publications WHERE COALESCE(suppress_display, 0)=0 AND category='peer_reviewed'"
+        ).fetchall()
+        if clean_text(row["title"])
+    }
+    category_b_rows = con.execute(
+        """
+        SELECT * FROM publications
+        WHERE COALESCE(suppress_display, 0)=0
+          AND category IN ('patents', 'patent', 'books_chapters', 'preprints')
+        """
+    ).fetchall()
+    for row in category_b_rows:
+        if not _eligible_dfg_category_b(row, peer_reviewed_titles):
+            continue
+        authorship = researcher_authorship(row["authors"], terms)
+        score = fallback_score(row, authorship)
+        if row["category"] in {"patents", "patent"}:
+            score += 1_000
+        elif row["category"] == "books_chapters":
+            score += 500
+        candidates["dfg_category_b"].append({
+            "id": f"publication:{row['id']}", "values": [_publication_citation(row)], "score": score,
+        })
+    # Older imports sometimes retained patents only inside a structured
+    # section's raw Markdown instead of creating a publication record.  Keep
+    # that evidence usable without inventing bibliographic fields.
+    try:
+        patent_sections = con.execute(
+            "SELECT id, raw_markdown FROM sections WHERE lower(COALESCE(raw_markdown, '')) LIKE '%patent%'"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        patent_sections = []
+    seen_patent_text: set[str] = set()
+    for row in patent_sections:
+        lines = [clean_text(re.sub(r"^[|:#*\-\s]+|[|\s]+$", "", line)) for line in str(row["raw_markdown"] or "").splitlines()]
+        for index, line in enumerate(lines):
+            if "patent" not in line.casefold() or len(line) < 20:
+                continue
+            marker = normalized_heading(line)
+            if marker in seen_patent_text:
+                continue
+            seen_patent_text.add(marker)
+            candidates["dfg_category_b"].append({
+                "id": f"section:{row['id']}:patent:{index}", "values": [line], "score": 900,
+            })
+
+    honor_candidates: list[dict[str, Any]] = []
+    honor_indices: dict[str, int] = {}
+    for row in con.execute("SELECT * FROM cv_entries WHERE section_key='honors' ORDER BY id").fetchall():
+        values = _honor_values(row)
+        if any(values):
+            year_match = re.search(r"\d{4}", values[0])
+            year_score = int(year_match.group()) - 2000 if year_match else 0
+            candidate = {
+                "id": f"honor:{row['id']}", "values": values, "score": year_score,
+            }
+            identity = _honor_identity(values)
+            duplicate_index = honor_indices.get(identity)
+            if duplicate_index is None:
+                honor_indices[identity] = len(honor_candidates)
+                honor_candidates.append(candidate)
+            elif _honor_quality(values) > _honor_quality(honor_candidates[duplicate_index]["values"]):
+                honor_candidates[duplicate_index] = candidate
+    candidates["honors"].extend(honor_candidates)
+    return candidates
+
+
+def select_page_limited_items(
+    candidates: dict[str, list[dict[str, Any]]],
+    *,
+    page_limit: int,
+    section_limits: dict[str, int],
+    llm_json: Callable[[str, dict[str, Any], dict[str, str]], tuple[dict[str, Any] | None, str | None]] | None = None,
+    settings: dict[str, str] | None = None,
+) -> tuple[dict[str, list[list[str]]], dict[str, Any]]:
+    """Select bounded high-yield records for a page-limited export."""
+
+    ranked: dict[str, list[dict[str, Any]]] = {
+        key: sorted(rows, key=lambda row: (-float(row["score"]), str(row["id"])))[:30]
+        for key, rows in candidates.items() if key in section_limits
+    }
+    chosen_ids: dict[str, list[str]] = {
+        key: [str(row["id"]) for row in rows[:section_limits[key]]]
+        for key, rows in ranked.items()
+    }
+    method = "deterministic"
+    warning = ""
+    if llm_json is not None and settings and str(settings.get("provider") or "none") != "none":
+        properties = {
+            key: {
+                "type": "array", "maxItems": section_limits[key],
+                "items": {"type": "string", "enum": [str(row["id"]) for row in rows]},
+            }
+            for key, rows in ranked.items() if rows
+        }
+        schema = {
+            "type": "object", "additionalProperties": False,
+            "required": list(properties), "properties": properties,
+        }
+        prompt_payload = {
+            key: [
+                {"id": row["id"], "text": " | ".join(row["values"]), "characters": sum(map(len, row["values"]))}
+                for row in rows
+            ]
+            for key, rows in ranked.items() if rows
+        }
+        prompt = (
+            f"Select the strongest, most relevant academic CV records for a fixed {page_limit}-page form. "
+            "Prefer demonstrable trainee outcomes, selective research-system service, major distinctions, "
+            "and Category B outputs with patents/books ahead of preprints. Balance quality, diversity, recency, "
+            "and text length. Return only candidate IDs, never rewrite content.\n" +
+            json.dumps(prompt_payload, ensure_ascii=False)
+        )
+        response, warning = (llm_json(
+            prompt, schema, settings_for_llm_task(settings, "page_limited_export_selection")
+        ) if properties else (None, None))
+        if response:
+            for key, ids in response.items():
+                valid = {str(row["id"]) for row in ranked.get(key, [])}
+                selected = [str(value) for value in ids if str(value) in valid]
+                if selected:
+                    chosen_ids[key] = selected[:section_limits[key]]
+            method = "llm+deterministic"
+    overrides: dict[str, list[list[str]]] = {}
+    for key, rows in ranked.items():
+        lookup = {str(row["id"]): row for row in rows}
+        overrides[key] = [lookup[item_id]["values"] for item_id in chosen_ids.get(key, []) if item_id in lookup]
+    return overrides, {
+        "page_limit": page_limit,
+        "selection_method": method,
+        "selected_counts": {key: len(value) for key, value in overrides.items()},
+        "warning": warning or "",
+    }
+
+
+def select_dfg_page_limited_items(
+    con: sqlite3.Connection,
+    *,
+    llm_json: Callable[[str, dict[str, Any], dict[str, str]], tuple[dict[str, Any] | None, str | None]] | None = None,
+    settings: dict[str, str] | None = None,
+) -> tuple[dict[str, list[list[str]]], dict[str, Any]]:
+    """Select high-yield records for the fixed four-page DFG form."""
+
+    return select_page_limited_items(
+        dfg_page_limited_candidates(con),
+        page_limit=DFG_PAGE_LIMIT,
+        section_limits=DFG_SECTION_LIMITS,
+        llm_json=llm_json,
+        settings=settings,
+    )
+
+
 def identity_value(role: str, values: dict[str, str]) -> str:
     if role == "display_name":
         return values.get("display_name") or values.get("full_name", "")
@@ -985,6 +1479,16 @@ def identity_value(role: str, values: dict[str, str]) -> str:
         address = values.get("office_address") or values.get("home_address") or ""
         pieces = [clean_text(address), values.get("work_phone", ""), values.get("work_email", "")]
         return ", ".join(piece for piece in pieces if piece)
+    if role == "degrees":
+        return values.get("degrees", "")
+    if role in {"first_name", "last_name"}:
+        name = values.get("full_name") or values.get("display_name", "")
+        pieces = name.split()
+        return " ".join(pieces[:-1]) if role == "first_name" else (pieces[-1] if pieces else "")
+    if role == "institution":
+        return values.get("own_institution_name") or values.get("office_address", "")
+    if role == "orcid_id":
+        return values.get("orcid_id", "")
     return ""
 
 
@@ -1017,12 +1521,25 @@ def placeholder_unit_after(heading: Unit) -> Unit:
     return Unit(-1, "paragraph", element, heading.parent, [paragraph], [])
 
 
+def ensure_section_heading_spacing(heading: Unit | None) -> None:
+    """Add a modest gap when a source heading defines no preceding spacing."""
+
+    if heading is None or heading.kind != "paragraph":
+        return
+    paragraph = heading.paragraphs[0]
+    direct = paragraph.paragraph_format.space_before
+    inherited = paragraph.style.paragraph_format.space_before if paragraph.style else None
+    if direct is None and inherited is None:
+        paragraph.paragraph_format.space_before = Pt(6)
+
+
 def render_template(
     skeleton: bytes,
     blueprint: dict[str, Any],
     canonical_docx: Path,
     output: Path,
     con: sqlite3.Connection,
+    section_item_overrides: dict[str, list[list[str]]] | None = None,
 ) -> dict[str, Any]:
     validate_docx_bytes(skeleton)
     try:
@@ -1043,14 +1560,17 @@ def render_template(
                 unit = by_index[int(slot["unit_index"])]
             except (KeyError, TypeError, ValueError):
                 continue
-            set_unit_values(unit, [identity_value(str(slot.get("role") or ""), values)])
+            set_identity_slot_value(unit, slot, identity_value(str(slot.get("role") or ""), values))
 
         for section in blueprint.get("sections") or []:
             section_key = str(section.get("section_key") or "")
+            if section_key in PRESERVED_SECTION_KEYS:
+                continue
             try:
                 heading = by_index[int(section["heading_unit_index"])]
             except (KeyError, TypeError, ValueError):
                 heading = None
+            ensure_section_heading_spacing(heading)
             body_units = [
                 by_index[index]
                 for raw_index in section.get("body_unit_indices") or []
@@ -1066,8 +1586,15 @@ def render_template(
                 for raw_index in section.get("discard_unit_indices") or []
                 if isinstance(raw_index, int) and (index := raw_index) in by_index
             ]
-            manual_only = section_key.startswith("__unmapped_") or section_key in MANUAL_ONLY_SECTION_KEYS
-            if manual_only:
+            has_override = section_item_overrides is not None and section_key in section_item_overrides
+            if has_override:
+                source_items = section_item_overrides[section_key]
+            else:
+                source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
+            manual_only = section_key.startswith("__unmapped_") or (
+                section_key in MANUAL_ONLY_SECTION_KEYS and not has_override
+            )
+            if manual_only or not source_items:
                 placeholder_unit = target_units[0] if target_units else (
                     placeholder_unit_after(heading) if heading is not None else None
                 )
@@ -1082,8 +1609,7 @@ def render_template(
                 elif heading is not None:
                     remove_unit(heading)
                 continue
-            source_items = [] if section_key.startswith("__unmapped_") else source_section_items(section_key, items, con)
-            if not source_items or not target_units:
+            if not target_units:
                 if heading is not None:
                     remove_unit(heading)
                 for unit in body_units:
@@ -1094,6 +1620,8 @@ def render_template(
             for index, unit in enumerate(target_units):
                 if index < len(source_items):
                     set_unit_values(unit, source_items[index])
+                    if section_key in {"dfg_category_a", "dfg_category_b"}:
+                        clear_direct_emphasis(unit)
                     rendered_items += 1
                 else:
                     remove_unit(unit)

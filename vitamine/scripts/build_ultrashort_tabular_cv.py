@@ -445,6 +445,7 @@ def row_by_title(con: sqlite3.Connection, section_key: str, title: str) -> sqlit
         SELECT *
         FROM cv_entries
         WHERE section_key = ? AND title = ?
+          AND (section_key != 'funding' OR COALESCE(grant_status, 'funded') IN ('funded', 'past'))
         ORDER BY id DESC
         LIMIT 1
         """,

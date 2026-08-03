@@ -281,6 +281,7 @@ def load_data() -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row
             SELECT *
             FROM cv_entries
             WHERE include_short=1
+              AND (section_key != 'funding' OR COALESCE(grant_status, 'funded') IN ('funded', 'past'))
             ORDER BY section_key, start_date, id
             """
         ).fetchall()

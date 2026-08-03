@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260801-dashboard-citation-map-20260801-enrichment-simplified-20260802-enrichment-simplified-publication-dialog-actions-20260802-custom-word-templates-plus">
+  <link rel="stylesheet" href="/static/styles.css?v=20260803-zotero-group-libraries-plus-dev-toggle">
 </head>
 <body>
   <header class="topbar">
@@ -307,7 +307,7 @@
             <label class="exportLanguageControl">Language
               <select id="exportLanguage">
                 <option value="en">English</option>
-                <option id="homeLanguageOption" value="de">Deutsch</option>
+                <option id="homeLanguageOption" value="secondary">Deutsch</option>
               </select>
             </label>
             <label class="exportCitationControl">Citation style
@@ -356,7 +356,13 @@
             </label>
           </div>
           <div id="customTemplateDropzone" class="templateDropzone" tabindex="0" role="button" aria-controls="customTemplateFileInput">
-            <span class="wordTemplateIcon" aria-hidden="true">W</span>
+            <svg class="wordTemplateIcon" viewBox="0 0 48 56" aria-hidden="true" focusable="false">
+              <path class="wordTemplatePage" d="M12 2h21l11 11v39a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"></path>
+              <path class="wordTemplateFold" d="M33 2v11h11"></path>
+              <path class="wordTemplateLine" d="M28 23h10M28 29h10M28 35h8"></path>
+              <rect class="wordTemplateBadge" x="2" y="19" width="29" height="27" rx="3"></rect>
+              <path class="wordTemplateLetter" d="m8 26 3.2 13h3.4l2.2-8.1L19 39h3.4l3.3-13h-3.2l-2 9-2.3-9h-2.8l-2.3 9-2-9H8Z"></path>
+            </svg>
             <div>
               <strong>Drop a Word CV to add its format</strong>
               <span id="customTemplateFileLabel">DOCX only · up to 20 MB</span>
@@ -423,6 +429,7 @@
             <select name="grant_status" id="entryGrantStatus">
               <option value="planned">Planned</option>
               <option value="submitted">Submitted</option>
+              <option value="rejected">Rejected</option>
               <option value="funded">Funded</option>
               <option value="past">Past</option>
             </select>
@@ -436,8 +443,12 @@
             <label>Amount<input name="amount" id="entryAmount"></label>
             <label>Description<textarea name="description" id="entryDescription" rows="6"></textarea></label>
           </fieldset>
+          <div class="entryTranslationControls" aria-label="Translate this entry">
+            <button id="translateEntryToAdditional" type="button">Translate English → additional language</button>
+            <button id="translateEntryToEnglish" type="button">Translate additional language → English</button>
+          </div>
           <fieldset>
-            <legend>German</legend>
+            <legend id="additionalLanguageLegend">Deutsch</legend>
             <label>Title<input name="title_de" id="entryTitleDe"></label>
             <label>Organization<input name="organization_de" id="entryOrganizationDe"></label>
             <label>Location<input name="location_de" id="entryLocationDe"></label>
@@ -525,6 +536,7 @@
         <label>Degrees<input name="degrees"></label>
         <label>Position title<input name="position_title"></label>
         <label>Native / Second CV Language<input id="homeLanguageLabel" maxlength="40" value="Deutsch"></label>
+        <label>Language code<input id="homeLanguageCode" maxlength="12" value="de" placeholder="e.g. de, fr, es"></label>
         <label>Office address<input name="office_address"></label>
         <label>Home address<input name="home_address"></label>
         <label>Work phone<input name="work_phone"></label>
@@ -836,7 +848,7 @@
   <dialog id="workspacePlusDialog" class="workspacePlusDialog">
     <div class="workspacePlusPanel">
       <div class="workspacePlusHeading">
-        <div><span>VitaMine+</span><h2 id="workspacePlusTitle">More confidence, less maintenance.</h2></div>
+        <div><span>VitaMine+</span><h2>More confidence, less maintenance.</h2></div>
         <button id="closeWorkspacePlusDialog" type="button" aria-label="Close">×</button>
       </div>
       <p id="workspacePlusStatus"></p>
@@ -846,6 +858,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=20260801-dashboard-citation-map-20260801-enrichment-simplified-20260802-enrichment-simplified-publication-dialog-actions-20260802-custom-word-templates-plus"></script>
+  <script src="/static/app.js?v=20260803-zotero-group-libraries-export-format-label-generic-entry-translation-vitamine-plus-dev-toggle"></script>
 </body>
 </html>

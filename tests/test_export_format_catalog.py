@@ -41,6 +41,26 @@ class ExportFormatCatalogTests(unittest.TestCase):
         self.assertIn("format.content_profile_label", script)
         self.assertIn('format.content_profile === "long"', script)
 
+    def test_working_formats_use_green_icons_and_dfg_is_exportable(self):
+        formats = export_format_catalog()
+        preinstalled = [item for item in formats if item.get("preinstalled")]
+        self.assertEqual(len(preinstalled), 4)
+        self.assertTrue(all(item["quality"]["key"] == "ready" for item in preinstalled))
+        dfg = next(item for item in formats if item["id"] == "vitamine.dfg-research-cv")
+        self.assertEqual(dfg["exporter"], "bundled_docx")
+        self.assertEqual(dfg["languages"], ["en", "secondary"])
+        self.assertEqual(dfg["page_limit"], 4)
+
+        script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("qualityReadyIcon", script)
+        self.assertIn("Fixed limit:", script)
+
+    def test_export_buttons_use_format_focused_wording(self):
+        script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn("Export CV in this format", script)
+        self.assertNotIn("Export Word document", script)
+
 
 if __name__ == "__main__":
     unittest.main()

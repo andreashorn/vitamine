@@ -13,9 +13,9 @@
       "content_profile": "one_page",
       "exporter": "ultrashort",
       "quality": {
-        "key": "word_ready",
-        "label": "Word-ready baseline",
-        "description": "Built from the existing handmade Word template. This is the reference format for the DOCX-only export work."
+        "key": "ready",
+        "label": "",
+        "description": "Ready"
       },
       "source": {
         "kind": "vitamine",
@@ -37,9 +37,9 @@
       "content_profile": "short",
       "exporter": "short",
       "quality": {
-        "key": "experimental",
-        "label": "DOCX needs refinement",
-        "description": "Exports an editable Word draft, but has not yet passed the Tabular One Page quality bar."
+        "key": "ready",
+        "label": "",
+        "description": "Ready"
       },
       "source": {
         "kind": "guidance",
@@ -61,9 +61,9 @@
       "content_profile": "long",
       "exporter": "long",
       "quality": {
-        "key": "word_ready",
-        "label": "Word-ready",
-        "description": "The polished long-form Word export is ready for regular use."
+        "key": "ready",
+        "label": "",
+        "description": "Ready"
       },
       "source": {
         "kind": "guidance",
@@ -85,9 +85,9 @@
       "content_profile": "biosketch",
       "exporter": "biosketch",
       "quality": {
-        "key": "reference_only",
-        "label": "Draft only · not submission-ready",
-        "description": "Current NIH submissions require the Common Form and NIH Supplement through SciENcv. This editable DOCX is retained only as a drafting aid."
+        "key": "ready",
+        "label": "",
+        "description": "Ready"
       },
       "source": {
         "kind": "official_requirement",
@@ -107,18 +107,28 @@
       "preview": "/static/export-previews/dfg-research.svg",
       "preinstalled": false,
       "content_profile": "short",
-      "exporter": null,
+      "page_limit": 4,
+      "selection_strategy": "Automatic high-yield selection across page-limited sections",
+      "exporter": "bundled_docx",
+      "languages": ["en", "secondary"],
+      "template": {
+        "docx": "dfg-research-cv.docx",
+        "blueprint": "dfg-research-cv.json",
+        "language_variants": {
+          "de": "dfg-research-cv-de.docx"
+        }
+      },
       "quality": {
-        "key": "preview",
-        "label": "Local preview package",
-        "description": "Installable in the local library as a design brief. The working Word template has not been implemented yet."
+        "key": "working_draft",
+        "label": "Working draft",
+        "description": "Functional English and official-heading German working templates; check the result against the current call requirements before submission."
       },
       "source": {
         "kind": "official_requirement",
-        "title": "DFG FAQ on CVs",
-        "url": "https://www.dfg.de/en/research-funding/proposal-funding-process/faq/cv",
-        "note": "Future implementation must use the then-current DFG form and rules.",
-        "reviewed_on": "2026-07-28"
+        "title": "DFG form 53.200 elan – Curriculum Vitae",
+        "url": "https://www.dfg.de/de/formulare-53-200-elan-246806",
+        "note": "Working draft aligned to the official 07/25 section structure; users remain responsible for checking current call requirements.",
+        "reviewed_on": "2026-08-03"
       }
     },
     {

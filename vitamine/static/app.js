@@ -13,9 +13,9 @@ const state = {
   cloud: {
     enabled: false,
     workspace: null,
+    plus: null,
     activeJob: null,
     resuming: false,
-    plus: { active: true, plan: "desktop" },
   },
   orcidOauth: null,
   orcidOauthLoaded: false,
@@ -172,10 +172,8 @@ async function api(path, options = {}) {
   });
   const data = await response.json();
   if (!response.ok) {
-    const detail = data.detail;
-    const error = new Error(data.stderr || (typeof detail === "string" ? detail : detail?.message) || "Request failed");
+    const error = new Error(data.stderr || data.detail || "Request failed");
     error.status = response.status;
-    error.code = detail?.code || "";
     throw error;
   }
   return data;
@@ -255,48 +253,13 @@ function setCloudJobControls(running) {
   }
 }
 
-function hasVitaminePlus() {
-  return !state.cloud.enabled || Boolean(state.cloud.plus?.active);
-}
-
-function showWorkspacePlusDialog() {
-  const plus = state.cloud.plus || {};
-  const title = $("#workspacePlusTitle");
-  const status = $("#workspacePlusStatus");
-  if (plus.plan === "trial") {
-    title.textContent = "Your VitaMine+ trial is active.";
-    status.textContent = `All VitaMine+ features are available until ${plus.active_until ? new Date(plus.active_until).toLocaleDateString() : "the end of your trial"}.`;
-  } else if (plus.plan === "paid") {
-    title.textContent = "Your VitaMine+ plan is active.";
-    status.textContent = plus.active_until ? `Your current plan runs through ${new Date(plus.active_until).toLocaleDateString()}.` : "All VitaMine+ features are available.";
-  } else {
-    title.textContent = "More confidence, less maintenance.";
-    status.textContent = "VitaMine stays free and your data remains accessible. Upgrade to use intelligent and advanced features.";
-  }
-  $("#workspacePlusDialog").showModal();
-}
-
-function requirePlusUi() {
-  if (hasVitaminePlus()) return true;
-  showWorkspacePlusDialog();
-  return false;
-}
-
-function configureWorkspacePlus(plus) {
-  const button = $("#workspacePlusButton");
-  button.hidden = false;
-  button.textContent = plus.active ? "VitaMine+" : "Upgrade to +";
-  button.classList.toggle("active", Boolean(plus.active));
-  $(".templateImportPanel")?.classList.toggle("plusLocked", !plus.active);
-}
-
 function configureCloudWorkspace(workspace) {
   state.cloud.enabled = true;
   state.cloud.workspace = workspace;
-  state.cloud.plus = workspace.plus || { active: false, plan: "free" };
+  state.cloud.plus = workspace.plus || null;
+  configureWorkspacePlus();
   if (state.exportFormats.length) renderExportFormats();
   const account = workspace.account || {};
-  configureWorkspacePlus(state.cloud.plus);
   $("#cloudAccountMenu").hidden = false;
   $("#cloudAccountInitials").textContent = accountInitials(account);
   $("#cloudAccountName").textContent = account.display_name || "VitaMine account";
@@ -331,6 +294,65 @@ function configureCloudWorkspace(workspace) {
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") closeCloudAccountMenu();
   });
+}
+
+function hasVitaminePlus() {
+  return !state.cloud.enabled || Boolean(state.cloud.plus?.active);
+}
+
+function showWorkspacePlusDialog() {
+  const plus = state.cloud.plus || {};
+  const status = $("#workspacePlusStatus");
+  if (status) status.textContent = plus.active
+    ? (plus.plan === "trial" ? `Your VitaMine+ trial is active until ${new Date(plus.active_until).toLocaleDateString()}.` : "VitaMine+ is active for this account.")
+    : "Upgrade to keep intelligent tools and full network details available.";
+  $("#workspacePlusDialog")?.showModal();
+}
+
+function requirePlusUi() {
+  if (hasVitaminePlus()) return true;
+  showWorkspacePlusDialog();
+  return false;
+}
+
+function configureWorkspacePlus() {
+  const button = $("#workspacePlusButton");
+  if (!button || !state.cloud.enabled) return;
+  button.hidden = false;
+  const developerToggle = Boolean(state.cloud.plus?.developer_toggle);
+  button.classList.toggle("developer", developerToggle);
+  button.classList.toggle("upgrade", !developerToggle && !hasVitaminePlus());
+  button.setAttribute("aria-pressed", developerToggle ? String(hasVitaminePlus()) : "false");
+  button.title = developerToggle
+    ? "Temporary developer control: switch between VitaMine+ and the free plan"
+    : "View VitaMine+ plan details";
+  button.textContent = developerToggle
+    ? (hasVitaminePlus() ? "DEV · Plus ON" : "DEV · Free mode")
+    : (hasVitaminePlus() ? "VitaMine+" : "Upgrade to +");
+}
+
+async function toggleWorkspaceDeveloperPlus() {
+  const button = $("#workspacePlusButton");
+  if (!state.cloud.plus?.developer_toggle) {
+    showWorkspacePlusDialog();
+    return;
+  }
+  button.disabled = true;
+  try {
+    const payload = await api("/api/account/plus-developer-toggle", {
+      method: "PUT",
+      body: JSON.stringify({ active: !hasVitaminePlus() }),
+    });
+    state.cloud.plus = payload.plus;
+    configureWorkspacePlus();
+    if (state.exportFormats.length) renderExportFormats();
+    await loadCollaborationMap();
+    setStatus(hasVitaminePlus() ? "Developer mode: VitaMine+ enabled" : "Developer mode: free plan enabled");
+  } catch (error) {
+    setStatus(error.message, { error: true });
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function cloudJobMessage(job) {
@@ -440,6 +462,8 @@ function setActionButtons(disabled) {
 }
 
 function fillSectionSelects() {
+  const selectedFilter = $("#sectionFilter").value;
+  const selectedEntrySection = $("#entrySection").value;
   const options = ['<option value="">All sections</option>']
     .concat(Object.entries(state.sections).map(([key, label]) => `<option value="${key}">${label}</option>`))
     .join("");
@@ -447,6 +471,12 @@ function fillSectionSelects() {
   $("#entrySection").innerHTML = Object.entries(state.sections)
     .map(([key, label]) => `<option value="${key}">${label}</option>`)
     .join("");
+  if ([...$("#sectionFilter").options].some((option) => option.value === selectedFilter)) {
+    $("#sectionFilter").value = selectedFilter;
+  }
+  if ([...$("#entrySection").options].some((option) => option.value === selectedEntrySection)) {
+    $("#entrySection").value = selectedEntrySection;
+  }
 }
 
 async function loadSummary() {
@@ -2084,13 +2114,16 @@ function mapTooltip(node) {
 async function loadCollaborationMap() {
   if (!hasVitaminePlus()) {
     const container = $("#collaborationMap");
-    container.classList.add("plusMapLocked");
-    container.innerHTML = '<div class="emptyMap"><strong>Collaboration network</strong><span>Detailed institutions, people, and connections are available with VitaMine+.</span></div>';
-    container.onclick = showWorkspacePlusDialog;
+    if (container) {
+      container.classList.add("plusMapLocked");
+      container.innerHTML = '<button type="button"><strong>Full network map with VitaMine+</strong><span>Upgrade to explore institutions and collaboration details.</span></button>';
+      container.querySelector("button")?.addEventListener("click", showWorkspacePlusDialog);
+    }
     $("#collaborationMapStats").innerHTML = "";
     $("#collaborationCountries").innerHTML = "";
     return;
   }
+  $("#collaborationMap")?.classList.remove("plusMapLocked");
   const mode = state.collaborationMap.mode;
   const data = await api(`/api/collaboration-map?mode=${encodeURIComponent(mode)}`);
   state.collaborationMap.datasets[mode] = data;
@@ -2299,8 +2332,13 @@ async function loadExportSettings() {
   const data = await api("/api/export-settings");
   state.exportSettings = data;
   const label = data.home_language_label || "Deutsch";
+  const code = data.home_language_code || "de";
   $("#homeLanguageLabel").value = label;
+  $("#homeLanguageCode").value = code;
   $("#homeLanguageOption").textContent = label;
+  $("#additionalLanguageLegend").textContent = label;
+  $("#translateEntryToAdditional").textContent = `Translate English → ${label}`;
+  $("#translateEntryToEnglish").textContent = `Translate ${label} → English`;
   const citationStyle = $("#exportCitationStyle");
   if (citationStyle) {
     const styleGroups = new Map();
@@ -2353,7 +2391,6 @@ function customTemplateDefaultName(filename) {
 
 async function importCustomExportTemplate(file) {
   if (!file) return;
-  if (!requirePlusUi()) return;
   if (!/\.docx$/i.test(file.name || "")) {
     setStatus("Please choose a Word .docx document.", { error: true });
     return;
@@ -2472,7 +2509,6 @@ async function loadPromptExportPlan() {
 }
 
 async function createPromptExportPlan() {
-  if (!requirePlusUi()) return;
   const formatId = $("#promptExportFormat")?.value;
   const prompt = $("#promptExportInstructions")?.value.trim();
   if (!formatId || !prompt) {
@@ -2531,16 +2567,23 @@ function selectedLongPublicationCategories() {
 
 async function saveExportSettings() {
   const label = $("#homeLanguageLabel").value.trim() || "Deutsch";
+  const code = $("#homeLanguageCode").value.trim().toLowerCase() || "de";
   const categories = selectedLongPublicationCategories();
   $("#homeLanguageLabel").value = label;
+  $("#homeLanguageCode").value = code;
   $("#homeLanguageOption").textContent = label;
+  $("#additionalLanguageLegend").textContent = label;
+  $("#translateEntryToAdditional").textContent = `Translate English → ${label}`;
+  $("#translateEntryToEnglish").textContent = `Translate ${label} → English`;
   state.exportSettings.home_language_label = label;
+  state.exportSettings.home_language_code = code;
   state.exportSettings.long_cv_publication_categories = categories;
   state.exportSettings.citation_style = $("#exportCitationStyle")?.value || "vitamine-long";
   await api("/api/export-settings", {
     method: "PUT",
     body: JSON.stringify({
       home_language_label: label,
+      home_language_code: code,
       citation_style: state.exportSettings.citation_style,
       long_cv_publication_categories: categories,
     }),
@@ -2577,9 +2620,8 @@ function exportFormatCard(format) {
     : "";
   let actions = "";
   if (format.installed) {
-    const buildLabel = quality.key === "reference_only" ? "Export draft" : "Export Word document";
     const buildButton = format.exporter
-      ? `<button class="formatActionButton formatBuildButton" data-format-id="${escapeHtml(format.id)}" type="button">${buildLabel}</button>`
+      ? `<button class="formatActionButton formatBuildButton" data-format-id="${escapeHtml(format.id)}" type="button">Export CV in this format</button>`
       : `<button type="button" disabled title="The Word exporter has not been implemented yet">Export coming later</button>`;
     const artifactLink = artifact.docx && !state.cloud.enabled
       ? `<a href="${escapeHtml(artifact.docx)}" title="${escapeHtml(artifact.docx_path || "")}" target="_blank" rel="noopener">Open last export</a>`
@@ -2603,8 +2645,13 @@ function exportFormatCard(format) {
   const analysis = format.custom_template && format.template_analysis
     ? `<span class="templateAnalysisNote">${format.template_analysis.page_count ? `${format.template_analysis.page_count} source page${format.template_analysis.page_count === 1 ? "" : "s"} · ` : ""}${format.template_analysis.mapped_sections?.length || 0} mapped sections${format.template_analysis.model ? ` · analyzed with ${escapeHtml(format.template_analysis.model)}` : ""}</span>`
     : "";
-  const plusLocked = format.custom_template && !hasVitaminePlus();
-  return `<article class="formatCard ${format.installed ? "installed" : ""} ${plusLocked ? "plusLocked" : ""}" ${plusLocked ? 'data-plus-locked="true"' : ""}>
+  const qualityMark = quality.key === "ready"
+    ? '<span class="qualityReadyIcon" aria-label="Ready" title="Ready">✓</span>'
+    : `<span class="qualityBadge quality-${escapeHtml(quality.key || "preview")}" title="${escapeHtml(quality.description || "")}">${escapeHtml(quality.label || "")}</span>`;
+  const pageLimit = Number(format.page_limit) > 0
+    ? `<span class="pageLimitBadge" title="VitaMine automatically selects high-yield records to stay within this limit">Fixed limit: ${Number(format.page_limit)} pages</span>`
+    : "";
+  return `<article class="formatCard ${format.installed ? "installed" : ""}">
     <div class="formatPreview">
       ${preview}
     </div>
@@ -2612,11 +2659,12 @@ function exportFormatCard(format) {
       <div class="formatTitleRow">
         <div>
           <h4>${escapeHtml(format.name)}</h4>
-          <span class="qualityBadge quality-${escapeHtml(quality.key || "preview")}" title="${escapeHtml(quality.description || "")}">${escapeHtml(quality.label || "")}</span>
+          ${qualityMark}
         </div>
         ${format.preinstalled ? '<span class="defaultBadge">Included</span>' : ""}
       </div>
       <span class="formatLength">${escapeHtml(format.length || "")}</span>
+      ${pageLimit}
       <span class="contentProfileBadge" title="${escapeHtml(format.content_profile_description || "Controls which CV content-selection routine is used.")}">${escapeHtml(profileLabel)} content</span>
       <p>${escapeHtml(format.summary || "")}</p>
       ${analysis}
@@ -2636,16 +2684,8 @@ function bindExportFormatActions() {
     button.addEventListener("click", () => removeExportFormat(button.dataset.formatId));
   });
   $$(".formatBuildButton").forEach((button) => {
-    button.addEventListener("click", () => {
-      const format = state.exportFormats.find((item) => item.id === button.dataset.formatId);
-      if (format?.custom_template && !requirePlusUi()) return;
-      buildExportFormat(button.dataset.formatId);
-    });
+    button.addEventListener("click", () => buildExportFormat(button.dataset.formatId));
   });
-  $$('[data-plus-locked="true"]').forEach((card) => card.addEventListener("click", (event) => {
-    if (event.target.closest("button")) return;
-    showWorkspacePlusDialog();
-  }));
   $$(".formatRenameTemplateButton").forEach((button) => {
     button.addEventListener("click", () => renameCustomExportTemplate(button.dataset.formatId));
   });
@@ -2899,8 +2939,30 @@ function entryPayload() {
   };
 }
 
+function fundingEndHasPassed(value, now = new Date()) {
+  const text = String(value || "").trim();
+  if (!text || /present|current|ongoing/i.test(text)) return false;
+  let end = null;
+  let match = text.match(/^(\d{4})$/);
+  if (match) end = new Date(Number(match[1]), 11, 31, 23, 59, 59, 999);
+  match = match || text.match(/^(\d{1,2})[/.](\d{4})$/);
+  if (!end && match && match.length === 3) end = new Date(Number(match[2]), Number(match[1]), 0, 23, 59, 59, 999);
+  match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!end && match) end = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999);
+  match = text.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/);
+  if (!end && match) end = new Date(Number(match[3]), Number(match[1]) - 1, Number(match[2]), 23, 59, 59, 999);
+  return Boolean(end && !Number.isNaN(end.getTime()) && end < now);
+}
+
 function updateGrantStatusVisibility() {
-  $("#entryGrantStatusField").hidden = $("#entrySection").value !== "funding";
+  const isFunding = $("#entrySection").value === "funding";
+  const status = $("#entryGrantStatus");
+  const expired = isFunding && fundingEndHasPassed($("#entryEnd").value);
+  $("#entryGrantStatusField").hidden = !isFunding;
+  [...status.options].forEach((option) => {
+    option.disabled = expired && option.value !== "past";
+  });
+  if (expired) status.value = "past";
 }
 
 function mergeSavedEntry(id, payload) {
@@ -2930,7 +2992,7 @@ async function persistEntrySnapshot(snapshot) {
     if (!id && state.entryAutosave.pending && !state.entryAutosave.pending.id) {
       state.entryAutosave.pending.id = String(savedId);
     }
-    mergeSavedEntry(savedId, snapshot.payload);
+    mergeSavedEntry(savedId, data.entry || snapshot.payload);
   }
   setStatus("Entry autosaved");
   await loadSummary();
@@ -2958,6 +3020,7 @@ async function runEntryAutosave() {
 }
 
 function scheduleEntryAutosave() {
+  updateGrantStatusVisibility();
   state.entryAutosave.pending = {
     id: $("#entryId").value,
     payload: entryPayload(),
@@ -2973,6 +3036,31 @@ async function saveEntry(event) {
     payload: entryPayload(),
   };
   await runEntryAutosave();
+}
+
+async function translateSelectedEntry(direction) {
+  if (state.entryAutosave.pending) await runEntryAutosave();
+  const id = $("#entryId").value;
+  if (!id) {
+    setStatus("Save the entry before translating it.");
+    return;
+  }
+  const buttons = [$("#translateEntryToAdditional"), $("#translateEntryToEnglish")];
+  buttons.forEach((button) => { button.disabled = true; });
+  setStatus("Translating entry…");
+  try {
+    const data = await api(`/api/entries/${id}/translate`, {
+      method: "POST",
+      body: JSON.stringify({ direction }),
+    });
+    mergeSavedEntry(id, data.entry);
+    selectEntry(Number(id));
+    setStatus(`Entry translated from ${data.source_language} to ${data.target_language}`);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 
 async function deleteEntry() {
@@ -4264,15 +4352,12 @@ async function init() {
   $("#showSuppressedPubs").addEventListener("change", loadPublications);
   $("#journalMetricSearch").addEventListener("input", debounce(loadJournalMetrics));
   $("#exportFormatSearch").addEventListener("input", renderExportFormats);
-  $("#chooseCustomTemplateFile").addEventListener("click", () => {
-    if (!requirePlusUi()) return;
-    $("#customTemplateFileInput").click();
-  });
+  $("#chooseCustomTemplateFile").addEventListener("click", () => $("#customTemplateFileInput").click());
   $("#customTemplateFileInput").addEventListener("change", (event) => importCustomExportTemplate(event.target.files?.[0]));
   $("#customTemplateDropzone").addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      if (requirePlusUi()) $("#customTemplateFileInput").click();
+      $("#customTemplateFileInput").click();
     }
   });
   $("#customTemplateDropzone").addEventListener("dragover", (event) => {
@@ -4386,6 +4471,8 @@ async function init() {
   $("#deletePublication").addEventListener("click", deletePublication);
   $("#newEntry").addEventListener("click", clearEntryForm);
   $("#entryForm").addEventListener("submit", saveEntry);
+  $("#translateEntryToAdditional").addEventListener("click", () => translateSelectedEntry("primary_to_additional"));
+  $("#translateEntryToEnglish").addEventListener("click", () => translateSelectedEntry("additional_to_primary"));
   $("#entrySection").addEventListener("change", updateGrantStatusVisibility);
   $$("#entryForm input, #entryForm textarea, #entryForm select").forEach((field) => {
     if (field.type !== "hidden") field.addEventListener("input", scheduleEntryAutosave);
@@ -4410,7 +4497,6 @@ async function init() {
   $("#deleteIdentifier").addEventListener("click", deleteIdentifier);
   $("#narrativeForm").addEventListener("submit", saveNarrativeReport);
   const enrichCv = async () => {
-    if (!requirePlusUi()) return;
     if (state.onboarding?.step === "enrich") {
       const coach = $("#onboardingCoach");
       if (coach) coach.hidden = true;
@@ -4434,16 +4520,16 @@ async function init() {
     await loadPublications();
     await loadOnboarding();
   };
-  $("#enrichCvDashboard").addEventListener("click", enrichCv);
-  $("#workspacePlusButton").addEventListener("click", showWorkspacePlusDialog);
-  $("#closeWorkspacePlusDialog").addEventListener("click", () => $("#workspacePlusDialog").close());
-  $("#workspacePlusDialog").addEventListener("click", (event) => {
-    if (event.target === $("#workspacePlusDialog")) $("#workspacePlusDialog").close();
+  $("#enrichCvDashboard").addEventListener("click", () => {
+    if (requirePlusUi()) enrichCv();
   });
+  $("#workspacePlusButton")?.addEventListener("click", toggleWorkspaceDeveloperPlus);
+  $("#closeWorkspacePlusDialog")?.addEventListener("click", () => $("#workspacePlusDialog")?.close());
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });
   $("#homeLanguageLabel").addEventListener("change", saveExportSettings);
+  $("#homeLanguageCode").addEventListener("change", saveExportSettings);
   $("#exportCitationStyle").addEventListener("change", async () => {
     await saveExportSettings();
     const label = $("#exportCitationStyle").selectedOptions[0]?.textContent || "Citation style";
