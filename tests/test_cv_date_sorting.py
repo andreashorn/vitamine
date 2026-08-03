@@ -12,6 +12,12 @@ from vitamine.paths import create_blank_database
 
 
 class CvDateSortingTests(unittest.TestCase):
+    def test_entry_editor_preserves_section_during_summary_refresh(self):
+        script = (Path(__file__).resolve().parents[1] / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('const selectedEntrySection = $("#entrySection").value;', script)
+        self.assertIn('$("#entrySection").value = selectedEntrySection;', script)
+        self.assertIn("updateGrantStatusVisibility();\n  state.entryAutosave.pending", script)
+
     def test_end_date_parser_uses_end_of_imprecise_period(self):
         self.assertEqual(str(cv_end_date("2025")), "2025-12-31")
         self.assertEqual(str(cv_end_date("04/2025")), "2025-04-30")
@@ -99,8 +105,34 @@ class CvDateSortingTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200, response.text)
             statuses = {entry["title"]: entry["grant_status"] for entry in response.json()["entries"]}
             self.assertEqual(statuses["Old award"], "past")
-            self.assertEqual(statuses["Submitted proposal"], "submitted")
+            self.assertEqual(statuses["Submitted proposal"], "past")
             self.assertEqual(statuses["Current award"], "funded")
+
+    def test_entry_update_preserves_funding_section_and_forces_expired_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "grant-edit.vitamine"
+            create_blank_database(database)
+            with sqlite3.connect(database) as con:
+                entry_id = con.execute(
+                    "INSERT INTO cv_entries (section_key, grant_status, title, raw_text) "
+                    "VALUES ('funding', 'funded', 'Edited grant', 'Edited grant')"
+                ).lastrowid
+                con.commit()
+
+            payload = {
+                "section_key": "funding", "grant_status": "submitted",
+                "start_date": "2015", "end_date": "2017", "title": "Edited grant",
+            }
+            with patch("vitamine.app.active_db_path", return_value=database):
+                with TestClient(app) as client:
+                    response = client.put(f"/api/entries/{entry_id}", json=payload)
+                    listed = client.get("/api/entries", params={"section": "funding"})
+
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["entry"]["section_key"], "funding")
+            self.assertEqual(response.json()["entry"]["grant_status"], "past")
+            self.assertEqual(listed.json()["entries"][0]["section_key"], "funding")
+            self.assertEqual(listed.json()["entries"][0]["grant_status"], "past")
 
 
 if __name__ == "__main__":

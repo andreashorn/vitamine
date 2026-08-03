@@ -462,6 +462,8 @@ function setActionButtons(disabled) {
 }
 
 function fillSectionSelects() {
+  const selectedFilter = $("#sectionFilter").value;
+  const selectedEntrySection = $("#entrySection").value;
   const options = ['<option value="">All sections</option>']
     .concat(Object.entries(state.sections).map(([key, label]) => `<option value="${key}">${label}</option>`))
     .join("");
@@ -469,6 +471,12 @@ function fillSectionSelects() {
   $("#entrySection").innerHTML = Object.entries(state.sections)
     .map(([key, label]) => `<option value="${key}">${label}</option>`)
     .join("");
+  if ([...$("#sectionFilter").options].some((option) => option.value === selectedFilter)) {
+    $("#sectionFilter").value = selectedFilter;
+  }
+  if ([...$("#entrySection").options].some((option) => option.value === selectedEntrySection)) {
+    $("#entrySection").value = selectedEntrySection;
+  }
 }
 
 async function loadSummary() {
@@ -2908,8 +2916,30 @@ function entryPayload() {
   };
 }
 
+function fundingEndHasPassed(value, now = new Date()) {
+  const text = String(value || "").trim();
+  if (!text || /present|current|ongoing/i.test(text)) return false;
+  let end = null;
+  let match = text.match(/^(\d{4})$/);
+  if (match) end = new Date(Number(match[1]), 11, 31, 23, 59, 59, 999);
+  match = match || text.match(/^(\d{1,2})[/.](\d{4})$/);
+  if (!end && match && match.length === 3) end = new Date(Number(match[2]), Number(match[1]), 0, 23, 59, 59, 999);
+  match = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (!end && match) end = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 23, 59, 59, 999);
+  match = text.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{4})$/);
+  if (!end && match) end = new Date(Number(match[3]), Number(match[1]) - 1, Number(match[2]), 23, 59, 59, 999);
+  return Boolean(end && !Number.isNaN(end.getTime()) && end < now);
+}
+
 function updateGrantStatusVisibility() {
-  $("#entryGrantStatusField").hidden = $("#entrySection").value !== "funding";
+  const isFunding = $("#entrySection").value === "funding";
+  const status = $("#entryGrantStatus");
+  const expired = isFunding && fundingEndHasPassed($("#entryEnd").value);
+  $("#entryGrantStatusField").hidden = !isFunding;
+  [...status.options].forEach((option) => {
+    option.disabled = expired && option.value !== "past";
+  });
+  if (expired) status.value = "past";
 }
 
 function mergeSavedEntry(id, payload) {
@@ -2939,7 +2969,7 @@ async function persistEntrySnapshot(snapshot) {
     if (!id && state.entryAutosave.pending && !state.entryAutosave.pending.id) {
       state.entryAutosave.pending.id = String(savedId);
     }
-    mergeSavedEntry(savedId, snapshot.payload);
+    mergeSavedEntry(savedId, data.entry || snapshot.payload);
   }
   setStatus("Entry autosaved");
   await loadSummary();
@@ -2967,6 +2997,7 @@ async function runEntryAutosave() {
 }
 
 function scheduleEntryAutosave() {
+  updateGrantStatusVisibility();
   state.entryAutosave.pending = {
     id: $("#entryId").value,
     payload: entryPayload(),

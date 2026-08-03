@@ -1576,7 +1576,7 @@ def normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:
     if data["section_key"] == "funding":
         status = str(data.get("grant_status") or "funded").strip().casefold()
         data["grant_status"] = status if status in {"planned", "submitted", "funded", "past"} else "funded"
-        if data["grant_status"] == "funded" and grant_end_has_passed(data.get("end_date")):
+        if grant_end_has_passed(data.get("end_date")):
             data["grant_status"] = "past"
     else:
         data["grant_status"] = None
@@ -1816,7 +1816,7 @@ def ensure_entry_columns(con: sqlite3.Connection) -> None:
 
 def refresh_past_grants(con: sqlite3.Connection) -> None:
     rows = con.execute(
-        "SELECT id, end_date FROM cv_entries WHERE section_key='funding' AND grant_status='funded'"
+        "SELECT id, end_date FROM cv_entries WHERE section_key='funding' AND COALESCE(grant_status, '') != 'past'"
     ).fetchall()
     expired_ids = [row["id"] for row in rows if grant_end_has_passed(row["end_date"])]
     if expired_ids:
@@ -3038,7 +3038,7 @@ async def create_entry(request: Request) -> dict[str, Any]:
             (document_id, *[payload[field] for field in ENTRY_FIELDS]),
         )
         con.commit()
-        return {"ok": True, "id": cur.lastrowid}
+        return {"ok": True, "id": cur.lastrowid, "entry": {**payload, "id": cur.lastrowid}}
 
 
 @app.put("/api/entries/{entry_id}")
@@ -3058,7 +3058,7 @@ async def update_entry(entry_id: int, request: Request) -> dict[str, Any]:
         con.commit()
     if cur.rowcount == 0:
         raise HTTPException(status_code=404, detail="Entry not found")
-    return {"ok": True}
+    return {"ok": True, "entry": {**payload, "id": entry_id}}
 
 
 @app.delete("/api/entries/{entry_id}")
