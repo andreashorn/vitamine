@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
@@ -94,7 +95,7 @@ from .custom_docx_templates import (
     render_template as render_custom_docx_template,
     template_sha256,
 )
-from .cv_dates import cv_entry_sort_key
+from .cv_dates import cv_end_date, cv_entry_sort_key
 
 
 PROJECT = Path(__file__).resolve().parent
@@ -135,6 +136,7 @@ ENTRY_FIELDS = [
     "section_key",
     "subcategory",
     "subcategory_de",
+    "grant_status",
     "start_date",
     "end_date",
     "title",
@@ -323,6 +325,7 @@ def connect() -> sqlite3.Connection:
     con.execute("PRAGMA busy_timeout = 30000")
     ensure_person_columns(con)
     ensure_publication_columns(con)
+    ensure_entry_columns(con)
     ensure_collaboration_tables(con)
     ensure_biosketch_tables(con)
     ensure_narrative_report_table(con)
@@ -1556,6 +1559,13 @@ def bool_int(value: Any, default: int = 0) -> int:
 def normalize_entry(payload: dict[str, Any]) -> dict[str, Any]:
     data = {field: payload.get(field) for field in ENTRY_FIELDS}
     data["section_key"] = data["section_key"] or "honors"
+    if data["section_key"] == "funding":
+        status = str(data.get("grant_status") or "funded").strip().casefold()
+        data["grant_status"] = status if status in {"planned", "submitted", "funded", "past"} else "funded"
+        if data["grant_status"] == "funded" and grant_end_has_passed(data.get("end_date")):
+            data["grant_status"] = "past"
+    else:
+        data["grant_status"] = None
     data["raw_text"] = data["raw_text"] or data.get("description") or data.get("title") or ""
     data = fill_german_drafts(data)
     data["raw_text_de"] = data["raw_text_de"] or data.get("description_de") or data.get("title_de") or ""
@@ -1766,11 +1776,43 @@ def accept_inbox_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tup
     return handler(con, item)
 
 
-def ensure_german_columns(con: sqlite3.Connection) -> None:
+def grant_end_has_passed(value: Any, today: date | None = None) -> bool:
+    end = cv_end_date(value)
+    return bool(end and end < (today or date.today()))
+
+
+def ensure_entry_columns(con: sqlite3.Connection) -> None:
     existing = {row[1] for row in con.execute("PRAGMA table_info(cv_entries)").fetchall()}
     for _english, german in GERMAN_FIELD_PAIRS:
         if german not in existing:
             con.execute(f"ALTER TABLE cv_entries ADD COLUMN {german} TEXT")
+    if "grant_status" not in existing:
+        con.execute("ALTER TABLE cv_entries ADD COLUMN grant_status TEXT")
+    con.execute(
+        """
+        UPDATE cv_entries
+        SET grant_status = CASE
+          WHEN lower(COALESCE(subcategory, '')) = 'grant_application' THEN 'submitted'
+          ELSE 'funded'
+        END
+        WHERE section_key = 'funding' AND grant_status IS NULL
+        """
+    )
+
+
+def refresh_past_grants(con: sqlite3.Connection) -> None:
+    rows = con.execute(
+        "SELECT id, end_date FROM cv_entries WHERE section_key='funding' AND grant_status='funded'"
+    ).fetchall()
+    expired_ids = [row["id"] for row in rows if grant_end_has_passed(row["end_date"])]
+    if expired_ids:
+        placeholders = ", ".join("?" for _ in expired_ids)
+        con.execute(f"UPDATE cv_entries SET grant_status='past' WHERE id IN ({placeholders})", expired_ids)
+
+
+def ensure_german_columns(con: sqlite3.Connection) -> None:
+    """Backward-compatible alias for callers that ensure editable entry columns."""
+    ensure_entry_columns(con)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2930,6 +2972,8 @@ def list_entries(section: str | None = None, q: str | None = None, limit: int = 
         params.extend([needle, needle, needle, needle, needle, needle, needle, needle])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with connect() as con:
+        refresh_past_grants(con)
+        con.commit()
         rows = rows_dict(
             con.execute(
                 f"""

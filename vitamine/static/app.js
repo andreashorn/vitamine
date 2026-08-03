@@ -2727,7 +2727,7 @@ function renderEntries() {
     rows.push(`<tr class="${selected}" data-id="${entry.id}">
         <td>${state.sections[entry.section_key] || entry.section_key}</td>
         <td>${dates}</td>
-        <td>${entry.title || ""}</td>
+        <td>${entry.section_key === "funding" && entry.grant_status ? `<span class="grantStatus grantStatus-${entry.grant_status}">${entry.grant_status}</span>` : ""}${entry.title || ""}</td>
         <td>${entry.organization || ""}</td>
       </tr>`);
   });
@@ -2744,6 +2744,8 @@ function selectEntry(id) {
   $("#entrySection").value = entry.section_key || "honors";
   $("#entryStart").value = entry.start_date || "";
   $("#entryEnd").value = entry.end_date || "";
+  $("#entryGrantStatus").value = entry.grant_status || "funded";
+  updateGrantStatusVisibility();
   $("#entryTitle").value = entry.title || "";
   $("#entryOrganization").value = entry.organization || "";
   $("#entryLocation").value = entry.location || "";
@@ -2769,6 +2771,8 @@ function clearEntryForm() {
   $("#entryForm").reset();
   $("#entryId").value = "";
   $("#entrySection").value = $("#sectionFilter").value || "honors";
+  $("#entryGrantStatus").value = "funded";
+  updateGrantStatusVisibility();
   $("#includeExtended").checked = true;
   $("#includeLong").checked = true;
   $("#includeShort").checked = false;
@@ -2797,6 +2801,7 @@ function renderAchievements(achievements) {
 function entryPayload() {
   return {
     section_key: $("#entrySection").value,
+    grant_status: $("#entrySection").value === "funding" ? $("#entryGrantStatus").value : null,
     start_date: $("#entryStart").value,
     end_date: $("#entryEnd").value,
     title: $("#entryTitle").value,
@@ -2820,6 +2825,10 @@ function entryPayload() {
     include_short: $("#includeShort").checked,
     include_biosketch: $("#includeBiosketch").checked,
   };
+}
+
+function updateGrantStatusVisibility() {
+  $("#entryGrantStatusField").hidden = $("#entrySection").value !== "funding";
 }
 
 function mergeSavedEntry(id, payload) {
@@ -4302,6 +4311,7 @@ async function init() {
   $("#deletePublication").addEventListener("click", deletePublication);
   $("#newEntry").addEventListener("click", clearEntryForm);
   $("#entryForm").addEventListener("submit", saveEntry);
+  $("#entrySection").addEventListener("change", updateGrantStatusVisibility);
   $$("#entryForm input, #entryForm textarea, #entryForm select").forEach((field) => {
     if (field.type !== "hidden") field.addEventListener("input", scheduleEntryAutosave);
     if (field.type === "checkbox" || field.tagName === "SELECT") field.addEventListener("change", scheduleEntryAutosave);

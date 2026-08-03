@@ -78,6 +78,36 @@ def cv_date_sort_key(value: Any) -> tuple[int, int, int]:
     return UNKNOWN_CV_DATE
 
 
+def cv_end_date(value: Any) -> date | None:
+    """Return the last day represented by an unambiguous CV end-date value."""
+
+    text = str(value or "").strip().rstrip(",")
+    if not text or text.casefold() in {"present", "current", "ongoing"}:
+        return None
+
+    match = re.fullmatch(r"(\d{4})", text)
+    if match:
+        return date(int(match.group(1)), 12, 31)
+
+    match = re.fullmatch(r"(\d{1,2})/(\d{4})", text)
+    if match:
+        year, month = int(match.group(2)), int(match.group(1))
+        return date(year, month, calendar.monthrange(year, month)[1])
+
+    match = re.fullmatch(r"(\d{4})[-/.](\d{1,2})", text)
+    if match:
+        year, month = int(match.group(1)), int(match.group(2))
+        return date(year, month, calendar.monthrange(year, month)[1])
+
+    parsed = cv_date_sort_key(text)
+    if parsed == UNKNOWN_CV_DATE:
+        return None
+    try:
+        return date(*parsed)
+    except ValueError:
+        return None
+
+
 def cv_entry_sort_key(row: Mapping[str, Any]) -> tuple[str, tuple[int, int, int], tuple[int, int, int], int]:
     """Order entry mappings chronologically within their database section."""
 
