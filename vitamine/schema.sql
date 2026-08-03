@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS cv_entries (
   section_key TEXT NOT NULL,
   subcategory TEXT,
   subcategory_de TEXT,
+  grant_status TEXT,
   start_date TEXT,
   end_date TEXT,
   title TEXT,

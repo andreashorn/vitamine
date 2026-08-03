@@ -7,11 +7,17 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from vitamine.app import app
-from vitamine.cv_dates import UNKNOWN_CV_DATE, cv_date_sort_key
+from vitamine.cv_dates import UNKNOWN_CV_DATE, cv_date_sort_key, cv_end_date
 from vitamine.paths import create_blank_database
 
 
 class CvDateSortingTests(unittest.TestCase):
+    def test_end_date_parser_uses_end_of_imprecise_period(self):
+        self.assertEqual(str(cv_end_date("2025")), "2025-12-31")
+        self.assertEqual(str(cv_end_date("04/2025")), "2025-04-30")
+        self.assertEqual(str(cv_end_date("2025-04-30")), "2025-04-30")
+        self.assertIsNone(cv_end_date("Present"))
+
     def test_parser_recognizes_imported_and_manually_entered_date_formats(self):
         cases = {
             "04/01/18-10/31/21": (2018, 4, 1),
@@ -68,6 +74,33 @@ class CvDateSortingTests(unittest.TestCase):
                     "undated",
                 ],
             )
+
+    def test_funding_statuses_migrate_and_expired_funded_grants_become_past(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "grants.vitamine"
+            create_blank_database(database)
+            with sqlite3.connect(database) as con:
+                con.executemany(
+                    """
+                    INSERT INTO cv_entries (section_key, subcategory, end_date, title, raw_text)
+                    VALUES ('funding', ?, ?, ?, ?)
+                    """,
+                    [
+                        (None, "2020", "Old award", "Old award"),
+                        ("grant_application", "2020", "Submitted proposal", "Submitted proposal"),
+                        (None, "2099", "Current award", "Current award"),
+                    ],
+                )
+
+            with patch("vitamine.app.active_db_path", return_value=database):
+                with TestClient(app) as client:
+                    response = client.get("/api/entries", params={"section": "funding"})
+
+            self.assertEqual(response.status_code, 200, response.text)
+            statuses = {entry["title"]: entry["grant_status"] for entry in response.json()["entries"]}
+            self.assertEqual(statuses["Old award"], "past")
+            self.assertEqual(statuses["Submitted proposal"], "submitted")
+            self.assertEqual(statuses["Current award"], "funded")
 
 
 if __name__ == "__main__":
