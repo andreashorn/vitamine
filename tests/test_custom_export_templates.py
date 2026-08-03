@@ -647,6 +647,8 @@ class CustomDocxTemplateApiTests(unittest.TestCase):
         page = self.client.get("/")
         self.assertIn('id="customTemplateDropzone"', page.text)
         self.assertIn('id="customTemplateName"', page.text)
+        self.assertIn('<svg class="wordTemplateIcon"', page.text)
+        self.assertNotIn('<span class="wordTemplateIcon"', page.text)
         script = self.client.get("/static/app.js")
         self.assertIn("async function importCustomExportTemplate(file)", script.text)
         self.assertIn("renameCustomExportTemplate", script.text)

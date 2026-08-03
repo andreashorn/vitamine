@@ -108,7 +108,6 @@ body {
   font-size: 12px;
 }
 
-.wordTemplateIcon,
 .customWordPreview > span {
   display: grid;
   place-items: center;
@@ -119,10 +118,37 @@ body {
 }
 
 .wordTemplateIcon {
-  width: 42px;
-  height: 50px;
-  border-radius: 4px 4px 7px 4px;
-  font-size: 24px;
+  width: 48px;
+  height: 56px;
+  overflow: visible;
+}
+
+.wordTemplatePage {
+  fill: #ffffff;
+  stroke: #9eb3ca;
+  stroke-width: 1.5;
+}
+
+.wordTemplateFold {
+  fill: #dce8f5;
+  stroke: #9eb3ca;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.wordTemplateLine {
+  fill: none;
+  stroke: #9eb3ca;
+  stroke-linecap: round;
+  stroke-width: 1.5;
+}
+
+.wordTemplateBadge {
+  fill: #185abd;
+}
+
+.wordTemplateLetter {
+  fill: #ffffff;
 }
 
 .topbar {
