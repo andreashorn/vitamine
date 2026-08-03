@@ -13,6 +13,7 @@ from pathlib import Path
 from docx import Document
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
@@ -106,18 +107,19 @@ def set_paragraph_spacing(paragraph, *, before: float = 0, after: float = 3, lin
     paragraph.paragraph_format.line_spacing = line
 
 
-def add_docx_paragraph(doc: Document, value: str, *, bold: bool = False, size: float = 10.0, after: float = 3) -> None:
+def add_docx_paragraph(doc: Document, value: str, *, bold: bool = False, size: float = 10.0, after: float = 3):
     paragraph = doc.add_paragraph()
     set_paragraph_spacing(paragraph, after=after)
     run = paragraph.add_run(clean(value))
     set_run_font(run, size=size, bold=bold)
+    return paragraph
 
 
 def add_docx_heading(doc: Document, value: str) -> None:
     paragraph = doc.add_paragraph()
     set_paragraph_spacing(paragraph, before=8, after=3)
     run = paragraph.add_run(clean(value))
-    set_run_font(run, size=11.5, bold=True, color="1f4e79")
+    set_run_font(run, size=11.5, bold=True)
 
 
 def add_key_value(doc: Document, label: str, value: str) -> None:
@@ -138,16 +140,104 @@ def set_cell_text(cell, value: str, *, bold: bool = False, size: float = 9.2) ->
     set_run_font(run, size=size, bold=bold)
 
 
-def add_two_column_table(doc: Document, rows: list[tuple[str, str]], *, left_width: float = 1.05) -> None:
-    table = doc.add_table(rows=0, cols=2)
+def set_cell_margins(cell, *, top: int = 20, start: int = 0, bottom: int = 20, end: int = 60) -> None:
+    tc_pr = cell._tc.get_or_add_tcPr()
+    tc_mar = tc_pr.find(qn("w:tcMar"))
+    if tc_mar is None:
+        tc_mar = OxmlElement("w:tcMar")
+        tc_pr.append(tc_mar)
+    for side, value in (("top", top), ("start", start), ("bottom", bottom), ("end", end)):
+        node = tc_mar.find(qn(f"w:{side}"))
+        if node is None:
+            node = OxmlElement(f"w:{side}")
+            tc_mar.append(node)
+        node.set(qn("w:w"), str(value))
+        node.set(qn("w:type"), "dxa")
+
+
+def set_borderless_table_geometry(table, widths) -> None:
+    width_twips = [int(width.twips) for width in widths]
     table.autofit = False
-    table.style = "Table Grid"
+    table.style = None
+    tbl_pr = table._tbl.tblPr
+    tbl_w = tbl_pr.first_child_found_in("w:tblW")
+    if tbl_w is None:
+        tbl_w = OxmlElement("w:tblW")
+        tbl_pr.append(tbl_w)
+    tbl_w.set(qn("w:w"), str(sum(width_twips)))
+    tbl_w.set(qn("w:type"), "dxa")
+    tbl_layout = tbl_pr.first_child_found_in("w:tblLayout")
+    if tbl_layout is None:
+        tbl_layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(tbl_layout)
+    tbl_layout.set(qn("w:type"), "fixed")
+    tbl_ind = tbl_pr.first_child_found_in("w:tblInd")
+    if tbl_ind is None:
+        tbl_ind = OxmlElement("w:tblInd")
+        tbl_pr.append(tbl_ind)
+    tbl_ind.set(qn("w:w"), "0")
+    tbl_ind.set(qn("w:type"), "dxa")
+    borders = tbl_pr.first_child_found_in("w:tblBorders")
+    if borders is None:
+        borders = OxmlElement("w:tblBorders")
+        tbl_pr.append(borders)
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        node = borders.find(qn(f"w:{edge}"))
+        if node is None:
+            node = OxmlElement(f"w:{edge}")
+            borders.append(node)
+        node.set(qn("w:val"), "nil")
+        node.set(qn("w:sz"), "0")
+        node.set(qn("w:space"), "0")
+        node.set(qn("w:color"), "auto")
+    tbl_grid = table._tbl.tblGrid
+    for child in list(tbl_grid):
+        tbl_grid.remove(child)
+    for width in width_twips:
+        grid_col = OxmlElement("w:gridCol")
+        grid_col.set(qn("w:w"), str(width))
+        tbl_grid.append(grid_col)
+
+
+def add_two_column_table(
+    doc: Document,
+    rows: list[tuple[str, str]],
+    *,
+    left_width: float = 1.05,
+    keep_together: bool = False,
+):
+    widths = [Inches(left_width), Inches(7.2 - left_width)]
+    table = doc.add_table(rows=0, cols=2)
+    set_borderless_table_geometry(table, widths)
     for left, right in rows:
         cells = table.add_row().cells
-        cells[0].width = Inches(left_width)
-        cells[1].width = Inches(6.25)
+        for cell, width in zip(cells, widths):
+            cell.width = width
+            tc_w = cell._tc.get_or_add_tcPr().find(qn("w:tcW"))
+            if tc_w is None:
+                tc_w = OxmlElement("w:tcW")
+                cell._tc.get_or_add_tcPr().append(tc_w)
+            tc_w.set(qn("w:w"), str(int(width.twips)))
+            tc_w.set(qn("w:type"), "dxa")
+            set_cell_margins(cell)
         set_cell_text(cells[0], left, bold=True)
         set_cell_text(cells[1], right)
+    if keep_together:
+        for row in table.rows[:-1]:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    paragraph.paragraph_format.keep_with_next = True
+    return table
+
+
+def add_contribution_paragraph(doc: Document, ordinal: int, title: str, narrative: str) -> None:
+    paragraph = doc.add_paragraph()
+    set_paragraph_spacing(paragraph, after=2)
+    run = paragraph.add_run(f"{ordinal}. {clean(title)}.")
+    set_run_font(run, bold=True)
+    if clean(narrative):
+        run = paragraph.add_run(f" {clean(narrative)}")
+        set_run_font(run)
 
 
 def typ(value: str | None) -> str:
@@ -381,6 +471,16 @@ def build_docx(path: Path) -> Path:
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     set_paragraph_spacing(title, after=8)
+    title_pr = title._p.get_or_add_pPr()
+    title_borders = OxmlElement("w:pBdr")
+    for edge in ("top", "bottom"):
+        border = OxmlElement(f"w:{edge}")
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), "6")
+        border.set(qn("w:space"), "7")
+        border.set(qn("w:color"), "111111")
+        title_borders.append(border)
+    title_pr.append(title_borders)
     run = title.add_run("BIOGRAPHICAL SKETCH")
     set_run_font(run, size=14, bold=True)
 
@@ -403,13 +503,19 @@ def build_docx(path: Path) -> Path:
     add_docx_heading(doc, "B. Positions, Scientific Appointments, and Honors")
     add_docx_paragraph(doc, "Positions and Scientific Appointments", bold=True, after=2)
     add_two_column_table(doc, POSITIONS, left_width=1.1)
-    add_docx_paragraph(doc, "Honors", bold=True, after=2)
-    add_two_column_table(doc, HONORS, left_width=1.1)
+    honors_heading = add_docx_paragraph(doc, "Honors", bold=True, after=2)
+    honors_heading.paragraph_format.keep_with_next = True
+    add_two_column_table(doc, HONORS, left_width=1.1, keep_together=True)
 
     add_docx_heading(doc, "C. Contributions to Science")
     for contribution in contributions:
         citations = json.loads(contribution["citations_json"] or "[]")
-        add_docx_paragraph(doc, f"{contribution['ordinal']}. {contribution['title']}. {contribution['narrative']}", bold=True, after=2)
+        add_contribution_paragraph(
+            doc,
+            contribution["ordinal"],
+            contribution["title"],
+            contribution["narrative"],
+        )
         for citation in citations:
             add_docx_citation(doc, citation, size=9.2, after=1)
     add_docx_paragraph(
