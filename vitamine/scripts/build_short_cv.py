@@ -376,15 +376,6 @@ def build_typst() -> str:
     return "\n".join(lines) + "\n"
 
 
-def set_cell_shading(cell, fill: str) -> None:
-    tc_pr = cell._tc.get_or_add_tcPr()
-    shd = tc_pr.find(qn("w:shd"))
-    if shd is None:
-        shd = OxmlElement("w:shd")
-        tc_pr.append(shd)
-    shd.set(qn("w:fill"), fill)
-
-
 def set_cell_margins(cell, top: int = 70, start: int = 90, bottom: int = 70, end: int = 90) -> None:
     tc_pr = cell._tc.get_or_add_tcPr()
     tc_mar = tc_pr.find(qn("w:tcMar"))
@@ -400,7 +391,7 @@ def set_cell_margins(cell, top: int = 70, start: int = 90, bottom: int = 70, end
         node.set(qn("w:type"), "dxa")
 
 
-def set_table_borders(table, color: str = "D7DCE2") -> None:
+def remove_table_borders(table) -> None:
     tbl_pr = table._tbl.tblPr
     borders = tbl_pr.first_child_found_in("w:tblBorders")
     if borders is None:
@@ -412,10 +403,10 @@ def set_table_borders(table, color: str = "D7DCE2") -> None:
         if element is None:
             element = OxmlElement(tag)
             borders.append(element)
-        element.set(qn("w:val"), "single")
-        element.set(qn("w:sz"), "4")
+        element.set(qn("w:val"), "nil")
+        element.set(qn("w:sz"), "0")
         element.set(qn("w:space"), "0")
-        element.set(qn("w:color"), color)
+        element.set(qn("w:color"), "auto")
 
 
 def set_paragraph_font(paragraph, *, size: float = 8.7, bold: bool = False, color: str = "111827") -> None:
@@ -523,8 +514,17 @@ def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
 
 def add_compact_heading(doc: Document, label: str) -> None:
     paragraph = doc.add_paragraph()
-    paragraph.paragraph_format.space_before = Pt(6)
+    paragraph.paragraph_format.space_before = Pt(7)
     paragraph.paragraph_format.space_after = Pt(2)
+    p_pr = paragraph._p.get_or_add_pPr()
+    borders = OxmlElement("w:pBdr")
+    top = OxmlElement("w:top")
+    top.set(qn("w:val"), "single")
+    top.set(qn("w:sz"), "6")
+    top.set(qn("w:space"), "5")
+    top.set(qn("w:color"), "111111")
+    borders.append(top)
+    p_pr.append(borders)
     run = paragraph.add_run(label)
     run.font.name = "Arial"
     run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
@@ -535,7 +535,8 @@ def add_compact_heading(doc: Document, label: str) -> None:
 
 def set_table_width(table, widths) -> None:
     table.autofit = False
-    total = sum(int(width) for width in widths)
+    width_twips = [int(width.twips) for width in widths]
+    total = sum(width_twips)
     tbl_pr = table._tbl.tblPr
     tbl_w = tbl_pr.first_child_found_in("w:tblW")
     if tbl_w is None:
@@ -548,40 +549,44 @@ def set_table_width(table, widths) -> None:
         tbl_layout = OxmlElement("w:tblLayout")
         tbl_pr.append(tbl_layout)
     tbl_layout.set(qn("w:type"), "fixed")
+    tbl_ind = tbl_pr.first_child_found_in("w:tblInd")
+    if tbl_ind is None:
+        tbl_ind = OxmlElement("w:tblInd")
+        tbl_pr.append(tbl_ind)
+    tbl_ind.set(qn("w:w"), "0")
+    tbl_ind.set(qn("w:type"), "dxa")
     tbl_grid = table._tbl.tblGrid
     for child in list(tbl_grid):
         tbl_grid.remove(child)
-    for width in widths:
+    for width in width_twips:
         grid_col = OxmlElement("w:gridCol")
         grid_col.set(qn("w:w"), str(int(width)))
         tbl_grid.append(grid_col)
     for row in table.rows:
-        for cell, width in zip(row.cells, widths):
+        for cell, width, twips in zip(row.cells, widths, width_twips):
             cell.width = width
             tc_pr = cell._tc.get_or_add_tcPr()
             tc_w = tc_pr.find(qn("w:tcW"))
             if tc_w is None:
                 tc_w = OxmlElement("w:tcW")
                 tc_pr.append(tc_w)
-            tc_w.set(qn("w:w"), str(int(width)))
+            tc_w.set(qn("w:w"), str(twips))
             tc_w.set(qn("w:type"), "dxa")
 
 
 def add_entries_table(doc: Document, rows: list[sqlite3.Row]) -> None:
-    widths = [Inches(1.18), Inches(6.12)]
+    widths = [Inches(1.45), Inches(5.55)]
     table = doc.add_table(rows=0, cols=2)
-    table.style = "Table Grid"
-    set_table_borders(table)
+    table.style = None
+    remove_table_borders(table)
     set_table_width(table, widths)
-    for index, row in enumerate(rows):
+    for row in rows:
         cells = table.add_row().cells
         cells[0].text = year_label(row)
         cells[1].text = entry_detail(row)
         for cell in cells:
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            set_cell_margins(cell)
-            if index % 2 == 0:
-                set_cell_shading(cell, "F8FAFC")
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            set_cell_margins(cell, top=20, start=0, bottom=20, end=70)
         for paragraph in cells[0].paragraphs:
             set_paragraph_font(paragraph, size=8.3, bold=True, color="334155")
         for paragraph in cells[1].paragraphs:
@@ -590,10 +595,10 @@ def add_entries_table(doc: Document, rows: list[sqlite3.Row]) -> None:
 
 
 def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
-    widths = [Inches(0.32), Inches(6.98)]
+    widths = [Inches(0.32), Inches(6.68)]
     table = doc.add_table(rows=0, cols=2)
-    table.style = "Table Grid"
-    set_table_borders(table)
+    table.style = None
+    remove_table_borders(table)
     set_table_width(table, widths)
     for index, row in enumerate(pubs, 1):
         cells = table.add_row().cells
@@ -601,7 +606,7 @@ def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
         cells[1].text = ""
         for cell in cells:
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-            set_cell_margins(cell, top=60, start=75, bottom=60, end=75)
+            set_cell_margins(cell, top=35, start=0, bottom=25, end=65)
         for paragraph in cells[0].paragraphs:
             paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
             set_paragraph_font(paragraph, size=8.0, bold=True, color="334155")
@@ -634,9 +639,7 @@ def build_docx(path: Path) -> Path:
     run.bold = True
     run.font.color.rgb = RGBColor.from_string("111827")
     if title:
-        subtitle = doc.add_paragraph()
-        subtitle.paragraph_format.space_after = Pt(6)
-        run = subtitle.add_run(title)
+        run = title_p.add_run(f"  {title}")
         run.font.name = "Arial"
         run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
         run.font.size = Pt(8.8)
