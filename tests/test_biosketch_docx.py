@@ -8,6 +8,7 @@ from docx.shared import Inches
 
 from vitamine.scripts.build_biosketch import (
     add_contribution_paragraph,
+    add_docx_citation,
     add_two_column_table,
 )
 
@@ -50,6 +51,18 @@ class BiosketchDocxTests(unittest.TestCase):
 
         self.assertEqual([run.text for run in runs], ["2. A scientific contribution.", " Narrative remains readable."])
         self.assertEqual([run.bold for run in runs], [True, False])
+
+    def test_contribution_citation_uses_a_hanging_indent(self):
+        document = Document()
+        add_docx_citation(
+            document,
+            "a. Horn A. A representative publication with a wrapped line.",
+            hanging_indent=True,
+        )
+        formatting = document.paragraphs[0].paragraph_format
+
+        self.assertEqual(formatting.left_indent.twips, 605)
+        self.assertEqual(formatting.first_line_indent.twips, -288)
 
 
 if __name__ == "__main__":

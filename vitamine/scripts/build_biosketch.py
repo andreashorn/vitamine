@@ -280,9 +280,19 @@ def typst_citation(value: str | None, *, size: str = "9pt") -> str:
     return "".join(pieces) if pieces else text(value, size=size)
 
 
-def add_docx_citation(doc: Document, value: str, *, size: float = 9.2, after: float = 1) -> None:
+def add_docx_citation(
+    doc: Document,
+    value: str,
+    *,
+    size: float = 9.2,
+    after: float = 1,
+    hanging_indent: bool = False,
+) -> None:
     paragraph = doc.add_paragraph()
     set_paragraph_spacing(paragraph, after=after)
+    if hanging_indent:
+        paragraph.paragraph_format.left_indent = Inches(0.42)
+        paragraph.paragraph_format.first_line_indent = Inches(-0.20)
     value = citation_text(value)
     cursor = 0
     for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
@@ -517,7 +527,7 @@ def build_docx(path: Path) -> Path:
             contribution["narrative"],
         )
         for citation in citations:
-            add_docx_citation(doc, citation, size=9.2, after=1)
+            add_docx_citation(doc, citation, size=9.2, after=1, hanging_indent=True)
     add_docx_paragraph(
         doc,
         "Complete List of Published Work in MyBibliography: https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/",
