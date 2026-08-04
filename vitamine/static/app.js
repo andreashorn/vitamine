@@ -56,6 +56,7 @@ const state = {
   selectedPublicationId: null,
   suppressPublicationClick: false,
   publicationSort: { key: "year", direction: "desc" },
+  publicationLoadSequence: 0,
   publicationCategoryFilters: new Set(["peer_reviewed", "patents"]),
   draggedPublicationId: null,
   draggedDropProfile: null,
@@ -3647,6 +3648,7 @@ function publicationRow(pub) {
 }
 
 async function loadPublications() {
+  const requestSequence = ++state.publicationLoadSequence;
   const params = new URLSearchParams();
   const q = $("#pubSearch").value.trim();
   if (q) params.set("q", q);
@@ -3654,6 +3656,9 @@ async function loadPublications() {
   params.set("sort", state.publicationSort.key);
   params.set("direction", state.publicationSort.direction);
   const data = await api(`/api/publications?${params.toString()}`);
+  // Typing can start while the initial, unfiltered table is still loading.
+  // Do not let an older response repaint over newer search results.
+  if (requestSequence !== state.publicationLoadSequence) return;
   state.publications = data.publications;
   const filtered = filteredPublications(data.publications);
   $("#publicationsBody").innerHTML = groupedPublications(filtered)

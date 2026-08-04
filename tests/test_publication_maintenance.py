@@ -151,6 +151,27 @@ class PublicationMaintenanceTests(unittest.TestCase):
 
         self.assertEqual([row["title"] for row in payload["publications"]], ["Legacy preprint"])
 
+    def test_publication_search_filters_titles_authors_venues_and_dois(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "search.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                con.executemany(
+                    """
+                    INSERT INTO publications
+                      (source, category, authors, title, venue, year, doi, raw_citation)
+                    VALUES ('manual', 'peer_reviewed', ?, ?, ?, '2026', ?, ?)
+                    """,
+                    [
+                        ("Ada Lovelace", "Network tremor", "Clinical Neurophysiology", "10.1000/tremor", "Network tremor"),
+                        ("Grace Hopper", "Unrelated paper", "Computing", "10.1000/other", "Unrelated paper"),
+                    ],
+                )
+            with patch("vitamine.app.active_db_path", return_value=path):
+                self.assertEqual([row["title"] for row in list_publications(q="tremor")["publications"]], ["Network tremor"])
+                self.assertEqual([row["title"] for row in list_publications(q="lovelace")["publications"]], ["Network tremor"])
+                self.assertEqual([row["title"] for row in list_publications(q="10.1000/other")["publications"]], ["Unrelated paper"])
+
 
 if __name__ == "__main__":
     unittest.main()
