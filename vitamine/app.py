@@ -102,6 +102,12 @@ from .export_quality import run_export_quality_audit
 from .llm_routing import settings_for_llm_task
 from .cleanup_cv import run_cleanup_review
 from .field_locks import ensure_field_locks_table, lock_field, locked_field_values
+from .journal_catalog import (
+    apply_journal_canonical_title,
+    ensure_journal_catalog_tables,
+    journal_catalog_preview,
+    remember_journal_title,
+)
 from .custom_docx_templates import (
     MAX_TEMPLATE_BYTES,
     analyze_and_skeletonize,
@@ -383,6 +389,7 @@ def connect() -> sqlite3.Connection:
     ensure_app_settings_table(con)
     ensure_metadata_entities_decoded(con)
     ensure_journal_metrics_table(con)
+    ensure_journal_catalog_tables(con)
     con.commit()
     return con
 
@@ -2020,6 +2027,14 @@ def apply_cleanup_suggestion(con: sqlite3.Connection, item: dict[str, Any]) -> t
         if not cleanup_text_equal(suggestion.get("old_text"), source[field]) or cleanup_text_equal(new_text, source[field]):
             return "skipped", None
         con.execute(f"UPDATE {table} SET {field}=? WHERE id=?", (new_text, record_id))
+        if record_type == "publication" and field == "venue":
+            remember_journal_title(
+                con,
+                str(source[field] or ""),
+                new_text,
+                source="crossref" if "Crossref" in str(suggestion.get("rationale") or "") else "approved_cleanup",
+                issn_l=str(suggestion.get("crossref_issn_l") or ""),
+            )
         lock_field(
             con,
             target_type=record_type,
@@ -4464,8 +4479,27 @@ async def import_publication_identifiers(request: Request) -> dict[str, Any]:
 
 @app.put("/api/publications/{publication_id}")
 async def update_publication(publication_id: int, request: Request) -> dict[str, Any]:
-    payload = normalize_publication(await request.json())
+    raw_payload = await request.json()
+    payload = normalize_publication(raw_payload)
+    apply_venue_to_matches = bool(raw_payload.get("apply_venue_to_matches"))
+    journal_update: dict[str, Any] = {"matched": 0, "updated": []}
     with connect() as con:
+        if apply_venue_to_matches:
+            journal_update = apply_journal_canonical_title(
+                con,
+                publication_id,
+                payload["venue"],
+                source="manual",
+            )
+            for updated in journal_update.get("updated") or []:
+                lock_field(
+                    con,
+                    target_type="publication",
+                    target_id=int(updated["id"]),
+                    field_name="venue",
+                    value=payload["venue"],
+                    source="journal_catalog",
+                )
         cursor = con.execute(
             f"""
             UPDATE publications
@@ -4478,7 +4512,25 @@ async def update_publication(publication_id: int, request: Request) -> dict[str,
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Publication not found")
     schedule_background_refresh(publications_changed=True)
-    return {"ok": True}
+    return {
+        "ok": True,
+        "journal_update": {
+            "matched": int(journal_update.get("matched") or 0),
+            "updated": len(journal_update.get("updated") or []),
+        },
+    }
+
+
+@app.post("/api/journal-catalog/preview")
+async def preview_journal_catalog_update(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    try:
+        publication_id = int(payload.get("publication_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Choose an existing publication first.")
+    canonical_title = str(payload.get("canonical_title") or "").strip()
+    with connect() as con:
+        return journal_catalog_preview(con, publication_id, canonical_title)
 
 
 @app.delete("/api/publications/{publication_id}")

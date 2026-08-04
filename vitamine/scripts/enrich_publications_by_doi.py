@@ -614,6 +614,7 @@ def crossref_metadata(doi: str) -> dict[str, Any]:
         or year_from_date_parts((message.get("published") or {}).get("date-parts"))
         or year_from_date_parts((message.get("issued") or {}).get("date-parts"))
     )
+    issns = [clean_text(value) for value in message.get("ISSN") or [] if clean_text(value)]
     return {
         "title": clean_text(message.get("title")),
         "venue": clean_text(message.get("container-title")),
@@ -621,6 +622,8 @@ def crossref_metadata(doi: str) -> dict[str, Any]:
         "authors": ", ".join(authors),
         "doi": normalize_doi(message.get("DOI") or doi),
         "url": clean_text(message.get("URL")),
+        "issn": issns[0] if issns else "",
+        "issn_l": clean_text(message.get("ISSN-L")),
         "abstract": clean_text(message.get("abstract")),
         "crossref_type": clean_text(message.get("type")),
         "_author_records": author_records,

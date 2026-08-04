@@ -3831,6 +3831,9 @@ function clearPublicationForm() {
   state.selectedPublicationId = null;
   $("#publicationForm").reset();
   $("#publicationId").value = "";
+  $("#publicationVenuePropagation").hidden = true;
+  $("#publicationApplyVenueToMatches").checked = false;
+  $("#publicationApplyVenueToMatches").disabled = true;
   setPublicationCategoryValue("peer_reviewed");
   $$("#publicationsBody tr[data-publication-id]").forEach((row) => row.classList.remove("selected"));
 }
@@ -3924,10 +3927,51 @@ function editPublication(id) {
   $("#publicationIncludeShort").checked = Boolean(pub.include_short);
   $("#publicationSuppress").checked = Boolean(pub.suppress_display);
   $("#publicationQualityNote").value = pub.quality_note || "";
+  $("#publicationApplyVenueToMatches").checked = false;
+  $("#publicationVenuePropagation").hidden = false;
   $$("#publicationsBody tr[data-publication-id]").forEach((row) => {
     row.classList.toggle("selected", Number(row.dataset.publicationId) === id);
   });
   openPublicationEditor();
+  refreshPublicationVenuePropagation();
+}
+
+async function refreshPublicationVenuePropagation() {
+  const publicationId = Number($("#publicationId").value || 0);
+  const canonicalTitle = $("#publicationVenue").value.trim();
+  const panel = $("#publicationVenuePropagation");
+  const checkbox = $("#publicationApplyVenueToMatches");
+  const count = $("#publicationVenueMatchCount");
+  const hint = $("#publicationVenuePropagationHint");
+  if (!publicationId || !canonicalTitle) {
+    panel.hidden = true;
+    checkbox.checked = false;
+    checkbox.disabled = true;
+    return;
+  }
+  panel.hidden = false;
+  checkbox.checked = false;
+  checkbox.disabled = true;
+  count.textContent = "matching publications";
+  hint.textContent = "Checking the local journal catalog…";
+  const requestId = (state.publicationVenuePreviewRequest || 0) + 1;
+  state.publicationVenuePreviewRequest = requestId;
+  try {
+    const data = await api("/api/journal-catalog/preview", {
+      method: "POST",
+      body: JSON.stringify({ publication_id: publicationId, canonical_title: canonicalTitle }),
+    });
+    if (state.publicationVenuePreviewRequest !== requestId) return;
+    const matches = Number(data.matches || 0);
+    count.textContent = `${matches} matching publication${matches === 1 ? "" : "s"}`;
+    checkbox.disabled = matches < 2;
+    hint.textContent = matches < 2
+      ? "No other known aliases will be changed."
+      : "This updates only titles already linked through this CV’s local journal catalog.";
+  } catch (_error) {
+    if (state.publicationVenuePreviewRequest !== requestId) return;
+    hint.textContent = "The matching preview is unavailable; this publication can still be saved normally.";
+  }
 }
 
 function publicationPayload() {
@@ -3946,6 +3990,7 @@ function publicationPayload() {
     include_short: $("#publicationIncludeShort").checked,
     suppress_display: $("#publicationSuppress").checked,
     quality_note: $("#publicationQualityNote").value,
+    apply_venue_to_matches: $("#publicationApplyVenueToMatches").checked,
   };
 }
 
@@ -3983,7 +4028,10 @@ async function savePublication(event) {
     await syncPublicationProfileFlag("ultrashort", state.selectedPublicationId, payload.include_ultrashort);
     await syncPublicationProfileFlag("short", state.selectedPublicationId, payload.include_short);
   }
-  setStatus("Publication saved");
+  const journalUpdated = Number(data.journal_update?.updated || 0);
+  setStatus(journalUpdated
+    ? `Publication saved; canonical venue applied to ${journalUpdated} publication${journalUpdated === 1 ? "" : "s"}`
+    : "Publication saved");
   await loadPublications();
   await loadSummary();
   await loadExportProfile("ultrashort");
@@ -4745,6 +4793,7 @@ async function init() {
     if (event.target === $("#publicationDialog")) closePublicationEditor();
   });
   $("#publicationForm").addEventListener("submit", savePublication);
+  $("#publicationVenue").addEventListener("change", refreshPublicationVenuePropagation);
   $("#deletePublication").addEventListener("click", deletePublication);
   $("#newEntry").addEventListener("click", clearEntryForm);
   $("#entryForm").addEventListener("submit", saveEntry);

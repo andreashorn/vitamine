@@ -146,6 +146,26 @@ CREATE TABLE IF NOT EXISTS publications (
   openalex_citation_geography_enriched_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS journal_catalog (
+  id INTEGER PRIMARY KEY,
+  canonical_title TEXT NOT NULL,
+  canonical_key TEXT NOT NULL UNIQUE,
+  issn_l TEXT,
+  source TEXT NOT NULL DEFAULT 'manual',
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS journal_aliases (
+  alias_key TEXT PRIMARY KEY,
+  alias_title TEXT NOT NULL,
+  journal_id INTEGER NOT NULL REFERENCES journal_catalog(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_journal_aliases_journal ON journal_aliases(journal_id);
+
 CREATE TABLE IF NOT EXISTS export_settings (
   profile TEXT PRIMARY KEY,
   publication_limit INTEGER NOT NULL DEFAULT 10,

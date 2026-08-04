@@ -95,6 +95,10 @@ class CleanupCvTests(unittest.TestCase):
             "SELECT target_type, target_id, field_name, locked_value FROM field_locks"
         ).fetchone()
         self.assertEqual(tuple(lock), ("publication", 7, "venue", "Annals of Neurology"))
+        catalog = self.con.execute(
+            "SELECT canonical_title, source FROM journal_catalog"
+        ).fetchone()
+        self.assertEqual(tuple(catalog), ("Annals of Neurology", "approved_cleanup"))
 
     def test_csv_parser_rejects_stale_old_text(self):
         rows = [{"record_type": "publication", "record_id": "7", "fields": {"venue": "ANNALS OF NEUROLOGY"}}]
@@ -123,12 +127,13 @@ class CleanupCvTests(unittest.TestCase):
         resolved, replaced, skipped = verify_publication_cleanup_suggestions(
             [suggestion],
             records,
-            lambda doi: {"doi": doi, "venue": "Brain: A Journal of Neurology"},
+            lambda doi: {"doi": doi, "venue": "Brain: A Journal of Neurology", "issn_l": "1460-2156"},
         )
 
         self.assertEqual((replaced, skipped), (1, 0))
         self.assertEqual(resolved[0]["new_text"], "Brain: A Journal of Neurology")
         self.assertEqual(resolved[0]["rationale"], "Verified against Crossref DOI metadata.")
+        self.assertEqual(resolved[0]["crossref_issn_l"], "1460-2156")
 
     def test_crossref_removes_a_suggestion_when_the_current_value_is_canonical(self):
         suggestion = {

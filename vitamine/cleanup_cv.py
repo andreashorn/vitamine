@@ -220,6 +220,8 @@ def verify_publication_cleanup_suggestions(
             replaced += 1
         verified_suggestion["new_text"] = canonical
         verified_suggestion["rationale"] = "Verified against Crossref DOI metadata."
+        if metadata.get("issn_l"):
+            verified_suggestion["crossref_issn_l"] = str(metadata["issn_l"])
         resolved.append(verified_suggestion)
     return resolved, replaced, max(0, len(candidates) - MAX_CROSSREF_VERIFICATIONS)
 
