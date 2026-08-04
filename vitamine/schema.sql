@@ -332,3 +332,41 @@ CREATE TABLE IF NOT EXISTS discovery_rejections (
 
 CREATE INDEX IF NOT EXISTS idx_discovery_rejections_type_key
 ON discovery_rejections(target_type, normalized_key);
+
+CREATE TABLE IF NOT EXISTS profile_sync_remote_records (
+  id INTEGER PRIMARY KEY,
+  service TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  remote_id TEXT NOT NULL,
+  normalized_key TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(service, entity_type, remote_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_sync_remote_key
+ON profile_sync_remote_records(service, entity_type, normalized_key);
+
+CREATE TABLE IF NOT EXISTS profile_sync_service_state (
+  service TEXT PRIMARY KEY,
+  last_observed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS profile_sync_recommendations (
+  id INTEGER PRIMARY KEY,
+  service TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK(direction IN ('add_remote', 'remove_remote')),
+  entity_key TEXT NOT NULL,
+  publication_id INTEGER REFERENCES publications(id) ON DELETE SET NULL,
+  source_inbox_id INTEGER REFERENCES import_inbox_items(id) ON DELETE SET NULL,
+  payload_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'skipped', 'completed', 'resolved')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at TEXT,
+  UNIQUE(service, entity_type, direction, entity_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_profile_sync_recommendations_pending
+ON profile_sync_recommendations(service, status, direction, created_at);

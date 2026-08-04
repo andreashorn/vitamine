@@ -499,6 +499,106 @@ function updateInboxBadge(count) {
   badge.hidden = !count;
 }
 
+function updateProfileSyncBadge(count) {
+  const badge = $("#profileSyncBadge");
+  if (!badge) return;
+  badge.textContent = count;
+  badge.hidden = !count;
+}
+
+function profileSyncTitle(direction) {
+  return direction === "remove_remote"
+    ? "We’ve found publications that are on your ORCID record for which you declared they do not belong to you."
+    : "We’ve found papers that you authored that are not on your ORCID record.";
+}
+
+function profileSyncActionLabel(direction) {
+  return direction === "remove_remote" ? "Delete from ORCID profile" : "Add to ORCID profile";
+}
+
+async function loadProfileSync() {
+  const data = await api("/api/profile-sync/notifications");
+  state.profileSync = data;
+  updateProfileSyncBadge(data.total || 0);
+  return data;
+}
+
+function profileSyncItemMarkup(item) {
+  const publication = item.payload || {};
+  const subtitle = [publication.year, publication.venue, publication.doi].filter(Boolean).join(" · ");
+  return `
+    <article class="inboxItem confidence-high" data-profile-sync-id="${item.id}">
+      <label class="inboxCheck"><input type="checkbox" data-profile-sync-check="${item.id}" checked></label>
+      <div class="inboxMain">
+        <div class="inboxMeta"><span>Publication</span><span>ORCID</span></div>
+        <strong>${escapeHtml(publication.title || "Publication")}</strong>
+        ${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ""}
+      </div>
+    </article>`;
+}
+
+function selectedProfileSyncIds() {
+  return $$("#profileSyncList [data-profile-sync-check]:checked")
+    .map((input) => Number(input.dataset.profileSyncCheck)).filter(Boolean);
+}
+
+async function openProfileSync() {
+  const data = await loadProfileSync();
+  const removeItems = (data.items || []).filter((item) => item.direction === "remove_remote");
+  const addItems = (data.items || []).filter((item) => item.direction === "add_remote");
+  const items = removeItems.length ? removeItems : addItems;
+  if (!items.length) {
+    setStatus("Your connected profiles are in sync.");
+    return;
+  }
+  const direction = items[0].direction;
+  state.profileSyncDirection = direction;
+  $("#profileSyncTitle").textContent = profileSyncTitle(direction);
+  $("#profileSyncDescription").textContent = direction === "remove_remote"
+    ? "These were rejected after ORCID enrichment. They are selected so you can remove them from ORCID."
+    : "These DOI-backed papers are selected so you can add them to ORCID.";
+  $("#applyProfileSync").textContent = profileSyncActionLabel(direction);
+  $("#profileSyncList").innerHTML = items.map(profileSyncItemMarkup).join("");
+  $("#profileSyncDialog").showModal();
+}
+
+async function skipProfileSync() {
+  const ids = selectedProfileSyncIds();
+  if (!ids.length) return setStatus("Choose at least one publication.");
+  const result = await api("/api/profile-sync/skip", { method: "POST", body: JSON.stringify({ service: "orcid", ids }) });
+  setStatus(`Skipped ${result.skipped || 0} profile suggestion${result.skipped === 1 ? "" : "s"}.`);
+  $("#profileSyncDialog").close();
+  await loadProfileSync();
+}
+
+async function applyProfileSync() {
+  const ids = selectedProfileSyncIds();
+  if (!ids.length) return setStatus("Choose at least one publication.");
+  if (!state.cloud.enabled) {
+    setStatus("Connect ORCID securely in hosted VitaMine before updating your ORCID profile.");
+    return;
+  }
+  const direction = state.profileSyncDirection;
+  setActionButtons(true);
+  try {
+    const result = await api("/gateway/profile-sync/orcid/actions", {
+      method: "POST", body: JSON.stringify({ direction, ids }),
+    });
+    setStatus(`${profileSyncActionLabel(direction)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
+    $("#profileSyncDialog").close();
+    await Promise.all([loadProfileSync(), loadPublications()]);
+  } catch (error) {
+    if (error.status === 403 && /Reconnect ORCID/.test(error.message || "")) {
+      const authorization = await api("/gateway/orcid/oauth/start?write_access=true", { method: "POST" });
+      window.location.assign(authorization.authorization_url);
+      return;
+    }
+    throw error;
+  } finally {
+    setActionButtons(false);
+  }
+}
+
 function inboxTypeLabel(type) {
   return {
     entry: "Entry",
@@ -4390,6 +4490,10 @@ async function init() {
   $("#acceptReviewSelected").addEventListener("click", () => acceptInboxItems("#importReviewList"));
   $("#rejectReviewSelected").addEventListener("click", () => rejectInboxItems("#importReviewList"));
   $("#closeImportReview").addEventListener("click", () => $("#importReviewDialog").close());
+  $("#profileSyncButton").addEventListener("click", openProfileSync);
+  $("#closeProfileSync").addEventListener("click", () => $("#profileSyncDialog").close());
+  $("#skipProfileSync").addEventListener("click", skipProfileSync);
+  $("#applyProfileSync").addEventListener("click", applyProfileSync);
   $("#useExampleDatabase").addEventListener("click", useExampleDatabase);
   $("#renameDatabase").addEventListener("click", openRenameDatabaseDialog);
   $("#renameDatabaseForm").addEventListener("submit", renameDatabase);
@@ -4543,6 +4647,7 @@ async function init() {
   await loadStartupStep("CV import settings", loadCvImportSettings);
   await loadStartupStep("Connections", loadConnections);
   await loadStartupStep("Import inbox", loadImportInbox);
+  await loadStartupStep("Profile sync", loadProfileSync);
   await loadStartupStep("Export settings", loadExportSettings);
   await loadStartupStep("Export formats", loadExportFormats);
   await loadStartupStep("Metrics", loadMetrics);
@@ -4559,6 +4664,7 @@ async function init() {
   await resumeCloudBackgroundJob();
   handleOrcidOAuthResult();
   handleZoteroOAuthResult();
+  window.setInterval(() => loadProfileSync().catch(() => {}), 5 * 60 * 1000);
   window.addEventListener("resize", () => {
     const config = ONBOARDING_STEPS[state.onboarding?.step];
     if (config) positionOnboardingCoach($(config.target), config);

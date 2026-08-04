@@ -131,7 +131,10 @@ Public profile routes and ownership scaffolding exist, but publishing is still
 an early prototype.
 
 The cloud gateway supports ORCID's OAuth authorization-code flow with the
-Public API `/authenticate` scope. The exact production redirect URI is
+Public API `/authenticate` scope. The profile-sync action requests the
+additional `/activities/update` scope only when a user chooses to add or remove
+a work; it therefore requires an ORCID client authorized for the Member API
+write scope. The exact production redirect URI is
 `https://vitamine.cloud/gateway/orcid/oauth/callback`. OAuth state is one-time
 and account/CV-bound; returned access and refresh tokens are encrypted at rest
 using a key derived from the cloud pepper. Configure `ORCID_OAUTH_CLIENT_ID`,

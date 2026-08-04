@@ -44,6 +44,9 @@ from .public_profiles import (
 )
 
 
+ORCID_WRITE_SCOPE = "/activities/update"
+
+
 DEFAULT_DB = Path("cloud-data/vitamine-cloud.sqlite")
 SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,38}[a-z0-9])?$")
 RESERVED_SLUGS = {
@@ -902,6 +905,17 @@ def orcid_oauth_config() -> dict[str, str] | None:
     }
 
 
+def orcid_api_base_url() -> str:
+    config = orcid_oauth_config()
+    if config is None:
+        raise HTTPException(status_code=503, detail="ORCID sign-in is not configured.")
+    return "https://api.sandbox.orcid.org" if config["base_url"] == "https://sandbox.orcid.org" else "https://api.orcid.org"
+
+
+def orcid_write_scope_granted(scope: str) -> bool:
+    return ORCID_WRITE_SCOPE in {part.strip() for part in str(scope or "").split()}
+
+
 def oauth_token_cipher() -> Fernet:
     pepper = str(os.environ.get("VITAMINE_CLOUD_PEPPER") or "")
     if not pepper:
@@ -1246,6 +1260,63 @@ def store_orcid_oauth_connection(
                 now.isoformat(),
             ),
         )
+
+
+def account_orcid_write_connection(member_id: str) -> tuple[str, str, str]:
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT orcid_id, access_token_ciphertext, scope
+            FROM orcid_oauth_connections WHERE member_id=?
+            """,
+            (member_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=409, detail="Connect your ORCID account before updating its profile.")
+    scope = str(row["scope"] or "")
+    if not orcid_write_scope_granted(scope):
+        raise HTTPException(
+            status_code=403,
+            detail="Reconnect ORCID and grant permission to update activities before changing your ORCID profile.",
+        )
+    return (
+        str(row["orcid_id"]),
+        decrypt_oauth_token(str(row["access_token_ciphertext"])),
+        scope,
+    )
+
+
+def orcid_work_payload(publication: dict[str, Any]) -> dict[str, Any]:
+    """Build the smallest portable ORCID work payload for a DOI-backed paper."""
+    title = str(publication.get("title") or "").strip()
+    doi = str(publication.get("doi") or "").strip()
+    if not title or not doi:
+        raise HTTPException(status_code=422, detail="An ORCID addition needs both a publication title and DOI.")
+    payload: dict[str, Any] = {
+        "title": {"title": {"value": title}},
+        "type": str(publication.get("item_type") or "journal-article").strip() or "journal-article",
+        "visibility": "PUBLIC",
+        "external-ids": {
+            "external-id": [{
+                "external-id-type": "doi",
+                "external-id-value": doi,
+                "external-id-relationship": "self",
+                "external-id-url": {"value": f"https://doi.org/{doi}"},
+            }]
+        },
+    }
+    venue = str(publication.get("venue") or "").strip()
+    if venue:
+        payload["journal-title"] = {"value": venue}
+    year = str(publication.get("year") or "").strip()
+    if year.isdigit() and len(year) == 4:
+        payload["publication-date"] = {"year": {"value": year}}
+    return payload
+
+
+def orcid_put_code_from_location(location: str) -> str:
+    match = re.search(r"/work/([^/?#]+)", str(location or ""))
+    return match.group(1) if match else ""
 
 
 def normalize_email(value: str) -> str:
@@ -3737,6 +3808,7 @@ def orcid_oauth_status(
         "scope": str(row["scope"] or "") if row is not None else "",
         "verified_at": str(row["verified_at"]) if row is not None else None,
         "expires_at": str(row["expires_at"]) if row is not None and row["expires_at"] else None,
+        "can_update_activities": bool(row is not None and orcid_write_scope_granted(str(row["scope"] or ""))),
     }
 
 
@@ -3744,6 +3816,7 @@ def orcid_oauth_status(
 def start_orcid_oauth(
     request: Request,
     authorization: str | None = Header(default=None),
+    write_access: bool = False,
 ) -> dict[str, Any]:
     config = orcid_oauth_config()
     if config is None:
@@ -3761,7 +3834,7 @@ def start_orcid_oauth(
         {
             "client_id": config["client_id"],
             "response_type": "code",
-            "scope": "/authenticate",
+            "scope": f"/authenticate {ORCID_WRITE_SCOPE}" if write_access else "/authenticate",
             "redirect_uri": config["redirect_uri"],
             "state": state,
         }
@@ -3820,6 +3893,81 @@ async def link_authenticated_orcid_to_current_cv(
         raise HTTPException(status_code=409, detail="Connect your ORCID account first.")
     await apply_authenticated_orcid_to_workspace(workspace, str(connection["orcid_id"]))
     return {"ok": True, "orcid_id": str(connection["orcid_id"])}
+
+
+async def workspace_profile_sync_call(row: Any, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10)) as client:
+            response = await client.post(f"http://127.0.0.1:{row['port']}{path}", json=payload)
+            response.raise_for_status()
+            result = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="The private VitaMine workspace is unavailable.") from exc
+    return result if isinstance(result, dict) else {}
+
+
+@app.post("/gateway/profile-sync/orcid/actions")
+async def apply_orcid_profile_sync_actions(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    workspace = workspace_for_request(request, authorization)
+    if active_background_job(str(workspace["database_id"])):
+        raise HTTPException(status_code=409, detail="Wait for the current background process to finish before updating ORCID.")
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    if direction not in {"add_remote", "remove_remote"}:
+        raise HTTPException(status_code=400, detail="Unsupported profile-sync action.")
+    ids = payload.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one publication.")
+    prepared = await workspace_profile_sync_call(
+        workspace,
+        "/api/profile-sync/orcid/prepare",
+        {"direction": direction, "ids": ids},
+    )
+    items = prepared.get("items") or []
+    orcid_id, access_token, _scope = account_orcid_write_connection(str(workspace["member_id"]))
+    api_base = orcid_api_base_url()
+    completed_ids: list[int] = []
+    remote_ids: dict[int, str] = {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10)) as client:
+            for item in items:
+                recommendation_id = int(item.get("id") or 0)
+                publication = item.get("payload") or {}
+                if not recommendation_id or not isinstance(publication, dict):
+                    continue
+                if direction == "remove_remote":
+                    remote_id = str(publication.get("remote_id") or publication.get("orcid_put_code") or "").strip()
+                    if not remote_id:
+                        continue
+                    response = await client.delete(
+                        f"{api_base}/v3.0/{quote(orcid_id, safe='')}/work/{quote(remote_id, safe='')}",
+                        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                    )
+                    if response.status_code not in {204, 404}:
+                        response.raise_for_status()
+                else:
+                    response = await client.post(
+                        f"{api_base}/v3.0/{quote(orcid_id, safe='')}/work",
+                        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Content-Type": "application/json"},
+                        json=orcid_work_payload(publication),
+                    )
+                    response.raise_for_status()
+                    remote_id = orcid_put_code_from_location(response.headers.get("Location", ""))
+                    if remote_id:
+                        remote_ids[recommendation_id] = remote_id
+                completed_ids.append(recommendation_id)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail="ORCID could not apply this profile update. Please try again.") from exc
+    completed = await workspace_profile_sync_call(
+        workspace,
+        "/api/profile-sync/orcid/complete",
+        {"direction": direction, "ids": completed_ids, "remote_ids": remote_ids},
+    )
+    persist_workspace_snapshot(workspace)
+    return {"ok": True, "completed": int(completed.get("completed") or 0)}
 
 
 @app.get("/gateway/zotero/oauth/status")

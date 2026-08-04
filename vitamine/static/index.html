@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260803-zotero-group-libraries-plus-dev-toggle">
+  <link rel="stylesheet" href="/static/styles.css?v=20260803-zotero-group-libraries-export-format-label-generic-entry-translation-vitamine-plus-dev-toggle-profile-sync">
 </head>
 <body>
   <header class="topbar">
@@ -55,6 +55,13 @@
           <path d="M3 13h5l2 3h4l2-3h5"></path>
         </svg>
         <span id="inboxBadge" class="topbarBadge" hidden>0</span>
+      </button>
+      <button class="topbarViewButton" id="profileSyncButton" type="button" aria-label="Profile sync suggestions" title="Profile sync suggestions">
+        <svg class="topbarViewIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M20 7h-5l2-2a1 1 0 1 0-1.4-1.4l-3.7 3.7a1 1 0 0 0 0 1.4l3.7 3.7A1 1 0 1 0 17 10l-2-2h5a1 1 0 1 0 0-2Z"></path>
+          <path d="M4 17h5l-2 2a1 1 0 1 0 1.4 1.4l3.7-3.7a1 1 0 0 0 0-1.4l-3.7-3.7A1 1 0 1 0 7 14l2 2H4a1 1 0 1 0 0 2Z"></path>
+        </svg>
+        <span id="profileSyncBadge" class="topbarBadge" hidden>0</span>
       </button>
     </div>
   </header>
@@ -714,6 +721,21 @@
       </form>
     </dialog>
 
+    <dialog id="profileSyncDialog" class="importReviewDialog profileSyncDialog">
+      <form method="dialog" class="importReviewPanel">
+        <div class="dialogHeader">
+          <h2 id="profileSyncTitle">Profile sync</h2>
+          <button id="closeProfileSync" type="button" aria-label="Close profile sync">Close</button>
+        </div>
+        <p id="profileSyncDescription" class="profileSyncDescription"></p>
+        <div id="profileSyncList" class="inboxList compactInbox"></div>
+        <div class="formActions">
+          <button id="skipProfileSync" type="button">Skip</button>
+          <button id="applyProfileSync" type="button">Update ORCID profile</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="llmOnboardingDialog" class="onboardingDialog llmDialogWithCoach">
       <form id="llmOnboardingForm" class="onboardingDialogPanel">
         <img class="llmSetupCoach" src="/static/assets/onboarding_llm_config.png" alt="Configure the LLM to work on your CV">
@@ -858,6 +880,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=20260803-zotero-group-libraries-export-format-label-generic-entry-translation-vitamine-plus-dev-toggle"></script>
+  <script src="/static/app.js?v=20260803-zotero-group-libraries-export-format-label-generic-entry-translation-vitamine-plus-dev-toggle-profile-sync"></script>
 </body>
 </html>

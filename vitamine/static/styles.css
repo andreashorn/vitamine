@@ -2736,6 +2736,12 @@ label.invalid input {
   background: rgba(15, 23, 42, 0.18);
 }
 
+.profileSyncDescription {
+  margin: 0 0 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .importReviewPanel {
   display: grid;
   gap: 10px;

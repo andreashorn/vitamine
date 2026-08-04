@@ -88,6 +88,15 @@ from .enrichment_guard import (
     remember_rejection,
     review_nonpublications,
 )
+from .profile_sync import (
+    ORCID as PROFILE_SYNC_ORCID,
+    ensure_profile_sync_tables,
+    observe_remote_publications,
+    pending_recommendations,
+    prepare_recommendation_action,
+    complete_recommendations,
+    skip_recommendations,
+)
 from .export_quality import run_export_quality_audit
 from .llm_routing import settings_for_llm_task
 from .custom_docx_templates import (
@@ -210,6 +219,12 @@ LONG_CV_PUBLICATION_CATEGORIES = {
 DEFAULT_LONG_CV_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
 EXPORT_FORMAT_CATALOG = STATIC / "export-formats.json"
 BUNDLED_EXPORT_TEMPLATES = STATIC / "export-templates"
+R4RI_CONTRIBUTION_SECTIONS = (
+    ("knowledge", "Contributions to the generation of knowledge"),
+    ("people", "Contributions to the development of individuals and teams"),
+    ("research_community", "Contributions to the wider research and innovation community"),
+    ("society", "Contributions to broader society and the economy"),
+)
 EXPORT_CONTENT_PROFILES = {
     "long": {
         "label": "Long CV",
@@ -353,8 +368,10 @@ def connect() -> sqlite3.Connection:
     ensure_collaboration_tables(con)
     ensure_biosketch_tables(con)
     ensure_narrative_report_table(con)
+    ensure_r4ri_contribution_sections_table(con)
     ensure_import_inbox_table(con)
     ensure_discovery_rejections_table(con)
+    ensure_profile_sync_tables(con)
     ensure_export_settings_table(con)
     ensure_export_templates_table(con)
     ensure_app_settings_table(con)
@@ -1037,6 +1054,18 @@ def ensure_import_inbox_table(con: sqlite3.Connection) -> None:
     )
 
 
+def profile_sync_request_ids(payload: dict[str, Any]) -> list[int]:
+    ids: list[int] = []
+    for value in payload.get("ids") or []:
+        try:
+            item_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if item_id > 0:
+            ids.append(item_id)
+    return sorted(set(ids))
+
+
 def get_setting(con: sqlite3.Connection, key: str) -> str:
     row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
     return str(row["value"] or "") if row else ""
@@ -1527,6 +1556,29 @@ def ensure_narrative_report_table(con: sqlite3.Connection) -> None:
         con.execute("ALTER TABLE narrative_reports ADD COLUMN title_de TEXT")
     if "body_de" not in existing:
         con.execute("ALTER TABLE narrative_reports ADD COLUMN body_de TEXT")
+
+
+def ensure_r4ri_contribution_sections_table(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS r4ri_contribution_sections (
+          section_key TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '',
+          title_de TEXT,
+          body_de TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    for section_key, title in R4RI_CONTRIBUTION_SECTIONS:
+        con.execute(
+            """
+            INSERT OR IGNORE INTO r4ri_contribution_sections (section_key, title)
+            VALUES (?, ?)
+            """,
+            (section_key, title),
+        )
 
 
 def ensure_export_settings_table(con: sqlite3.Connection) -> None:
@@ -3186,6 +3238,59 @@ def list_import_inbox(
             ).fetchall()
         )
     return {"items": [inbox_payload(row) for row in rows], "counts": counts}
+
+
+@app.get("/api/profile-sync/notifications")
+def profile_sync_notifications() -> dict[str, Any]:
+    with connect() as con:
+        payload = pending_recommendations(con, PROFILE_SYNC_ORCID)
+        con.commit()
+    return {"ok": True, **payload}
+
+
+@app.post("/api/profile-sync/orcid/prepare")
+async def prepare_orcid_profile_sync_action(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    ids = profile_sync_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one publication.")
+    with connect() as con:
+        items = prepare_recommendation_action(con, PROFILE_SYNC_ORCID, direction, ids)
+    if not items:
+        raise HTTPException(status_code=409, detail="Those profile-sync suggestions are no longer available.")
+    return {"ok": True, "items": items}
+
+
+@app.post("/api/profile-sync/orcid/complete")
+async def complete_orcid_profile_sync_action(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    ids = profile_sync_request_ids(payload)
+    raw_remote_ids = payload.get("remote_ids") or {}
+    remote_ids: dict[int, str] = {}
+    if isinstance(raw_remote_ids, dict):
+        for key, value in raw_remote_ids.items():
+            try:
+                remote_ids[int(key)] = str(value or "")
+            except (TypeError, ValueError):
+                continue
+    with connect() as con:
+        completed = complete_recommendations(con, PROFILE_SYNC_ORCID, direction, ids, remote_ids)
+        con.commit()
+    return {"ok": True, "completed": completed}
+
+
+@app.post("/api/profile-sync/skip")
+async def skip_profile_sync(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    ids = profile_sync_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one publication.")
+    with connect() as con:
+        skipped = skip_recommendations(con, str(payload.get("service") or PROFILE_SYNC_ORCID), ids)
+        con.commit()
+    return {"ok": True, "skipped": skipped}
 
 
 @app.post("/api/import-inbox/accept")
@@ -4931,6 +5036,8 @@ def run_publication_source_to_inbox(source: str) -> dict[str, Any]:
     guard_stats: dict[str, int] = {}
     if result.returncode == 0:
         with connect() as con:
+            if source == "orcid":
+                observe_remote_publications(con, source, temp_rows)
             approved_rows, guard_stats = guard_publications(con, temp_rows, source)
             document_id = ensure_source_review_document(con, source)
             for payload in approved_rows:
