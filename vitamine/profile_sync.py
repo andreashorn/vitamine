@@ -13,6 +13,7 @@ from typing import Any
 
 
 ORCID = "orcid"
+ZOTERO = "zotero"
 ADD_REMOTE = "add_remote"
 REMOVE_REMOTE = "remove_remote"
 
@@ -24,13 +25,36 @@ def normalize_doi(value: Any) -> str:
     return value.rstrip(".")
 
 
+def profile_sync_provider(service: str) -> str:
+    return ZOTERO if str(service).startswith(f"{ZOTERO}:") else str(service)
+
+
+def zotero_service(source: dict[str, Any]) -> str | None:
+    """Return a stable selected-source namespace, or None for unsafe modes."""
+    library_type = str(source.get("library_type") or "").strip().lower()
+    library_id = str(source.get("library_id") or "").strip()
+    mode = str(source.get("source_mode") or "").strip()
+    collection_key = str(source.get("collection_key") or "").strip()
+    if library_type not in {"users", "groups"} or not library_id:
+        return None
+    if mode == "collection" and collection_key:
+        return f"{ZOTERO}:{library_type}:{library_id}:collection:{collection_key}"
+    if mode == "my_publications" and library_type == "users":
+        return f"{ZOTERO}:{library_type}:{library_id}:my_publications"
+    # A whole library has no non-destructive remove-from-source operation, and
+    # My Publications belongs only to a personal library.
+    return None
+
+
 def publication_key(payload: dict[str, Any]) -> str:
     doi = normalize_doi(payload.get("doi"))
     if doi:
         return f"doi:{doi}"
-    put_code = str(payload.get("orcid_put_code") or payload.get("remote_id") or "").strip()
-    if put_code:
-        return f"remote:{put_code}"
+    remote_id = str(
+        payload.get("orcid_put_code") or payload.get("zotero_key") or payload.get("remote_id") or ""
+    ).strip()
+    if remote_id:
+        return f"remote:{remote_id}"
     title = re.sub(r"\W+", " ", str(payload.get("title") or "").casefold()).strip()
     return f"title:{title}|{str(payload.get('year') or '').strip()}"
 
@@ -99,7 +123,11 @@ def observe_remote_publications(
     """Remember public metadata observed during an enrichment source scan."""
     ensure_profile_sync_tables(con)
     for payload in publications:
-        remote_id = str(payload.get("orcid_put_code") or payload.get("remote_id") or "").strip()
+        provider = profile_sync_provider(service)
+        remote_id = str(
+            (payload.get("orcid_put_code") if provider == ORCID else payload.get("zotero_key"))
+            or payload.get("remote_id") or ""
+        ).strip()
         if not remote_id:
             continue
         con.execute(
@@ -154,7 +182,8 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
     ensure_profile_sync_tables(con)
     removed_candidates = 0
     added_candidates = 0
-    if service != ORCID:
+    provider = profile_sync_provider(service)
+    if provider not in {ORCID, ZOTERO}:
         return {"remove_remote": 0, "add_remote": 0}
 
     rejected = con.execute(
@@ -162,14 +191,18 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
         SELECT id, payload_json FROM import_inbox_items
         WHERE target_type='publication' AND status='rejected' AND lower(source)=?
         """,
-        (ORCID,),
+        (provider,),
     ).fetchall()
     for row in rejected:
         try:
             payload = json.loads(row["payload_json"] or "{}")
         except json.JSONDecodeError:
             continue
-        remote_id = str(payload.get("orcid_put_code") or "").strip()
+        if provider == ZOTERO and str(payload.get("profile_sync_service") or "") != service:
+            continue
+        remote_id = str(
+            (payload.get("orcid_put_code") if provider == ORCID else payload.get("zotero_key")) or ""
+        ).strip()
         if not remote_id:
             continue
         payload["remote_id"] = remote_id
@@ -197,7 +230,7 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
             WHERE target_type='publication' AND status='rejected' AND lower(source)=?
           )
         """,
-        (service, REMOVE_REMOTE, ORCID),
+        (service, REMOVE_REMOTE, provider),
     )
 
     observed = con.execute(
@@ -213,14 +246,13 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
             (service,),
         ).fetchall()
     }
-    for publication in con.execute(
-        """
+    publication_sql = """
         SELECT * FROM publications
         WHERE trim(COALESCE(doi, '')) != ''
-          AND trim(COALESCE(orcid_put_code, '')) = ''
-          AND lower(COALESCE(source, '')) != 'orcid'
-        """
-    ).fetchall():
+    """
+    if provider == ORCID:
+        publication_sql += " AND trim(COALESCE(orcid_put_code, '')) = '' AND lower(COALESCE(source, '')) != 'orcid'"
+    for publication in con.execute(publication_sql).fetchall():
         payload = dict(publication)
         key = publication_key(payload)
         if key in remote_keys:
@@ -234,6 +266,18 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
             publication_id=int(publication["id"]),
         )
         added_candidates += 1
+    # If a new remote scan now sees a formerly suggested publication, resolve
+    # that suggestion. This also covers an item added outside VitaMine.
+    if remote_keys:
+        placeholders = ",".join("?" for _ in remote_keys)
+        con.execute(
+            f"""
+            UPDATE profile_sync_recommendations
+            SET status='resolved', updated_at=datetime('now')
+            WHERE service=? AND direction=? AND status='pending' AND entity_key IN ({placeholders})
+            """,
+            (service, ADD_REMOTE, *sorted(remote_keys)),
+        )
     return {"remove_remote": removed_candidates, "add_remote": added_candidates}
 
 
@@ -258,7 +302,13 @@ def pending_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
     counts = {REMOVE_REMOTE: 0, ADD_REMOTE: 0}
     for item in items:
         counts[str(item["direction"])] += 1
-    return {"service": service, "items": items, "counts": counts, "total": len(items)}
+    return {
+        "service": service,
+        "provider": profile_sync_provider(service),
+        "items": items,
+        "counts": counts,
+        "total": len(items),
+    }
 
 
 def prepare_recommendation_action(
@@ -307,7 +357,8 @@ def complete_recommendations(
     for row in rows:
         remote_id = str(remote_ids.get(int(row["id"])) or "").strip()
         if direction == ADD_REMOTE and remote_id and row["publication_id"]:
-            con.execute("UPDATE publications SET orcid_put_code=? WHERE id=?", (remote_id, row["publication_id"]))
+            column = "zotero_key" if profile_sync_provider(service) == ZOTERO else "orcid_put_code"
+            con.execute(f"UPDATE publications SET {column}=? WHERE id=?", (remote_id, row["publication_id"]))
     cursor = con.execute(
         f"""
         UPDATE profile_sync_recommendations

@@ -96,6 +96,7 @@ from .profile_sync import (
     prepare_recommendation_action,
     complete_recommendations,
     skip_recommendations,
+    zotero_service as profile_sync_zotero_service,
 )
 from .export_quality import run_export_quality_audit
 from .llm_routing import settings_for_llm_task
@@ -1139,6 +1140,12 @@ def zotero_saved_env(con: sqlite3.Connection) -> dict[str, str]:
         "source_mode": source_mode,
         "collection_name": get_setting(con, "zotero_collection_name"),
     }
+
+
+def configured_zotero_profile_sync_service(con: sqlite3.Connection) -> str | None:
+    """Use a source namespace so one collection never affects another."""
+    env = zotero_saved_env(con)
+    return profile_sync_zotero_service(env)
 
 
 def zotero_api_request(url: str, api_key: str) -> tuple[Any, dict[str, str]]:
@@ -2873,8 +2880,8 @@ def zotero_connect_url() -> dict[str, Any]:
             "name": "VitaMine",
             "library_access": "1",
             "notes_access": "0",
-            "write_access": "0",
-            "all_groups": "none",
+            "write_access": "1",
+            "all_groups": "write",
         }
     )
     return {
@@ -3612,9 +3619,24 @@ def list_import_inbox(
 @app.get("/api/profile-sync/notifications")
 def profile_sync_notifications() -> dict[str, Any]:
     with connect() as con:
-        payload = pending_recommendations(con, PROFILE_SYNC_ORCID)
+        sources = [pending_recommendations(con, PROFILE_SYNC_ORCID)]
+        zotero_service = configured_zotero_profile_sync_service(con)
+        if zotero_service:
+            sources.append(pending_recommendations(con, zotero_service))
         con.commit()
-    return {"ok": True, **payload}
+    items = [item for source in sources for item in source["items"]]
+    for source in sources:
+        for item in source["items"]:
+            item["provider"] = source["provider"]
+    return {
+        "ok": True,
+        "items": items,
+        "total": len(items),
+        "services": [
+            {"service": source["service"], "provider": source["provider"], "counts": source["counts"]}
+            for source in sources
+        ],
+    }
 
 
 @app.post("/api/profile-sync/orcid/prepare")
@@ -3650,6 +3672,46 @@ async def complete_orcid_profile_sync_action(request: Request) -> dict[str, Any]
     return {"ok": True, "completed": completed}
 
 
+@app.post("/api/profile-sync/zotero/prepare")
+async def prepare_zotero_profile_sync_action(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    ids = profile_sync_request_ids(payload)
+    if not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one publication.")
+    with connect() as con:
+        service = configured_zotero_profile_sync_service(con)
+        if not service:
+            raise HTTPException(status_code=409, detail="Choose My Publications or a Zotero collection before updating Zotero.")
+        items = prepare_recommendation_action(con, service, direction, ids)
+        env = zotero_saved_env(con)
+    if not items:
+        raise HTTPException(status_code=409, detail="Those Zotero suggestions are no longer available for the selected source.")
+    return {"ok": True, "items": items, "source": {key: env[key] for key in ("library_type", "library_id", "source_mode", "collection_key", "collection_name", "group_name")}}
+
+
+@app.post("/api/profile-sync/zotero/complete")
+async def complete_zotero_profile_sync_action(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    ids = profile_sync_request_ids(payload)
+    raw_remote_ids = payload.get("remote_ids") or {}
+    remote_ids: dict[int, str] = {}
+    if isinstance(raw_remote_ids, dict):
+        for key, value in raw_remote_ids.items():
+            try:
+                remote_ids[int(key)] = str(value or "")
+            except (TypeError, ValueError):
+                continue
+    with connect() as con:
+        service = configured_zotero_profile_sync_service(con)
+        if not service:
+            raise HTTPException(status_code=409, detail="Choose My Publications or a Zotero collection before updating Zotero.")
+        completed = complete_recommendations(con, service, direction, ids, remote_ids)
+        con.commit()
+    return {"ok": True, "completed": completed}
+
+
 @app.post("/api/profile-sync/skip")
 async def skip_profile_sync(request: Request) -> dict[str, Any]:
     payload = await request.json()
@@ -3657,7 +3719,14 @@ async def skip_profile_sync(request: Request) -> dict[str, Any]:
     if not ids:
         raise HTTPException(status_code=400, detail="Choose at least one publication.")
     with connect() as con:
-        skipped = skip_recommendations(con, str(payload.get("service") or PROFILE_SYNC_ORCID), ids)
+        service = str(payload.get("service") or PROFILE_SYNC_ORCID)
+        allowed = {PROFILE_SYNC_ORCID}
+        zotero_service = configured_zotero_profile_sync_service(con)
+        if zotero_service:
+            allowed.add(zotero_service)
+        if service not in allowed:
+            raise HTTPException(status_code=409, detail="Those profile-sync suggestions are no longer available for the selected source.")
+        skipped = skip_recommendations(con, service, ids)
         con.commit()
     return {"ok": True, "skipped": skipped}
 
@@ -5184,6 +5253,8 @@ def publication_inbox_payload(row: sqlite3.Row) -> dict[str, Any]:
     for field in ("orcid_put_code", "orcid_source", "orcid_last_modified", "orcid_path"):
         if field in row.keys():
             payload[field] = row[field]
+    if "zotero_key" in row.keys():
+        payload["zotero_key"] = row["zotero_key"]
     return decode_publication_payload(payload)
 
 
@@ -5376,7 +5447,7 @@ def run_publication_source_to_inbox(source: str) -> dict[str, Any]:
                     for row in temp_con.execute(
                         f"""
                         SELECT {', '.join(PUBLICATION_FIELDS)},
-                               orcid_put_code, orcid_source, orcid_last_modified, orcid_path
+                               zotero_key, orcid_put_code, orcid_source, orcid_last_modified, orcid_path
                         FROM publications
                         WHERE source=?
                         ORDER BY id
@@ -5406,11 +5477,14 @@ def run_publication_source_to_inbox(source: str) -> dict[str, Any]:
     guard_stats: dict[str, int] = {}
     if result.returncode == 0:
         with connect() as con:
-            if source == "orcid":
-                observe_remote_publications(con, source, temp_rows)
+            profile_sync_service = PROFILE_SYNC_ORCID if source == "orcid" else configured_zotero_profile_sync_service(con) if source == "zotero" else None
+            if profile_sync_service:
+                observe_remote_publications(con, profile_sync_service, temp_rows)
             approved_rows, guard_stats = guard_publications(con, temp_rows, source)
             document_id = ensure_source_review_document(con, source)
             for payload in approved_rows:
+                if profile_sync_service:
+                    payload["profile_sync_service"] = profile_sync_service
                 if publication_exists_in_curated_db(con, payload):
                     continue
                 if not publication_inbox_candidate_exists(con, payload):

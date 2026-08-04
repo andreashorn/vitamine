@@ -850,8 +850,8 @@ class CloudAppTests(unittest.TestCase):
             query = parse_qs(authorization.query)
             self.assertEqual(query["oauth_token"], [temporary["token"]])
             self.assertEqual(query["library_access"], ["1"])
-            self.assertEqual(query["write_access"], ["0"])
-            self.assertEqual(query["all_groups"], ["read"])
+            self.assertEqual(query["write_access"], ["1"])
+            self.assertEqual(query["all_groups"], ["write"])
 
             with (
                 patch("vitamine.cloud_app.exchange_zotero_access_token", new=AsyncMock(return_value=token)) as exchange,

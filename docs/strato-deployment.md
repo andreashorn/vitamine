@@ -156,7 +156,7 @@ production callback is
 `https://vitamine.cloud/gateway/zotero/oauth/callback`. Configure
 `ZOTERO_OAUTH_CLIENT_KEY`, `ZOTERO_OAUTH_CLIENT_SECRET`, and
 `ZOTERO_OAUTH_CALLBACK_URL` only in `/etc/vitamine-cloud.env`. The resulting
-read-only Zotero API key is encrypted in PostgreSQL and injected into the
+Zotero API key is encrypted in PostgreSQL and injected into the
 owner's isolated workspace and background-job processes; it is never written
 to the portable `.vitamine` database. Desktop users retain manual API-key
 setup. Connecting or disconnecting Zotero restarts only the current private
@@ -169,7 +169,11 @@ stored by that verification; the temporary credential was left to expire.
 Hosted workers prefer the account OAuth credential over any older manual key
 embedded in an imported CV. OAuth makes the personal library and authorized
 groups available in the selector, but each CV still syncs one selected Zotero
-library/source at a time rather than merging every accessible library.
+library/source at a time rather than merging every accessible library. New or
+reconnected authorizations request write access so profile sync can add or
+remove membership only in the selected collection or personal “My
+Publications” source. A prior read-only connection must be reconnected before
+an update; VitaMine never deletes a Zotero library item as part of sync.
 
 ## PostgreSQL and backups
 

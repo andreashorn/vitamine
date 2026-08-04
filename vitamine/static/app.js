@@ -516,13 +516,21 @@ function updateProfileSyncBadge(count) {
   badge.hidden = !count;
 }
 
-function profileSyncTitle(direction) {
-  return direction === "remove_remote"
-    ? "We’ve found publications that are on your ORCID record for which you declared they do not belong to you."
-    : "We’ve found papers that you authored that are not on your ORCID record.";
+function profileSyncProviderName(provider) {
+  return provider === "zotero" ? "Zotero" : "ORCID";
 }
 
-function profileSyncActionLabel(direction) {
+function profileSyncTitle(provider, direction) {
+  const target = provider === "zotero" ? "selected Zotero source" : "ORCID record";
+  return direction === "remove_remote"
+    ? `We’ve found publications that are on your ${target} for which you declared they do not belong to you.`
+    : `We’ve found papers that you authored that are not on your ${target}.`;
+}
+
+function profileSyncActionLabel(provider, direction) {
+  if (provider === "zotero") {
+    return direction === "remove_remote" ? "Remove from selected Zotero source" : "Add to selected Zotero source";
+  }
   return direction === "remove_remote" ? "Delete from ORCID profile" : "Add to ORCID profile";
 }
 
@@ -540,7 +548,7 @@ function profileSyncItemMarkup(item) {
     <article class="inboxItem confidence-high" data-profile-sync-id="${item.id}">
       <label class="inboxCheck"><input type="checkbox" data-profile-sync-check="${item.id}" checked></label>
       <div class="inboxMain">
-        <div class="inboxMeta"><span>Publication</span><span>ORCID</span></div>
+        <div class="inboxMeta"><span>Publication</span><span>${escapeHtml(profileSyncProviderName(item.provider))}</span></div>
         <strong>${escapeHtml(publication.title || "Publication")}</strong>
         ${subtitle ? `<small>${escapeHtml(subtitle)}</small>` : ""}
       </div>
@@ -554,20 +562,24 @@ function selectedProfileSyncIds() {
 
 async function openProfileSync() {
   const data = await loadProfileSync();
-  const removeItems = (data.items || []).filter((item) => item.direction === "remove_remote");
-  const addItems = (data.items || []).filter((item) => item.direction === "add_remote");
-  const items = removeItems.length ? removeItems : addItems;
+  const candidates = data.items || [];
+  const first = candidates.find((item) => item.direction === "remove_remote") || candidates[0];
+  const items = first ? candidates.filter((item) => item.direction === first.direction && item.service === first.service) : [];
   if (!items.length) {
     setStatus("Your connected profiles are in sync.");
     return;
   }
   const direction = items[0].direction;
+  const provider = items[0].provider || "orcid";
   state.profileSyncDirection = direction;
-  $("#profileSyncTitle").textContent = profileSyncTitle(direction);
+  state.profileSyncProvider = provider;
+  state.profileSyncService = items[0].service;
+  $("#profileSyncTitle").textContent = profileSyncTitle(provider, direction);
+  const target = provider === "zotero" ? "the selected Zotero source" : "ORCID";
   $("#profileSyncDescription").textContent = direction === "remove_remote"
-    ? "These were rejected after ORCID enrichment. They are selected so you can remove them from ORCID."
-    : "These DOI-backed papers are selected so you can add them to ORCID.";
-  $("#applyProfileSync").textContent = profileSyncActionLabel(direction);
+    ? `These were rejected after ${profileSyncProviderName(provider)} enrichment. They are selected so you can remove them from ${target}.`
+    : `These DOI-backed papers are selected so you can add them to ${target}.`;
+  $("#applyProfileSync").textContent = profileSyncActionLabel(provider, direction);
   $("#profileSyncList").innerHTML = items.map(profileSyncItemMarkup).join("");
   $("#profileSyncDialog").showModal();
 }
@@ -575,7 +587,7 @@ async function openProfileSync() {
 async function skipProfileSync() {
   const ids = selectedProfileSyncIds();
   if (!ids.length) return setStatus("Choose at least one publication.");
-  const result = await api("/api/profile-sync/skip", { method: "POST", body: JSON.stringify({ service: "orcid", ids }) });
+  const result = await api("/api/profile-sync/skip", { method: "POST", body: JSON.stringify({ service: state.profileSyncService, ids }) });
   setStatus(`Skipped ${result.skipped || 0} profile suggestion${result.skipped === 1 ? "" : "s"}.`);
   $("#profileSyncDialog").close();
   await loadProfileSync();
@@ -585,21 +597,27 @@ async function applyProfileSync() {
   const ids = selectedProfileSyncIds();
   if (!ids.length) return setStatus("Choose at least one publication.");
   if (!state.cloud.enabled) {
-    setStatus("Connect ORCID securely in hosted VitaMine before updating your ORCID profile.");
+    setStatus(`Connect ${profileSyncProviderName(state.profileSyncProvider)} securely in hosted VitaMine before updating this profile.`);
     return;
   }
   const direction = state.profileSyncDirection;
+  const provider = state.profileSyncProvider;
   setActionButtons(true);
   try {
-    const result = await api("/gateway/profile-sync/orcid/actions", {
+    const result = await api(`/gateway/profile-sync/${provider}/actions`, {
       method: "POST", body: JSON.stringify({ direction, ids }),
     });
-    setStatus(`${profileSyncActionLabel(direction)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
+    setStatus(`${profileSyncActionLabel(provider, direction)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
     $("#profileSyncDialog").close();
     await Promise.all([loadProfileSync(), loadPublications()]);
   } catch (error) {
-    if (error.status === 403 && /Reconnect ORCID/.test(error.message || "")) {
+    if (provider === "orcid" && error.status === 403 && /Reconnect ORCID/.test(error.message || "")) {
       const authorization = await api("/gateway/orcid/oauth/start?write_access=true", { method: "POST" });
+      window.location.assign(authorization.authorization_url);
+      return;
+    }
+    if (provider === "zotero" && error.status === 403 && /Reconnect Zotero/.test(error.message || "")) {
+      const authorization = await api("/gateway/zotero/oauth/start?write_access=true", { method: "POST" });
       window.location.assign(authorization.authorization_url);
       return;
     }
@@ -1805,7 +1823,9 @@ async function loadZoteroOAuthStatus() {
     $("#connectionStatus").textContent = "Zotero sign-in is not configured";
   } else if (state.zoteroOauth.connected) {
     const identity = state.zoteroOauth.username || state.zoteroOauth.zotero_user_id;
-    $("#connectionStatus").textContent = `Zotero connected${identity ? ` as ${identity}` : ""}`;
+    $("#connectionStatus").textContent = state.zoteroOauth.can_write
+      ? `Zotero connected with write access${identity ? ` as ${identity}` : ""}`
+      : `Zotero connected read-only${identity ? ` as ${identity}` : ""}. Reconnect to enable profile sync updates.`;
     if (!state.zoteroLibraries.length) {
       try {
         await testZoteroConnection();

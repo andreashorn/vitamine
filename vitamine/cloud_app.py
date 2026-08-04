@@ -1095,6 +1095,169 @@ async def verify_zotero_api_key(api_key: str) -> dict[str, Any]:
     return payload
 
 
+def _zotero_permission_rows(access_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    access = access_payload.get("access") if isinstance(access_payload.get("access"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    user = access.get("user")
+    if isinstance(user, dict):
+        rows.append(user)
+    groups = access.get("groups")
+    if isinstance(groups, dict):
+        rows.extend(value for value in groups.values() if isinstance(value, dict))
+    return rows
+
+
+def zotero_source_write_access(access: dict[str, Any], source: dict[str, Any]) -> bool:
+    """Check the exact selected library, rather than merely any Zotero access."""
+    permissions = access.get("access") if isinstance(access.get("access"), dict) else {}
+    library_type = str(source.get("library_type") or "")
+    library_id = str(source.get("library_id") or "")
+    if library_type == "users":
+        granted = permissions.get("user") if isinstance(permissions.get("user"), dict) else {}
+    elif library_type == "groups":
+        groups = permissions.get("groups") if isinstance(permissions.get("groups"), dict) else {}
+        granted = groups.get(library_id) if isinstance(groups.get(library_id), dict) else groups.get("all")
+        granted = granted if isinstance(granted, dict) else {}
+    else:
+        return False
+    return bool(granted.get("library") and granted.get("write"))
+
+
+def account_zotero_write_connection(member_id: str, source: dict[str, Any]) -> str:
+    with connect() as con:
+        row = con.execute(
+            "SELECT api_key_ciphertext, access_json FROM zotero_oauth_connections WHERE member_id=?",
+            (member_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=409, detail="Connect your Zotero account before updating the selected source.")
+    access = parsed_json_object(row["access_json"])
+    if not zotero_source_write_access(access, source):
+        raise HTTPException(
+            status_code=403,
+            detail="Reconnect Zotero and grant write access to the selected library before updating it.",
+        )
+    return decrypt_oauth_token(str(row["api_key_ciphertext"]))
+
+
+def zotero_headers(api_key: str, *, version: str = "") -> dict[str, str]:
+    headers = {"Zotero-API-Key": api_key, "Zotero-API-Version": "3", "Accept": "application/json"}
+    if version:
+        headers["If-Unmodified-Since-Version"] = version
+    return headers
+
+
+def zotero_item_payload(publication: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+    title = str(publication.get("title") or "").strip()
+    doi = str(publication.get("doi") or "").strip()
+    if not title or not doi:
+        raise HTTPException(status_code=422, detail="A Zotero addition needs both a publication title and DOI.")
+    item_type = str(publication.get("item_type") or "").strip()
+    item_type = {
+        "journal-article": "journalArticle",
+        "book-chapter": "bookSection",
+        "conference-paper": "conferencePaper",
+    }.get(item_type, item_type or "journalArticle")
+    payload: dict[str, Any] = {"itemType": item_type, "title": title, "DOI": doi}
+    venue = str(publication.get("venue") or "").strip()
+    if venue:
+        payload["publicationTitle"] = venue
+    year = str(publication.get("year") or "").strip()
+    if year:
+        payload["date"] = year
+    creators = [name.strip() for name in str(publication.get("authors") or "").split(",") if name.strip()]
+    if creators:
+        payload["creators"] = [{"creatorType": "author", "name": name} for name in creators]
+    if source.get("source_mode") == "collection":
+        payload["collections"] = [str(source["collection_key"])]
+    return payload
+
+
+async def zotero_current_item(
+    client: httpx.AsyncClient, prefix: str, remote_id: str, api_key: str
+) -> dict[str, Any] | None:
+    response = await client.get(f"{prefix}/items/{quote(remote_id, safe='')}", headers=zotero_headers(api_key))
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    raw = response.json()
+    data = raw.get("data") if isinstance(raw, dict) and isinstance(raw.get("data"), dict) else raw
+    return data if isinstance(data, dict) else None
+
+
+async def zotero_patch_source_membership(
+    client: httpx.AsyncClient,
+    *,
+    prefix: str,
+    api_key: str,
+    source: dict[str, Any],
+    remote_id: str,
+    present: bool,
+) -> None:
+    item = await zotero_current_item(client, prefix, remote_id, api_key)
+    if item is None:
+        if present:
+            raise HTTPException(status_code=409, detail="The selected Zotero item is no longer available.")
+        return
+    version = str(item.get("version") or "")
+    if not version:
+        raise HTTPException(status_code=502, detail="Zotero did not return an item version for this update.")
+    if source["source_mode"] == "my_publications":
+        patch = {"inPublications": present}
+    else:
+        collection_key = str(source["collection_key"])
+        collections = [str(value) for value in item.get("collections") or []]
+        patch = {"collections": ([*collections, collection_key] if present else [value for value in collections if value != collection_key])}
+        patch["collections"] = list(dict.fromkeys(patch["collections"]))
+    response = await client.patch(
+        f"{prefix}/items/{quote(remote_id, safe='')}",
+        headers={**zotero_headers(api_key, version=version), "Content-Type": "application/json"},
+        json=patch,
+    )
+    response.raise_for_status()
+
+
+async def zotero_library_version(client: httpx.AsyncClient, prefix: str, api_key: str) -> str:
+    response = await client.get(f"{prefix}/items?format=json&limit=1", headers=zotero_headers(api_key))
+    response.raise_for_status()
+    version = str(response.headers.get("Last-Modified-Version") or "")
+    if not version:
+        raise HTTPException(status_code=502, detail="Zotero did not return a library version for this update.")
+    return version
+
+
+async def zotero_add_to_selected_source(
+    client: httpx.AsyncClient, *, api_key: str, source: dict[str, Any], publication: dict[str, Any]
+) -> str:
+    prefix = f"https://api.zotero.org/{source['library_type']}/{source['library_id']}"
+    remote_id = str(publication.get("zotero_key") or "").strip()
+    if remote_id:
+        existing = await zotero_current_item(client, prefix, remote_id, api_key)
+        existing_doi = str((existing or {}).get("DOI") or "").strip().lower().rstrip(".")
+        publication_doi = str(publication.get("doi") or "").strip().lower().rstrip(".")
+        if existing is not None and existing_doi == publication_doi:
+            await zotero_patch_source_membership(
+                client, prefix=prefix, api_key=api_key, source=source, remote_id=remote_id, present=True
+            )
+            return remote_id
+    version = await zotero_library_version(client, prefix, api_key)
+    response = await client.post(
+        f"{prefix}/items",
+        headers={**zotero_headers(api_key, version=version), "Content-Type": "application/json"},
+        json=[zotero_item_payload(publication, source)],
+    )
+    response.raise_for_status()
+    result = response.json()
+    remote_id = str((result.get("success") or {}).get("0") or "") if isinstance(result, dict) else ""
+    if not remote_id:
+        raise HTTPException(status_code=502, detail="Zotero did not confirm the new publication.")
+    if source["source_mode"] == "my_publications":
+        await zotero_patch_source_membership(
+            client, prefix=prefix, api_key=api_key, source=source, remote_id=remote_id, present=True
+        )
+    return remote_id
+
+
 def store_zotero_oauth_connection(*, member_id: str, database_id: str, token: dict[str, Any], access: dict[str, Any]) -> None:
     now = utc_now()
     with connect() as con:
@@ -4049,6 +4212,71 @@ async def apply_orcid_profile_sync_actions(
     return {"ok": True, "completed": int(completed.get("completed") or 0)}
 
 
+@app.post("/gateway/profile-sync/zotero/actions")
+async def apply_zotero_profile_sync_actions(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    workspace = workspace_for_request(request, authorization)
+    if active_background_job(str(workspace["database_id"])):
+        raise HTTPException(status_code=409, detail="Wait for the current background process to finish before updating Zotero.")
+    payload = await request.json()
+    direction = str(payload.get("direction") or "")
+    if direction not in {"add_remote", "remove_remote"}:
+        raise HTTPException(status_code=400, detail="Unsupported profile-sync action.")
+    ids = payload.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(status_code=400, detail="Choose at least one publication.")
+    prepared = await workspace_profile_sync_call(
+        workspace,
+        "/api/profile-sync/zotero/prepare",
+        {"direction": direction, "ids": ids},
+    )
+    items = prepared.get("items") or []
+    source = prepared.get("source") or {}
+    required_source = {"library_type", "library_id", "source_mode"}
+    if not isinstance(source, dict) or not required_source.issubset(source) or source.get("source_mode") not in {"my_publications", "collection"}:
+        raise HTTPException(status_code=409, detail="Choose My Publications or a Zotero collection before updating Zotero.")
+    if source["source_mode"] == "collection" and not str(source.get("collection_key") or ""):
+        raise HTTPException(status_code=409, detail="Choose a Zotero collection before updating Zotero.")
+    api_key = account_zotero_write_connection(str(workspace["member_id"]), source)
+    prefix = f"https://api.zotero.org/{source['library_type']}/{source['library_id']}"
+    completed_ids: list[int] = []
+    remote_ids: dict[int, str] = {}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10)) as client:
+            for item in items:
+                recommendation_id = int(item.get("id") or 0)
+                publication = item.get("payload") or {}
+                if not recommendation_id or not isinstance(publication, dict):
+                    continue
+                if direction == "remove_remote":
+                    remote_id = str(publication.get("remote_id") or publication.get("zotero_key") or "").strip()
+                    if not remote_id:
+                        continue
+                    # This is deliberately a membership update. It never uses
+                    # DELETE /items and therefore cannot remove a library item.
+                    await zotero_patch_source_membership(
+                        client, prefix=prefix, api_key=api_key, source=source, remote_id=remote_id, present=False
+                    )
+                else:
+                    remote_ids[recommendation_id] = await zotero_add_to_selected_source(
+                        client, api_key=api_key, source=source, publication=publication
+                    )
+                completed_ids.append(recommendation_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 412:
+            raise HTTPException(status_code=409, detail="A Zotero item changed while VitaMine was updating it. Refresh and try again.") from exc
+        raise HTTPException(status_code=502, detail="Zotero could not apply this selected-source update. Please try again.") from exc
+    completed = await workspace_profile_sync_call(
+        workspace,
+        "/api/profile-sync/zotero/complete",
+        {"direction": direction, "ids": completed_ids, "remote_ids": remote_ids},
+    )
+    persist_workspace_snapshot(workspace)
+    return {"ok": True, "completed": int(completed.get("completed") or 0)}
+
+
 @app.get("/gateway/zotero/oauth/status")
 def zotero_oauth_status(
     request: Request,
@@ -4067,6 +4295,13 @@ def zotero_oauth_status(
         "username": str(row["username"] or "") if row is not None else "",
         "access": parsed_json_object(row["access_json"]) if row is not None else {},
         "verified_at": str(row["verified_at"]) if row is not None else None,
+        "can_write": bool(
+            row is not None
+            and any(
+                bool(permission.get("library") and permission.get("write"))
+                for permission in _zotero_permission_rows(parsed_json_object(row["access_json"]))
+            )
+        ),
     }
 
 
@@ -4074,6 +4309,7 @@ def zotero_oauth_status(
 async def start_zotero_oauth(
     request: Request,
     authorization: str | None = Header(default=None),
+    write_access: bool = True,
 ) -> dict[str, Any]:
     config = zotero_oauth_config()
     if config is None:
@@ -4088,9 +4324,11 @@ async def start_zotero_oauth(
         token=credentials["token"], secret=credentials["secret"],
         member_id=str(workspace["member_id"]), database_id=str(workspace["database_id"]),
     )
-    permissions = urlencode(
-        {"name": "VitaMine", "library_access": "1", "notes_access": "0", "write_access": "0", "all_groups": "read"}
-    )
+    permissions = urlencode({
+        "name": "VitaMine", "library_access": "1", "notes_access": "0",
+        "write_access": "1" if write_access else "0",
+        "all_groups": "write" if write_access else "read",
+    })
     return {
         "ok": True,
         "authorization_url": f"{config['authorize_url']}?oauth_token={quote(credentials['token'])}&{permissions}",
