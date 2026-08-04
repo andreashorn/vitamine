@@ -283,7 +283,6 @@ def build_html() -> str:
         lines.append(f"<p><strong>{contribution['ordinal']}. {html.escape(contribution['title'])}.</strong> {html.escape(contribution['narrative'])}</p>")
         for citation in citations:
             lines.append(f'<p class="citation">{html.escape(citation_text(citation))}</p>')
-    lines.append("<p><strong>Complete List of Published Work in MyBibliography:</strong><br>https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/</p>")
     return html_page("\n".join(lines))
 
 
@@ -349,7 +348,6 @@ def build_typst() -> str:
         for citation in citations:
             lines.append("#grid(columns: (0.22in, 6.92in), gutter: 0.08in, row-gutter: 0.015in,\n"
                          f"  [{text('')}],\n  [{typst_citation(citation)}]\n)")
-    lines.append(paragraph("Complete List of Published Work in MyBibliography: https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/", size="9pt"))
     return "\n".join(lines) + "\n"
 
 
@@ -412,12 +410,6 @@ def build_docx(path: Path) -> Path:
         add_docx_paragraph(doc, f"{contribution['ordinal']}. {contribution['title']}. {contribution['narrative']}", bold=True, after=2)
         for citation in citations:
             add_docx_citation(doc, citation, size=9.2, after=1)
-    add_docx_paragraph(
-        doc,
-        "Complete List of Published Work in MyBibliography: https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/",
-        size=9.2,
-    )
-
     doc.core_properties.title = "NIH Biosketch Draft"
     doc.core_properties.author = name
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,7 +1,11 @@
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
+from docx import Document
 from vitamine.llm_routing import settings_for_llm_task
+from vitamine.scripts import build_biosketch
 from vitamine.scripts.build_long_cv import _formal_four_columns
 from vitamine.scripts.import_uploaded_cv import (
     apply_generation_controls,
@@ -13,6 +17,32 @@ from vitamine.scripts.import_uploaded_cv import (
 
 
 class CvImportAndExportTests(unittest.TestCase):
+    def test_biosketch_exports_omit_my_bibliography_footer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "biosketch.sqlite"
+            con = sqlite3.connect(database)
+            con.execute(
+                "CREATE TABLE person (id INTEGER PRIMARY KEY, degrees TEXT, position_title TEXT, era_commons TEXT)"
+            )
+            con.execute(
+                "CREATE TABLE biosketch_contributions (id INTEGER PRIMARY KEY, ordinal INTEGER, title TEXT, narrative TEXT, citations_json TEXT)"
+            )
+            con.commit()
+            con.close()
+
+            original_db = build_biosketch.DB
+            try:
+                build_biosketch.DB = database
+                html = build_biosketch.build_html()
+                typst = build_biosketch.build_typst()
+                docx = build_biosketch.build_docx(Path(directory) / "biosketch.docx")
+            finally:
+                build_biosketch.DB = original_db
+
+            self.assertNotIn("MyBibliography", html)
+            self.assertNotIn("MyBibliography", typst)
+            self.assertNotIn("MyBibliography", "\n".join(paragraph.text for paragraph in Document(docx).paragraphs))
+
     def test_task_models_only_override_the_two_configured_cv_workloads(self):
         settings = {
             "provider": "openai",
