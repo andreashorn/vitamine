@@ -1217,6 +1217,24 @@ async def zotero_patch_source_membership(
     response.raise_for_status()
 
 
+async def zotero_delete_from_selected_library(
+    client: httpx.AsyncClient, *, prefix: str, api_key: str, remote_id: str
+) -> None:
+    """Delete the item only after the user explicitly chose whole-library sync."""
+    item = await zotero_current_item(client, prefix, remote_id, api_key)
+    if item is None:
+        return
+    version = str(item.get("version") or "")
+    if not version:
+        raise HTTPException(status_code=502, detail="Zotero did not return an item version for this deletion.")
+    response = await client.delete(
+        f"{prefix}/items/{quote(remote_id, safe='')}",
+        headers=zotero_headers(api_key, version=version),
+    )
+    if response.status_code != 404:
+        response.raise_for_status()
+
+
 async def zotero_library_version(client: httpx.AsyncClient, prefix: str, api_key: str) -> str:
     response = await client.get(f"{prefix}/items?format=json&limit=1", headers=zotero_headers(api_key))
     response.raise_for_status()
@@ -1231,7 +1249,7 @@ async def zotero_add_to_selected_source(
 ) -> str:
     prefix = f"https://api.zotero.org/{source['library_type']}/{source['library_id']}"
     remote_id = str(publication.get("zotero_key") or "").strip()
-    if remote_id:
+    if remote_id and source["source_mode"] != "library":
         existing = await zotero_current_item(client, prefix, remote_id, api_key)
         existing_doi = str((existing or {}).get("DOI") or "").strip().lower().rstrip(".")
         publication_doi = str(publication.get("doi") or "").strip().lower().rstrip(".")
@@ -4235,8 +4253,8 @@ async def apply_zotero_profile_sync_actions(
     items = prepared.get("items") or []
     source = prepared.get("source") or {}
     required_source = {"library_type", "library_id", "source_mode"}
-    if not isinstance(source, dict) or not required_source.issubset(source) or source.get("source_mode") not in {"my_publications", "collection"}:
-        raise HTTPException(status_code=409, detail="Choose My Publications or a Zotero collection before updating Zotero.")
+    if not isinstance(source, dict) or not required_source.issubset(source) or source.get("source_mode") not in {"my_publications", "collection", "library"}:
+        raise HTTPException(status_code=409, detail="Choose a Zotero source before updating Zotero.")
     if source["source_mode"] == "collection" and not str(source.get("collection_key") or ""):
         raise HTTPException(status_code=409, detail="Choose a Zotero collection before updating Zotero.")
     api_key = account_zotero_write_connection(str(workspace["member_id"]), source)
@@ -4254,11 +4272,18 @@ async def apply_zotero_profile_sync_actions(
                     remote_id = str(publication.get("remote_id") or publication.get("zotero_key") or "").strip()
                     if not remote_id:
                         continue
-                    # This is deliberately a membership update. It never uses
-                    # DELETE /items and therefore cannot remove a library item.
-                    await zotero_patch_source_membership(
-                        client, prefix=prefix, api_key=api_key, source=source, remote_id=remote_id, present=False
-                    )
+                    if source["source_mode"] == "library":
+                        # Whole-library sync is an explicit user choice. A
+                        # removal is therefore a real Zotero item deletion.
+                        await zotero_delete_from_selected_library(
+                            client, prefix=prefix, api_key=api_key, remote_id=remote_id
+                        )
+                    else:
+                        # Collections and My Publications retain the item and
+                        # remove only its selected-source membership.
+                        await zotero_patch_source_membership(
+                            client, prefix=prefix, api_key=api_key, source=source, remote_id=remote_id, present=False
+                        )
                 else:
                     remote_ids[recommendation_id] = await zotero_add_to_selected_source(
                         client, api_key=api_key, source=source, publication=publication

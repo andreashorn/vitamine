@@ -30,7 +30,7 @@ def profile_sync_provider(service: str) -> str:
 
 
 def zotero_service(source: dict[str, Any]) -> str | None:
-    """Return a stable selected-source namespace, or None for unsafe modes."""
+    """Return a stable namespace for one explicitly selected Zotero source."""
     library_type = str(source.get("library_type") or "").strip().lower()
     library_id = str(source.get("library_id") or "").strip()
     mode = str(source.get("source_mode") or "").strip()
@@ -41,8 +41,8 @@ def zotero_service(source: dict[str, Any]) -> str | None:
         return f"{ZOTERO}:{library_type}:{library_id}:collection:{collection_key}"
     if mode == "my_publications" and library_type == "users":
         return f"{ZOTERO}:{library_type}:{library_id}:my_publications"
-    # A whole library has no non-destructive remove-from-source operation, and
-    # My Publications belongs only to a personal library.
+    if mode == "library":
+        return f"{ZOTERO}:{library_type}:{library_id}:library"
     return None
 
 

@@ -3682,7 +3682,7 @@ async def prepare_zotero_profile_sync_action(request: Request) -> dict[str, Any]
     with connect() as con:
         service = configured_zotero_profile_sync_service(con)
         if not service:
-            raise HTTPException(status_code=409, detail="Choose My Publications or a Zotero collection before updating Zotero.")
+            raise HTTPException(status_code=409, detail="Choose a Zotero source before updating Zotero.")
         items = prepare_recommendation_action(con, service, direction, ids)
         env = zotero_saved_env(con)
     if not items:
@@ -3706,7 +3706,7 @@ async def complete_zotero_profile_sync_action(request: Request) -> dict[str, Any
     with connect() as con:
         service = configured_zotero_profile_sync_service(con)
         if not service:
-            raise HTTPException(status_code=409, detail="Choose My Publications or a Zotero collection before updating Zotero.")
+            raise HTTPException(status_code=409, detail="Choose a Zotero source before updating Zotero.")
         completed = complete_recommendations(con, service, direction, ids, remote_ids)
         con.commit()
     return {"ok": True, "completed": completed}

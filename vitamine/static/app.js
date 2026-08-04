@@ -520,15 +520,22 @@ function profileSyncProviderName(provider) {
   return provider === "zotero" ? "Zotero" : "ORCID";
 }
 
-function profileSyncTitle(provider, direction) {
-  const target = provider === "zotero" ? "selected Zotero source" : "ORCID record";
+function profileSyncIsWholeZoteroLibrary(provider, service) {
+  return provider === "zotero" && String(service || "").endsWith(":library");
+}
+
+function profileSyncTitle(provider, direction, wholeLibrary = false) {
+  const target = provider === "zotero"
+    ? (wholeLibrary ? "selected Zotero library" : "selected Zotero source")
+    : "ORCID record";
   return direction === "remove_remote"
     ? `We’ve found publications that are on your ${target} for which you declared they do not belong to you.`
     : `We’ve found papers that you authored that are not on your ${target}.`;
 }
 
-function profileSyncActionLabel(provider, direction) {
+function profileSyncActionLabel(provider, direction, wholeLibrary = false) {
   if (provider === "zotero") {
+    if (wholeLibrary) return direction === "remove_remote" ? "Delete from selected Zotero library" : "Add to selected Zotero library";
     return direction === "remove_remote" ? "Remove from selected Zotero source" : "Add to selected Zotero source";
   }
   return direction === "remove_remote" ? "Delete from ORCID profile" : "Add to ORCID profile";
@@ -574,12 +581,15 @@ async function openProfileSync() {
   state.profileSyncDirection = direction;
   state.profileSyncProvider = provider;
   state.profileSyncService = items[0].service;
-  $("#profileSyncTitle").textContent = profileSyncTitle(provider, direction);
-  const target = provider === "zotero" ? "the selected Zotero source" : "ORCID";
+  state.profileSyncWholeLibrary = profileSyncIsWholeZoteroLibrary(provider, state.profileSyncService);
+  $("#profileSyncTitle").textContent = profileSyncTitle(provider, direction, state.profileSyncWholeLibrary);
+  const target = provider === "zotero"
+    ? (state.profileSyncWholeLibrary ? "the selected Zotero library" : "the selected Zotero source")
+    : "ORCID";
   $("#profileSyncDescription").textContent = direction === "remove_remote"
-    ? `These were rejected after ${profileSyncProviderName(provider)} enrichment. They are selected so you can remove them from ${target}.`
+    ? `These were rejected after ${profileSyncProviderName(provider)} enrichment. They are selected so you can ${state.profileSyncWholeLibrary ? "delete them from" : "remove them from"} ${target}.${state.profileSyncWholeLibrary ? " This affects everyone who uses this library." : ""}`
     : `These DOI-backed papers are selected so you can add them to ${target}.`;
-  $("#applyProfileSync").textContent = profileSyncActionLabel(provider, direction);
+  $("#applyProfileSync").textContent = profileSyncActionLabel(provider, direction, state.profileSyncWholeLibrary);
   $("#profileSyncList").innerHTML = items.map(profileSyncItemMarkup).join("");
   $("#profileSyncDialog").showModal();
 }
@@ -607,7 +617,7 @@ async function applyProfileSync() {
     const result = await api(`/gateway/profile-sync/${provider}/actions`, {
       method: "POST", body: JSON.stringify({ direction, ids }),
     });
-    setStatus(`${profileSyncActionLabel(provider, direction)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
+    setStatus(`${profileSyncActionLabel(provider, direction, state.profileSyncWholeLibrary)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
     $("#profileSyncDialog").close();
     await Promise.all([loadProfileSync(), loadPublications()]);
   } catch (error) {

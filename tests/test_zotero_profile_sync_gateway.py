@@ -3,6 +3,7 @@ import unittest
 
 from vitamine.cloud_app import (
     zotero_item_payload,
+    zotero_delete_from_selected_library,
     zotero_patch_source_membership,
     zotero_source_write_access,
 )
@@ -24,12 +25,17 @@ class _Response:
 class _Client:
     def __init__(self):
         self.patches = []
+        self.deletes = []
 
     async def get(self, _url, **_kwargs):
         return _Response({"data": {"version": 8, "collections": ["KEEP", "NETSTIM"], "DOI": "10.1000/x"}})
 
     async def patch(self, url, **kwargs):
         self.patches.append((url, kwargs))
+        return _Response()
+
+    async def delete(self, url, **kwargs):
+        self.deletes.append((url, kwargs))
         return _Response()
 
 
@@ -70,6 +76,18 @@ class ZoteroProfileSyncGatewayTests(unittest.TestCase):
         )
         self.assertEqual(payload["collections"], ["NETSTIM"])
         self.assertEqual(payload["DOI"], "10.1000/x")
+
+    def test_whole_library_removal_uses_an_explicit_versioned_delete(self):
+        client = _Client()
+        asyncio.run(
+            zotero_delete_from_selected_library(
+                client, prefix="https://api.zotero.org/groups/42", api_key="test-key", remote_id="ABCD1234"
+            )
+        )
+        self.assertEqual(len(client.deletes), 1)
+        url, request = client.deletes[0]
+        self.assertTrue(url.endswith("/items/ABCD1234"))
+        self.assertEqual(request["headers"]["If-Unmodified-Since-Version"], "8")
 
 
 if __name__ == "__main__":

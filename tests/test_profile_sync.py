@@ -108,6 +108,12 @@ class ProfileSyncTests(unittest.TestCase):
         self.assertEqual(complete_recommendations(con, service, ADD_REMOTE, [item["id"]], {item["id"]: "ZOTERO1"}), 1)
         self.assertEqual(con.execute("SELECT zotero_key FROM publications WHERE id=7").fetchone()[0], "ZOTERO1")
 
+    def test_zotero_whole_library_is_an_explicit_separate_source(self):
+        whole_library = zotero_service({"library_type": "groups", "library_id": "42", "source_mode": "library"})
+        collection = zotero_service({"library_type": "groups", "library_id": "42", "source_mode": "collection", "collection_key": "NETSTIM"})
+        self.assertEqual(whole_library, "zotero:groups:42:library")
+        self.assertNotEqual(whole_library, collection)
+
 
 if __name__ == "__main__":
     unittest.main()

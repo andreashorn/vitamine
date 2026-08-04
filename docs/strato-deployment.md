@@ -173,7 +173,10 @@ library/source at a time rather than merging every accessible library. New or
 reconnected authorizations request write access so profile sync can add or
 remove membership only in the selected collection or personal “My
 Publications” source. A prior read-only connection must be reconnected before
-an update; VitaMine never deletes a Zotero library item as part of sync.
+an update. When the explicitly selected source is a whole Zotero library,
+removing a rejected publication uses Zotero's versioned item-delete endpoint;
+the UI labels this as a library deletion and warns that it affects group-library
+collaborators. Collection and My Publications removals remain membership-only.
 
 ## PostgreSQL and backups
 
