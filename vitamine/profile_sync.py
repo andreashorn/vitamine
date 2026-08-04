@@ -18,6 +18,19 @@ ADD_REMOTE = "add_remote"
 REMOVE_REMOTE = "remove_remote"
 
 
+# Provider synchronizers keep their observed records in ``publications`` so
+# VitaMine can reconcile and review them.  Those records are not curated CV
+# publications merely by virtue of being present in that table.  Outbound
+# profile updates must therefore originate only from visible, clean VitaMine
+# records and never relay an ORCID or Zotero import into another service.
+OUTBOUND_PUBLICATION_ELIGIBILITY_SQL = """
+    trim(COALESCE(doi, '')) != ''
+    AND COALESCE(suppress_display, 0) = 0
+    AND trim(COALESCE(quality_note, '')) = ''
+    AND lower(trim(COALESCE(source, ''))) NOT IN ('orcid', 'zotero')
+"""
+
+
 def normalize_doi(value: Any) -> str:
     value = str(value or "").strip().lower()
     value = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value)
@@ -177,6 +190,24 @@ def _upsert_recommendation(
     )
 
 
+def _resolve_ineligible_add_recommendations(con: sqlite3.Connection, service: str) -> None:
+    """Withdraw pending exports when their local record is no longer curated."""
+    con.execute(
+        f"""
+        UPDATE profile_sync_recommendations
+        SET status='resolved', updated_at=datetime('now')
+        WHERE service=? AND direction=? AND status='pending'
+          AND publication_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM publications
+            WHERE publications.id = profile_sync_recommendations.publication_id
+              AND {OUTBOUND_PUBLICATION_ELIGIBILITY_SQL}
+          )
+        """,
+        (service, ADD_REMOTE),
+    )
+
+
 def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> dict[str, int]:
     """Derive actionable mismatches from inbox decisions and observed profile data."""
     ensure_profile_sync_tables(con)
@@ -239,6 +270,7 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
     ).fetchone()
     if not observed:
         return {"remove_remote": removed_candidates, "add_remote": 0}
+    _resolve_ineligible_add_recommendations(con, service)
     remote_keys = {
         str(row["normalized_key"])
         for row in con.execute(
@@ -248,10 +280,14 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
     }
     publication_sql = """
         SELECT * FROM publications
-        WHERE trim(COALESCE(doi, '')) != ''
+        WHERE
     """
+    publication_sql += OUTBOUND_PUBLICATION_ELIGIBILITY_SQL
     if provider == ORCID:
-        publication_sql += " AND trim(COALESCE(orcid_put_code, '')) = '' AND lower(COALESCE(source, '')) != 'orcid'"
+        # A prior successful VitaMine-to-ORCID update records the put-code on
+        # the curated publication.  Retain that durable acknowledgement even
+        # if a later remote observation has not yet populated its cache.
+        publication_sql += " AND trim(COALESCE(orcid_put_code, '')) = ''"
     for publication in con.execute(publication_sql).fetchall():
         payload = dict(publication)
         key = publication_key(payload)
