@@ -5680,32 +5680,43 @@ def ensure_discovery_document(con: sqlite3.Connection, source: dict[str, str]) -
 
 def discover_researcher_profiles() -> dict[str, Any]:
     """Resolve researcher IDs from identity and publication evidence."""
-    with connect() as con:
-        if not ai_web_discovery_enabled(con):
-            return {"ok": True, "enabled": False, "accepted": 0, "staged": 0, "warnings": []}
-        person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
-        publications = rows_dict(
+    try:
+        with connect() as con:
+            if not ai_web_discovery_enabled(con):
+                return {"ok": True, "enabled": False, "accepted": 0, "staged": 0, "warnings": []}
+            person = row_dict(con.execute("SELECT * FROM person WHERE id=1").fetchone())
+            publications = rows_dict(
+                con.execute(
+                    "SELECT title, year, doi, authors, venue FROM publications "
+                    "WHERE COALESCE(suppress_display, 0)=0 ORDER BY year DESC, id DESC"
+                ).fetchall()
+            )
+            candidates, warnings = resolve_profiles("", person, publications, search_web=True)
             con.execute(
-                "SELECT title, year, doi, authors, venue FROM publications "
-                "WHERE COALESCE(suppress_display, 0)=0 ORDER BY year DESC, id DESC"
-            ).fetchall()
-        )
-        candidates, warnings = resolve_profiles("", person, publications, search_web=True)
-        con.execute(
-            """
-            INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
-            VALUES ('researcher-profile-resolution', 'Researcher profile resolution', '',
-                    'online-profile-index', datetime('now'),
-                    'Profile identifiers resolved from corroborated public identity evidence.')
-            ON CONFLICT(slug) DO UPDATE SET imported_at=datetime('now'), notes=excluded.notes
-            """
-        )
-        document_id = int(
-            con.execute("SELECT id FROM documents WHERE slug='researcher-profile-resolution'").fetchone()[0]
-        )
-        counts = store_profile_candidates(con, document_id, candidates)
-        con.commit()
-    return {"ok": True, "enabled": True, **counts, "warnings": warnings}
+                """
+                INSERT INTO documents (slug, title, source_path, source_format, imported_at, notes)
+                VALUES ('researcher-profile-resolution', 'Researcher profile resolution', '',
+                        'online-profile-index', datetime('now'),
+                        'Profile identifiers resolved from corroborated public identity evidence.')
+                ON CONFLICT(slug) DO UPDATE SET imported_at=datetime('now'), notes=excluded.notes
+                """
+            )
+            document_id = int(
+                con.execute("SELECT id FROM documents WHERE slug='researcher-profile-resolution'").fetchone()[0]
+            )
+            counts = store_profile_candidates(con, document_id, candidates)
+            con.commit()
+        return {"ok": True, "enabled": True, **counts, "warnings": warnings}
+    except Exception as exc:
+        # Profile discovery is supplementary. Its failure must not discard the
+        # completed publication enrichment that precedes it.
+        return {
+            "ok": False,
+            "enabled": True,
+            "accepted": 0,
+            "staged": 0,
+            "warnings": [f"Researcher profile discovery was skipped ({type(exc).__name__})."],
+        }
 
 
 def discover_ai_profile_candidates() -> dict[str, Any]:
@@ -5723,7 +5734,7 @@ def discover_ai_profile_candidates() -> dict[str, Any]:
     results: list[dict[str, Any]] = []
     warnings: list[str] = []
     with connect() as con:
-        for source in sources:
+        for index, source in enumerate(sources):
             url = source["url"]
             try:
                 text, content_type = fetch_profile_text(url)
@@ -5735,59 +5746,70 @@ def discover_ai_profile_candidates() -> dict[str, Any]:
                 warnings.append(f"{url}: profile page did not contain enough visible text.")
                 results.append({"url": url, "ok": False, "warning": "not enough visible text"})
                 continue
-            prompt_text = (
-                "This is a researcher profile page, not necessarily a full CV. "
-                "Extract only concrete CV/publication facts that are explicitly present. "
-                "Treat uncertain items as low confidence.\n\n"
-                f"Source URL: {url}\nContent type: {content_type}\n\n{text[:AI_DISCOVERY_MAX_CHARS_PER_PAGE]}"
-            )
-            llm_data, llm_warning = llm_extract(prompt_text, settings)
-            if llm_warning or not isinstance(llm_data, dict):
-                warning = llm_warning or "LLM returned no structured discovery data."
+            savepoint = f"profile_discovery_{index}"
+            con.execute(f"SAVEPOINT {savepoint}")
+            try:
+                prompt_text = (
+                    "This is a researcher profile page, not necessarily a full CV. "
+                    "Extract only concrete CV/publication facts that are explicitly present. "
+                    "Treat uncertain items as low confidence.\n\n"
+                    f"Source URL: {url}\nContent type: {content_type}\n\n{text[:AI_DISCOVERY_MAX_CHARS_PER_PAGE]}"
+                )
+                llm_data, llm_warning = llm_extract(prompt_text, settings)
+                if llm_warning or not isinstance(llm_data, dict):
+                    warning = llm_warning or "LLM returned no structured discovery data."
+                    warnings.append(f"{url}: {warning}")
+                    results.append({"url": url, "ok": False, "warning": warning})
+                    con.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    continue
+                document_id = ensure_discovery_document(con, source)
+                guarded_publications, publication_review = guard_publications(
+                    con,
+                    [row for row in llm_data.get("publications", []) if isinstance(row, dict)],
+                    "ai_web_discovery",
+                )
+                guarded_other, other_review = review_nonpublications(
+                    con,
+                    [row for row in llm_data.get("entries", []) if isinstance(row, dict)],
+                    [row for row in llm_data.get("contributions", []) if isinstance(row, dict)],
+                    llm_data.get("person") if isinstance(llm_data.get("person"), dict) else {},
+                    llm_data.get("narrative_report") if isinstance(llm_data.get("narrative_report"), dict) else None,
+                    "ai_web_discovery",
+                    settings,
+                )
+                staged = stage_import_candidates(
+                    con,
+                    document_id,
+                    guarded_other["entries"],
+                    guarded_publications,
+                    guarded_other["contributions"],
+                    guarded_other["person"],
+                    guarded_other["narrative_report"],
+                    "ai_web_discovery",
+                )
+                staged_count = sum(int(staged.get(key) or 0) for key in ("entries", "publications", "contributions", "person", "narrative"))
+                total_staged += staged_count
+                results.append(
+                    {
+                        "url": url,
+                        "ok": True,
+                        "staged": staged,
+                        "publication_review": publication_review,
+                        "other_review": other_review,
+                        "candidates_staged": staged_count,
+                        "remembered_rejections": int(staged.get("remembered_rejections") or 0),
+                    }
+                )
+                for warning in llm_data.get("warnings") or []:
+                    if warning:
+                        warnings.append(f"{url}: {warning}")
+                con.execute(f"RELEASE SAVEPOINT {savepoint}")
+            except Exception as exc:
+                con.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                con.execute(f"RELEASE SAVEPOINT {savepoint}")
+                warning = f"Profile discovery was skipped ({type(exc).__name__})."
                 warnings.append(f"{url}: {warning}")
                 results.append({"url": url, "ok": False, "warning": warning})
-                continue
-            document_id = ensure_discovery_document(con, source)
-            guarded_publications, publication_review = guard_publications(
-                con,
-                [row for row in llm_data.get("publications", []) if isinstance(row, dict)],
-                "ai_web_discovery",
-            )
-            guarded_other, other_review = review_nonpublications(
-                con,
-                [row for row in llm_data.get("entries", []) if isinstance(row, dict)],
-                [row for row in llm_data.get("contributions", []) if isinstance(row, dict)],
-                llm_data.get("person") if isinstance(llm_data.get("person"), dict) else {},
-                llm_data.get("narrative_report") if isinstance(llm_data.get("narrative_report"), dict) else None,
-                "ai_web_discovery",
-                settings,
-            )
-            staged = stage_import_candidates(
-                con,
-                document_id,
-                guarded_other["entries"],
-                guarded_publications,
-                guarded_other["contributions"],
-                guarded_other["person"],
-                guarded_other["narrative_report"],
-                "ai_web_discovery",
-            )
-            staged_count = sum(int(staged.get(key) or 0) for key in ("entries", "publications", "contributions", "person", "narrative"))
-            total_staged += staged_count
-            results.append(
-                {
-                    "url": url,
-                    "ok": True,
-                    "staged": staged,
-                    "publication_review": publication_review,
-                    "other_review": other_review,
-                    "candidates_staged": staged_count,
-                    "remembered_rejections": int(staged.get("remembered_rejections") or 0),
-                }
-            )
-            for warning in llm_data.get("warnings") or []:
-                if warning:
-                    warnings.append(f"{url}: {warning}")
         con.commit()
         pending = pending_inbox_count(con)
     return {

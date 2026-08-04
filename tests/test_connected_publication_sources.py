@@ -1,7 +1,13 @@
 import sqlite3
 import unittest
+from unittest.mock import patch
 
-from vitamine.app import ai_web_discovery_enabled, connected_publication_sources
+from vitamine.app import (
+    ai_web_discovery_enabled,
+    connected_publication_sources,
+    discover_ai_profile_candidates,
+    discover_researcher_profiles,
+)
 
 
 def database(*, zotero_key: str = "", orcid_id: str = "") -> sqlite3.Connection:
@@ -44,6 +50,42 @@ class ConnectedPublicationSourcesTests(unittest.TestCase):
         con = database()
         con.execute("INSERT INTO app_settings (key, value) VALUES ('ai_web_discovery_enabled', '0')")
         self.assertTrue(ai_web_discovery_enabled(con))
+
+    def test_researcher_profile_failure_does_not_abort_enrichment(self):
+        con = database()
+        con.execute("CREATE TABLE publications (title TEXT, year TEXT, doi TEXT, authors TEXT, venue TEXT, suppress_display INTEGER, id INTEGER)")
+        con.execute("ALTER TABLE person ADD COLUMN full_name TEXT")
+        with (
+            patch("vitamine.app.connect", return_value=con),
+            patch("vitamine.app.resolve_profiles", side_effect=RuntimeError("unexpected response")),
+        ):
+            result = discover_researcher_profiles()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["warnings"], ["Researcher profile discovery was skipped (RuntimeError)."])
+
+    def test_web_profile_processing_failure_is_skipped_per_source(self):
+        con = database()
+        con.execute("ALTER TABLE person_identifiers ADD COLUMN identifier_type TEXT")
+        con.execute("ALTER TABLE person_identifiers ADD COLUMN url TEXT")
+        con.execute("CREATE TABLE import_inbox_items (status TEXT)")
+        con.execute(
+            "UPDATE person_identifiers SET platform='Lab page', identifier_type='Website', identifier_value='lab', url='https://example.org/profile' WHERE id=1"
+        )
+        if con.execute("SELECT count(*) FROM person_identifiers").fetchone()[0] == 0:
+            con.execute(
+                "INSERT INTO person_identifiers (person_id, platform, identifier_type, identifier_value, url) VALUES (1, 'Lab page', 'Website', 'lab', 'https://example.org/profile')"
+            )
+        with (
+            patch("vitamine.app.connect", return_value=con),
+            patch("vitamine.app.cv_import_settings", return_value={"provider": "openai"}),
+            patch("vitamine.app.fetch_profile_text", return_value=("profile " * 80, "text/plain")),
+            patch("vitamine.app.llm_extract", return_value=({"publications": []}, None)),
+            patch("vitamine.app.ensure_discovery_document", side_effect=RuntimeError("unexpected database edge case")),
+        ):
+            result = discover_ai_profile_candidates()
+        self.assertEqual(result["sources_checked"], 1)
+        self.assertFalse(result["results"][0]["ok"])
+        self.assertIn("Profile discovery was skipped (RuntimeError).", result["warnings"][0])
 
 
 if __name__ == "__main__":
