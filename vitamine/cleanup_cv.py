@@ -47,10 +47,6 @@ def _same_text(left: str, right: str) -> bool:
     return re.sub(r"\s+", " ", left).strip() == re.sub(r"\s+", " ", right).strip()
 
 
-def _tokens(value: Any) -> set[str]:
-    return set(re.findall(r"[\w]+", str(value or "").casefold()))
-
-
 def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
     return {str(row["name"]) for row in con.execute(f"PRAGMA table_info({table})").fetchall()}
 
@@ -219,16 +215,6 @@ def verify_publication_cleanup_suggestions(
             # casing-only LLM suggestion for the user to review.
             continue
         proposed = suggestion.get("new_text") or ""
-        if (
-            suggestion["field"] == "venue"
-            and len(canonical) < len(proposed)
-            and _tokens(canonical) < _tokens(proposed)
-        ):
-            # Crossref commonly exposes a compact journal title (for example,
-            # "Brain") while the CV and the LLM may hold its fuller title.
-            # Do not use registry verification to throw away that extra detail.
-            resolved.append(suggestion)
-            continue
         verified_suggestion = dict(suggestion)
         if not _same_text(canonical, proposed):
             replaced += 1

@@ -149,7 +149,7 @@ class CleanupCvTests(unittest.TestCase):
 
         self.assertEqual((resolved, replaced, skipped), ([], 0, 0))
 
-    def test_crossref_does_not_shorten_a_more_descriptive_venue_proposal(self):
+    def test_crossref_uses_its_compact_canonical_venue_title(self):
         suggestion = {
             "operation": "edit", "record_type": "publication", "record_id": "7", "field": "venue",
             "old_text": "Brain : a journal of neurology", "new_text": "Brain: A Journal of Neurology",
@@ -166,7 +166,9 @@ class CleanupCvTests(unittest.TestCase):
             [suggestion], records, lambda doi: {"doi": doi, "venue": "Brain"}
         )
 
-        self.assertEqual((resolved, replaced, skipped), ([suggestion], 0, 0))
+        self.assertEqual((replaced, skipped), (1, 0))
+        self.assertEqual(resolved[0]["new_text"], "Brain")
+        self.assertEqual(resolved[0]["rationale"], "Verified against Crossref DOI metadata.")
 
     def test_existing_cleanup_suggestion_receives_a_live_record_preview(self):
         item = {
