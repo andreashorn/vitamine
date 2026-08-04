@@ -85,6 +85,10 @@ class CleanupCvTests(unittest.TestCase):
         self.assertEqual(self.con.execute("SELECT venue FROM publications WHERE id=7").fetchone()[0], "Annals of Neurology")
         log = self.con.execute("SELECT operation, orcid_sync_status FROM cleanup_change_log").fetchone()
         self.assertEqual(tuple(log), ("edit", "pending"))
+        lock = self.con.execute(
+            "SELECT target_type, target_id, field_name, locked_value FROM field_locks"
+        ).fetchone()
+        self.assertEqual(tuple(lock), ("publication", 7, "venue", "Annals of Neurology"))
 
     def test_csv_parser_rejects_stale_old_text(self):
         rows = [{"record_type": "publication", "record_id": "7", "fields": {"venue": "ANNALS OF NEUROLOGY"}}]

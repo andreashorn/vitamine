@@ -10,6 +10,8 @@ import re
 import sqlite3
 import urllib.parse
 
+from vitamine.field_locks import locked_field_values
+
 from maintain_publications import maintain
 from import_background_docs import (
     DB,
@@ -330,6 +332,12 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
             year=zotero_year(data),
         )
         if existing:
+            protected = list(params)
+            indexes = {"authors": 4, "title": 5, "venue": 6, "year": 7, "doi": 8, "pmid": 9, "url": 10, "raw_citation": 13}
+            locked = locked_field_values(con, "publication", int(existing["id"]))
+            for field, index in indexes.items():
+                if field in locked:
+                    protected[index] = existing[field]
             con.execute(
                 """
                 UPDATE publications SET
@@ -338,7 +346,7 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
                   abstract=?, extra=?, raw_citation=?, confidence='high'
                 WHERE id=?
                 """,
-                (*params, existing["id"]),
+                (*protected, existing["id"]),
             )
         else:
             con.execute(

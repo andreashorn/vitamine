@@ -17,6 +17,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from vitamine.field_locks import locked_field_values, stage_enrichment_change
+
 try:
     from .maintain_publications import maintain
 except ImportError:
@@ -957,6 +959,25 @@ def changes_for_row(row: sqlite3.Row, values: dict[str, Any]) -> dict[str, Any]:
 
 
 def update_row(con: sqlite3.Connection, row_id: int, values: dict[str, Any], source: str) -> None:
+    current = con.execute("SELECT * FROM publications WHERE id=?", (row_id,)).fetchone()
+    if current is None:
+        return
+    # Approved cleanup values are deliberately local curation. Preserve them
+    # without creating a redundant inbox item every time a registry disagrees.
+    for field, locked_value in locked_field_values(con, "publication", row_id).items():
+        if field in values and field in current.keys():
+            values[field] = locked_value or current[field]
+    reconcile_fields = {"title", "venue", "year", "authors", "doi", "pmid", "url", "raw_citation"}
+    for field in reconcile_fields:
+        incoming = values.get(field)
+        previous = current[field] if field in current.keys() else None
+        if field in values and str(previous or "").strip() and str(incoming or "").strip() and str(previous) != str(incoming):
+            if field not in locked_field_values(con, "publication", row_id):
+                stage_enrichment_change(
+                    con, publication_id=row_id, field_name=field, old_value=previous,
+                    new_value=incoming, source=source,
+                )
+            values[field] = previous
     con.execute(
         """
         UPDATE publications

@@ -335,6 +335,40 @@ CREATE TABLE IF NOT EXISTS cleanup_change_log (
 CREATE INDEX IF NOT EXISTS idx_cleanup_change_log_orcid
 ON cleanup_change_log(orcid_sync_status, applied_at);
 
+CREATE TABLE IF NOT EXISTS field_locks (
+  id INTEGER PRIMARY KEY,
+  target_type TEXT NOT NULL,
+  target_id INTEGER NOT NULL,
+  field_name TEXT NOT NULL,
+  locked_value TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_inbox_item_id INTEGER REFERENCES import_inbox_items(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(target_type, target_id, field_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_field_locks_target
+ON field_locks(target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS enrichment_change_candidates (
+  id INTEGER PRIMARY KEY,
+  publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+  field_name TEXT NOT NULL,
+  old_value TEXT NOT NULL,
+  new_value TEXT NOT NULL,
+  source TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  rationale TEXT,
+  confidence TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(publication_id, field_name, source, new_value)
+);
+
+CREATE INDEX IF NOT EXISTS idx_enrichment_change_candidates_pending
+ON enrichment_change_candidates(status, created_at);
+
 CREATE TABLE IF NOT EXISTS discovery_rejections (
   id INTEGER PRIMARY KEY,
   fingerprint TEXT NOT NULL UNIQUE,

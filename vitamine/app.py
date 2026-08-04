@@ -100,6 +100,7 @@ from .profile_sync import (
 from .export_quality import run_export_quality_audit
 from .llm_routing import settings_for_llm_task
 from .cleanup_cv import run_cleanup_review
+from .field_locks import ensure_field_locks_table, lock_field, locked_field_values
 from .custom_docx_templates import (
     MAX_TEMPLATE_BYTES,
     analyze_and_skeletonize,
@@ -372,6 +373,7 @@ def connect() -> sqlite3.Connection:
     ensure_narrative_report_table(con)
     ensure_r4ri_contribution_sections_table(con)
     ensure_import_inbox_table(con)
+    ensure_field_locks_table(con)
     ensure_cleanup_change_log_table(con)
     ensure_discovery_rejections_table(con)
     ensure_profile_sync_tables(con)
@@ -1896,9 +1898,31 @@ def accept_inbox_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tup
     handler = handlers.get(str(item["target_type"] or ""))
     if item.get("target_type") == "cleanup_suggestion":
         return apply_cleanup_suggestion(con, item)
+    if item.get("target_type") == "metadata_update":
+        return apply_enrichment_metadata_update(con, item)
     if not handler:
         return "skipped", None
     return handler(con, item)
+
+
+def apply_enrichment_metadata_update(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    try:
+        candidate_id = int(payload.get("candidate_id"))
+        publication_id = int(payload.get("publication_id"))
+    except (TypeError, ValueError):
+        return "skipped", None
+    field = str(payload.get("field") or "")
+    allowed = cleanup_locator_table("publication")[1]
+    if field not in allowed or field in locked_field_values(con, "publication", publication_id):
+        return "skipped", None
+    candidate = con.execute("SELECT * FROM enrichment_change_candidates WHERE id=? AND status='staged'", (candidate_id,)).fetchone()
+    current = con.execute(f"SELECT {field} FROM publications WHERE id=?", (publication_id,)).fetchone()
+    if not candidate or not current or str(current[0] or "") != str(candidate["old_value"] or ""):
+        return "skipped", None
+    con.execute(f"UPDATE publications SET {field}=? WHERE id=?", (candidate["new_value"], publication_id))
+    con.execute("UPDATE enrichment_change_candidates SET status='accepted', updated_at=datetime('now') WHERE id=?", (candidate_id,))
+    return "accepted", publication_id
 
 
 def cleanup_locator_table(record_type: str) -> tuple[str, set[str]] | None:
@@ -1989,6 +2013,15 @@ def apply_cleanup_suggestion(con: sqlite3.Connection, item: dict[str, Any]) -> t
         if not cleanup_text_equal(suggestion.get("old_text"), source[field]) or cleanup_text_equal(new_text, source[field]):
             return "skipped", None
         con.execute(f"UPDATE {table} SET {field}=? WHERE id=?", (new_text, record_id))
+        lock_field(
+            con,
+            target_type=record_type,
+            target_id=record_id,
+            field_name=field,
+            value=new_text,
+            source="approved_cleanup",
+            source_inbox_item_id=int(item["id"]),
+        )
         applied = {"updated": {field: {"from": source[field], "to": new_text}}}
     elif operation == "delete":
         con.execute(f"DELETE FROM {table} WHERE id=?", (record_id,))
@@ -2039,6 +2072,102 @@ def cleanup_cv_job(
         result = run_cleanup_review(con, llm_json, settings, progress_callback)
         con.commit()
         result["inbox_pending"] = pending_inbox_count(con)
+    return result
+
+
+ENRICHMENT_RECONCILIATION_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["decisions"],
+    "properties": {
+        "decisions": {
+            "type": "array", "maxItems": 80,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["id", "action", "rationale", "confidence"],
+                "properties": {
+                    "id": {"type": "integer"},
+                    "action": {"type": "string", "enum": ["apply", "inbox", "ignore"]},
+                    "rationale": {"type": "string"},
+                    "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                },
+            },
+        },
+    },
+}
+
+
+def reconcile_enrichment_changes(con: sqlite3.Connection) -> dict[str, int]:
+    """Use a compact LLM judgment to keep nonlocked metadata conflicts out of the inbox when safe."""
+    rows = rows_dict(con.execute(
+        """
+        SELECT c.*, p.title AS publication_title, p.authors, p.venue, p.year, p.doi
+        FROM enrichment_change_candidates c JOIN publications p ON p.id=c.publication_id
+        WHERE c.status='pending' ORDER BY c.id LIMIT 80
+        """
+    ).fetchall())
+    result = {"candidates": len(rows), "applied": 0, "staged": 0, "ignored": 0}
+    if not rows:
+        return result
+    settings = settings_for_llm_task(cv_import_settings(con, include_secret=True), "enrichment_reconciliation")
+    if str(settings.get("provider") or "none") == "none":
+        return result
+    prompt_rows = [
+        {key: row.get(key) for key in ("id", "publication_id", "publication_title", "authors", "venue", "year", "doi", "field_name", "old_value", "new_value", "source")}
+        for row in rows
+    ]
+    prompt = (
+        "Review incoming publication-metadata differences. The current CV is curated. "
+        "Choose apply only when the source correction is plainly authoritative and non-substantive; "
+        "choose inbox when it could change scientific meaning, identity, or curated wording; choose ignore for noise. "
+        "Never decide to change a locked field. Return one decision per supplied id.\n"
+        + json.dumps(prompt_rows, ensure_ascii=False)
+    )
+    response, warning = llm_json(prompt, ENRICHMENT_RECONCILIATION_SCHEMA, settings)
+    if not isinstance(response, dict):
+        return result
+    by_id = {int(row["id"]): row for row in rows}
+    publication_fields = cleanup_locator_table("publication")[1]
+    for decision in response.get("decisions") or []:
+        if not isinstance(decision, dict):
+            continue
+        try:
+            decision_id = int(decision.get("id") or 0)
+        except (TypeError, ValueError):
+            continue
+        row = by_id.get(decision_id)
+        action = str(decision.get("action") or "")
+        if not row or action not in {"apply", "inbox", "ignore"} or row["field_name"] not in publication_fields:
+            continue
+        locked = locked_field_values(con, "publication", int(row["publication_id"]))
+        if row["field_name"] in locked:
+            con.execute("UPDATE enrichment_change_candidates SET status='ignored', updated_at=datetime('now') WHERE id=?", (row["id"],))
+            result["ignored"] += 1
+            continue
+        current = con.execute(f"SELECT {row['field_name']} FROM publications WHERE id=?", (row["publication_id"],)).fetchone()
+        if not current or str(current[0] or "") != str(row["old_value"] or ""):
+            con.execute("UPDATE enrichment_change_candidates SET status='ignored', updated_at=datetime('now') WHERE id=?", (row["id"],))
+            result["ignored"] += 1
+            continue
+        rationale = str(decision.get("rationale") or "")[:1000]
+        confidence = str(decision.get("confidence") or "medium")
+        if action == "apply":
+            con.execute(f"UPDATE publications SET {row['field_name']}=? WHERE id=?", (row["new_value"], row["publication_id"]))
+            con.execute("UPDATE enrichment_change_candidates SET status='applied', rationale=?, confidence=?, updated_at=datetime('now') WHERE id=?", (rationale, confidence, row["id"]))
+            result["applied"] += 1
+        elif action == "inbox":
+            con.execute(
+                """INSERT INTO import_inbox_items (source, target_type, status, confidence, title, subtitle, raw_text, payload_json)
+                   VALUES ('enrichment_reconciliation', 'metadata_update', 'pending', ?, ?, 'Source metadata needs your review', ?, ?)""",
+                (
+                    confidence, f"Review {row['field_name']} for publication #{row['publication_id']}"[:240],
+                    f"{row['old_value']} → {row['new_value']}"[:4000],
+                    json.dumps({"candidate_id": row["id"], "publication_id": row["publication_id"], "field": row["field_name"], "old_value": row["old_value"], "new_value": row["new_value"], "rationale": rationale}, ensure_ascii=False),
+                ),
+            )
+            con.execute("UPDATE enrichment_change_candidates SET status='staged', rationale=?, confidence=?, updated_at=datetime('now') WHERE id=?", (rationale, confidence, row["id"]))
+            result["staged"] += 1
+        else:
+            con.execute("UPDATE enrichment_change_candidates SET status='ignored', rationale=?, confidence=?, updated_at=datetime('now') WHERE id=?", (rationale, confidence, row["id"]))
+            result["ignored"] += 1
     return result
 
 
@@ -3437,7 +3566,7 @@ def list_import_inbox(
 ) -> dict[str, Any]:
     if status not in {"pending", "accepted", "rejected", "skipped", "all"}:
         raise HTTPException(status_code=400, detail="Unsupported inbox status")
-    if target_type not in {"all", "entry", "publication", "person", "identifier", "narrative_report", "contribution", "cleanup_suggestion"}:
+    if target_type not in {"all", "entry", "publication", "person", "identifier", "narrative_report", "contribution", "cleanup_suggestion", "metadata_update"}:
         raise HTTPException(status_code=400, detail="Unsupported inbox type")
     clauses = []
     params: list[Any] = []
@@ -5559,6 +5688,9 @@ def enrich_cv_job(
     doi_result = run_script("enrich_publications_by_doi.py", "--resolve-missing")
     if doi_result.returncode != 0:
         raise RuntimeError(doi_result.stderr[-4000:] or "DOI enrichment failed.")
+    with connect() as con:
+        reconciliation = reconcile_enrichment_changes(con)
+        con.commit()
     report_progress("sources", "Checking connected publication sources", 62)
     source_results: list[dict[str, Any]] = []
     for index, source in enumerate(sources, start=1):
@@ -5630,6 +5762,7 @@ def enrich_cv_job(
         "profiles_accepted": int(profile_resolution.get("accepted") or 0),
         "profiles_staged": int(profile_resolution.get("staged") or 0),
         "staged_from_web": int(ai_discovery.get("candidates_staged") or 0),
+        "metadata_reconciliation": reconciliation,
         "inbox_pending": inbox_pending,
         "citation_coverage": {
             key: int((citation_coverage or {}).get(key) or 0)

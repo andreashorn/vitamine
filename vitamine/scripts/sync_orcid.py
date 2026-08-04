@@ -15,6 +15,7 @@ except ImportError:
     from maintain_publications import ensure_columns, maintain
 from vitamine.paths import active_db_path
 from vitamine.identifiers import canonical_platform, normalize_identifier
+from vitamine.field_locks import locked_field_values
 
 
 DB = active_db_path()
@@ -341,6 +342,11 @@ def update_existing(con: sqlite3.Connection, row: sqlite3.Row, summary: dict) ->
     pmid = ids.get("pmid") or row["pmid"]
     venue = text_value(summary, "journal-title") or row["venue"]
     year = publication_year(summary) or row["year"]
+    locked = locked_field_values(con, "publication", int(row["id"]))
+    doi = locked.get("doi", doi)
+    pmid = locked.get("pmid", pmid)
+    venue = locked.get("venue", venue)
+    year = locked.get("year", year)
     con.execute(
         """
         UPDATE publications

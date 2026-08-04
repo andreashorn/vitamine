@@ -618,6 +618,7 @@ function inboxTypeLabel(type) {
     narrative_report: "Narrative",
     contribution: "Contribution",
     cleanup_suggestion: "Cleanup suggestion",
+    metadata_update: "Metadata update",
   }[type] || type || "Candidate";
 }
 
