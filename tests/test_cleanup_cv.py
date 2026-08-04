@@ -4,7 +4,12 @@ import json
 import sqlite3
 import unittest
 
-from vitamine.app import apply_cleanup_suggestion, ensure_cleanup_change_log_table, ensure_import_inbox_table
+from vitamine.app import (
+    apply_cleanup_suggestion,
+    attach_cleanup_preview,
+    ensure_cleanup_change_log_table,
+    ensure_import_inbox_table,
+)
 from vitamine.cleanup_cv import CLEANUP_CSV_COLUMNS, parse_cleanup_csv, run_cleanup_review
 
 
@@ -91,6 +96,15 @@ class CleanupCvTests(unittest.TestCase):
             }
         )
         self.assertEqual(parse_cleanup_csv(csv_text, rows), [])
+
+    def test_existing_cleanup_suggestion_receives_a_live_record_preview(self):
+        item = {
+            "target_type": "cleanup_suggestion",
+            "payload": {"cleanup_csv": {"operation": "edit", "record_type": "publication", "record_id": "7"}},
+        }
+        previewed = attach_cleanup_preview(self.con, item)
+        self.assertEqual(previewed["payload"]["record_preview"]["record_id"], 7)
+        self.assertEqual(previewed["payload"]["record_preview"]["fields"]["venue"], "ANNALS OF NEUROLOGY")
 
 
 if __name__ == "__main__":

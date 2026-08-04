@@ -2775,6 +2775,64 @@ label.invalid input {
   line-height: 1.1;
 }
 
+.cleanupPreview {
+  margin-top: 10px;
+  border: 1px solid #d7e0ea;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.cleanupPreview summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: #0f4c5c;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.cleanupPreviewRecord {
+  padding: 0 10px 10px;
+}
+
+.cleanupPreviewRecord + .cleanupPreviewRecord {
+  border-top: 1px solid #d7e0ea;
+  padding-top: 10px;
+}
+
+.cleanupPreviewRecord h4 {
+  margin: 0 0 7px;
+  color: #334155;
+  font-size: 12px;
+}
+
+.cleanupPreviewRecord dl {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+}
+
+.cleanupPreviewRecord dl div {
+  display: grid;
+  grid-template-columns: minmax(104px, 180px) minmax(0, 1fr);
+  gap: 9px;
+}
+
+.cleanupPreviewRecord dt {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cleanupPreviewRecord dd {
+  min-width: 0;
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .duplicateBadge {
   border-color: #fecaca;
   background: #fff1f2;

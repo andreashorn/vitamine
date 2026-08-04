@@ -1911,6 +1911,50 @@ def cleanup_locator_table(record_type: str) -> tuple[str, set[str]] | None:
     return tables.get(record_type)
 
 
+def cleanup_record_preview(
+    con: sqlite3.Connection, record_type: str, record_id: Any
+) -> dict[str, Any] | None:
+    """Return a compact, current record snapshot for an inbox cleanup preview."""
+    mapping = cleanup_locator_table(record_type)
+    try:
+        numeric_id = int(record_id)
+    except (TypeError, ValueError):
+        return None
+    if not mapping or numeric_id < 1:
+        return None
+    table, fields = mapping
+    row = con.execute(f"SELECT * FROM {table} WHERE id=?", (numeric_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "record_type": record_type,
+        "record_id": numeric_id,
+        "fields": {
+            field: str(row[field])[:3000]
+            for field in sorted(fields)
+            if field in row.keys() and str(row[field] or "").strip()
+        },
+    }
+
+
+def attach_cleanup_preview(con: sqlite3.Connection, item: dict[str, Any]) -> dict[str, Any]:
+    if item.get("target_type") != "cleanup_suggestion" or not isinstance(item.get("payload"), dict):
+        return item
+    suggestion = item["payload"].get("cleanup_csv")
+    if not isinstance(suggestion, dict):
+        return item
+    preview = cleanup_record_preview(con, suggestion.get("record_type"), suggestion.get("record_id"))
+    if preview:
+        item["payload"]["record_preview"] = preview
+    if str(suggestion.get("operation") or "") == "merge":
+        related = cleanup_record_preview(
+            con, suggestion.get("related_record_type"), suggestion.get("related_record_id")
+        )
+        if related:
+            item["payload"]["related_record_preview"] = related
+    return item
+
+
 def cleanup_text_equal(left: Any, right: Any) -> bool:
     return re.sub(r"\s+", " ", str(left or "")).strip() == re.sub(r"\s+", " ", str(right or "")).strip()
 
@@ -3432,7 +3476,8 @@ def list_import_inbox(
                 """
             ).fetchall()
         )
-    return {"items": [inbox_payload(row) for row in rows], "counts": counts}
+        items = [attach_cleanup_preview(con, inbox_payload(row)) for row in rows]
+    return {"items": items, "counts": counts}
 
 
 @app.get("/api/profile-sync/notifications")

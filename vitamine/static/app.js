@@ -649,6 +649,34 @@ function renderImportInbox(selector, items, options = {}) {
     : `<p class="emptyState">No import candidates here.</p>`;
 }
 
+function cleanupFieldLabel(field) {
+  return {
+    raw_text: "Source text",
+    section_key: "Section",
+  }[field] || String(field || "Field").replace(/_/g, " ");
+}
+
+function cleanupRecordPreviewMarkup(record, label) {
+  const fields = Object.entries(record?.fields || {}).filter(([, value]) => String(value || "").trim());
+  if (!record || !fields.length) return "";
+  return `
+    <section class="cleanupPreviewRecord">
+      <h4>${escapeHtml(label)} · ${escapeHtml(record.record_type)} #${escapeHtml(record.record_id)}</h4>
+      <dl>${fields.map(([field, value]) => `
+        <div><dt>${escapeHtml(cleanupFieldLabel(field))}</dt><dd>${escapeHtml(String(value)).slice(0, 1800)}</dd></div>
+      `).join("")}</dl>
+    </section>
+  `;
+}
+
+function cleanupPreviewMarkup(item) {
+  if (item.target_type !== "cleanup_suggestion") return "";
+  const current = cleanupRecordPreviewMarkup(item.payload?.record_preview, "Current record");
+  const related = cleanupRecordPreviewMarkup(item.payload?.related_record_preview, "Record to keep");
+  if (!current && !related) return "";
+  return `<details class="cleanupPreview"><summary>Preview current record</summary>${current}${related}</details>`;
+}
+
 function inboxItemMarkup(item, options = {}) {
   const selectableStatuses = options.selectableStatuses || ["pending"];
   const selectable = selectableStatuses.includes(item.status || "pending");
@@ -662,6 +690,7 @@ function inboxItemMarkup(item, options = {}) {
   const checked = selectable && !cleanup && !item.duplicate_of_id && !cautiousHonor && !identityReview && item.confidence !== "low" ? "checked" : "";
   const disabled = selectable ? "" : "disabled";
   const raw = item.raw_text || item.payload?.raw_citation || item.payload?.raw_text || "";
+  const rawPreviewLimit = cleanup ? 360 : 900;
   return `
     <article class="inboxItem ${confidenceClass(item.confidence)}" data-inbox-id="${item.id}">
       <label class="inboxCheck">
@@ -679,7 +708,8 @@ function inboxItemMarkup(item, options = {}) {
         ${item.subtitle ? `<small>${escapeHtml(item.subtitle)}</small>` : ""}
         ${identityReview ? `<small>${escapeHtml(item.payload?._identity_review_reason || "The registries could not distinguish this author from a namesake.")}</small>` : ""}
         ${cleanup ? `<small>${escapeHtml(item.payload?.cleanup_csv?.rationale || "Review the proposed change before applying it.")}</small>` : ""}
-        ${raw ? `<p>${escapeHtml(raw).slice(0, 900)}</p>` : ""}
+        ${raw ? `<p>${escapeHtml(raw).slice(0, rawPreviewLimit)}</p>` : ""}
+        ${cleanupPreviewMarkup(item)}
       </div>
     </article>
   `;
