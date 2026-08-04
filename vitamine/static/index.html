@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260803-zotero-group-libraries-export-format-label-generic-entry-translation-vitamine-plus-dev-toggle-profile-sync">
+  <link rel="stylesheet" href="/static/styles.css?v=20260803-zotero-group-libraries-export-format-label-generic-entry-translation-vitamine-plus-dev-toggle-profile-sync-cleanup-cv">
 </head>
 <body>
   <header class="topbar">
@@ -33,6 +33,13 @@
           <path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"></path>
         </svg>
         <span>Enrich CV</span>
+      </button>
+      <button id="cleanupCvDashboard" class="topbarCleanupButton" type="button" title="Find conservative corrections, duplicates, and junk entries for review">
+        <svg class="topbarEnrichIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="m4 7 3 3 5-6"></path>
+          <path d="M12 7h8M12 12h8M4 17l3 3 5-6M12 17h8"></path>
+        </svg>
+        <span>Cleanup CV</span>
       </button>
       <button id="workspacePlusButton" class="workspacePlusButton" type="button" hidden>VitaMine+</button>
       <div id="cloudAccountMenu" class="cloudAccountMenu" hidden>
@@ -483,8 +490,8 @@
     <section id="inboxView" class="view" role="tabpanel" aria-labelledby="inboxTab">
       <section class="panel">
         <div class="panelHeader">
-          <h2>Import Inbox</h2>
-          <p>Review candidates found by CV imports and enrichment sources before they enter the curated database.</p>
+          <h2>Inbox</h2>
+          <p>Review imported candidates and conservative CV cleanup suggestions. Applying a cleanup item records an audit entry; publication changes are marked for a future optional ORCID sync.</p>
         </div>
         <div class="toolbar inboxToolbar">
           <select id="inboxStatusFilter">
@@ -502,6 +509,7 @@
             <option value="identifier">Identifiers</option>
             <option value="narrative_report">Narrative</option>
             <option value="contribution">Contributions</option>
+            <option value="cleanup_suggestion">Cleanup suggestions</option>
           </select>
           <button id="selectInboxVisible" type="button">Select Visible</button>
           <button id="acceptInboxSelected" type="button">Accept Checked</button>
@@ -890,6 +898,6 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=20260804-publication-search-race-fix"></script>
+  <script src="/static/app.js?v=20260804-cleanup-cv"></script>
 </body>
 </html>

@@ -99,6 +99,7 @@ from .profile_sync import (
 )
 from .export_quality import run_export_quality_audit
 from .llm_routing import settings_for_llm_task
+from .cleanup_cv import run_cleanup_review
 from .custom_docx_templates import (
     MAX_TEMPLATE_BYTES,
     analyze_and_skeletonize,
@@ -371,6 +372,7 @@ def connect() -> sqlite3.Connection:
     ensure_narrative_report_table(con)
     ensure_r4ri_contribution_sections_table(con)
     ensure_import_inbox_table(con)
+    ensure_cleanup_change_log_table(con)
     ensure_discovery_rejections_table(con)
     ensure_profile_sync_tables(con)
     ensure_export_settings_table(con)
@@ -1055,6 +1057,32 @@ def ensure_import_inbox_table(con: sqlite3.Connection) -> None:
     )
 
 
+def ensure_cleanup_change_log_table(con: sqlite3.Connection) -> None:
+    """Store only accepted cleanup changes; ORCID sync remains an explicit future action."""
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cleanup_change_log (
+          id INTEGER PRIMARY KEY,
+          inbox_item_id INTEGER NOT NULL UNIQUE REFERENCES import_inbox_items(id) ON DELETE RESTRICT,
+          operation TEXT NOT NULL,
+          record_type TEXT NOT NULL,
+          record_id INTEGER NOT NULL,
+          related_record_id INTEGER,
+          field_name TEXT,
+          old_text TEXT,
+          new_text TEXT,
+          applied_json TEXT NOT NULL DEFAULT '{}',
+          orcid_sync_status TEXT NOT NULL DEFAULT 'not_applicable',
+          applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cleanup_change_log_orcid "
+        "ON cleanup_change_log(orcid_sync_status, applied_at)"
+    )
+
+
 def profile_sync_request_ids(payload: dict[str, Any]) -> list[int]:
     ids: list[int] = []
     for value in payload.get("ids") or []:
@@ -1700,6 +1728,15 @@ def mark_inbox_item(con: sqlite3.Connection, item_id: int, status: str, note: st
     )
 
 
+def accepted_inbox_note(item: dict[str, Any], target_id: int | None) -> str:
+    if item.get("target_type") == "cleanup_suggestion":
+        suggestion = item.get("payload", {}).get("cleanup_csv", {})
+        operation = str(suggestion.get("operation") or "change")
+        record_type = str(suggestion.get("record_type") or "record")
+        return f"Applied {operation} cleanup suggestion to {record_type} {target_id}."
+    return f"Imported as {item['target_type']} {target_id}."
+
+
 def accept_entry_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
     payload = normalize_cv_entry(item["payload"])
     if not payload:
@@ -1857,9 +1894,108 @@ def accept_inbox_candidate(con: sqlite3.Connection, item: dict[str, Any]) -> tup
         "contribution": accept_contribution_candidate,
     }
     handler = handlers.get(str(item["target_type"] or ""))
+    if item.get("target_type") == "cleanup_suggestion":
+        return apply_cleanup_suggestion(con, item)
     if not handler:
         return "skipped", None
     return handler(con, item)
+
+
+def cleanup_locator_table(record_type: str) -> tuple[str, set[str]] | None:
+    tables = {
+        "person": ("person", {"full_name", "display_name", "degrees", "position_title", "work_email", "orcid_id", "own_institution_name"}),
+        "entry": ("cv_entries", {"section_key", "start_date", "end_date", "title", "organization", "location", "role", "amount", "description", "raw_text"}),
+        "publication": ("publications", {"authors", "title", "venue", "year", "doi", "pmid", "url", "raw_citation", "quality_note"}),
+        "contribution": ("biosketch_contributions", {"ordinal", "title", "narrative"}),
+    }
+    return tables.get(record_type)
+
+
+def cleanup_text_equal(left: Any, right: Any) -> bool:
+    return re.sub(r"\s+", " ", str(left or "")).strip() == re.sub(r"\s+", " ", str(right or "")).strip()
+
+
+def apply_cleanup_suggestion(con: sqlite3.Connection, item: dict[str, Any]) -> tuple[str, int | None]:
+    """Apply a validated CSV suggestion and retain an ORCID-ready audit record."""
+    suggestion = item.get("payload", {}).get("cleanup_csv") if isinstance(item.get("payload"), dict) else None
+    if not isinstance(suggestion, dict):
+        return "skipped", None
+    operation = str(suggestion.get("operation") or "")
+    record_type = str(suggestion.get("record_type") or "")
+    mapping = cleanup_locator_table(record_type)
+    try:
+        record_id = int(suggestion.get("record_id"))
+    except (TypeError, ValueError):
+        return "skipped", None
+    if not mapping or record_id < 1 or operation not in {"edit", "merge", "delete"}:
+        return "skipped", None
+    table, allowed_fields = mapping
+    if record_type == "person" and operation != "edit":
+        return "skipped", None
+    source = con.execute(f"SELECT * FROM {table} WHERE id=?", (record_id,)).fetchone()
+    if not source:
+        return "skipped", None
+    applied: dict[str, Any] = {}
+    related_id: int | None = None
+    if operation == "edit":
+        field = str(suggestion.get("field") or "")
+        new_text = str(suggestion.get("new_text") or "").strip()
+        if field not in allowed_fields or not new_text or field not in source.keys():
+            return "skipped", None
+        if not cleanup_text_equal(suggestion.get("old_text"), source[field]) or cleanup_text_equal(new_text, source[field]):
+            return "skipped", None
+        con.execute(f"UPDATE {table} SET {field}=? WHERE id=?", (new_text, record_id))
+        applied = {"updated": {field: {"from": source[field], "to": new_text}}}
+    elif operation == "delete":
+        con.execute(f"DELETE FROM {table} WHERE id=?", (record_id,))
+        applied = {"deleted": {field: source[field] for field in allowed_fields if field in source.keys() and source[field] is not None}}
+    else:
+        try:
+            related_id = int(suggestion.get("related_record_id"))
+        except (TypeError, ValueError):
+            return "skipped", None
+        related_type = str(suggestion.get("related_record_type") or "")
+        if related_type != record_type or related_id < 1 or related_id == record_id:
+            return "skipped", None
+        target = con.execute(f"SELECT * FROM {table} WHERE id=?", (related_id,)).fetchone()
+        if not target:
+            return "skipped", None
+        copied: dict[str, Any] = {}
+        for field in allowed_fields:
+            if field in source.keys() and field in target.keys() and not str(target[field] or "").strip() and str(source[field] or "").strip():
+                con.execute(f"UPDATE {table} SET {field}=? WHERE id=?", (source[field], related_id))
+                copied[field] = source[field]
+        con.execute(f"DELETE FROM {table} WHERE id=?", (record_id,))
+        applied = {"merged_into": related_id, "copied_blank_fields": copied}
+    con.execute(
+        """
+        INSERT INTO cleanup_change_log
+          (inbox_item_id, operation, record_type, record_id, related_record_id, field_name,
+           old_text, new_text, applied_json, orcid_sync_status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item["id"], operation, record_type, record_id, related_id,
+            str(suggestion.get("field") or "") or None,
+            str(suggestion.get("old_text") or "") or None,
+            str(suggestion.get("new_text") or "") or None,
+            json.dumps(applied, ensure_ascii=False),
+            "pending" if record_type == "publication" else "not_applicable",
+        ),
+    )
+    return "accepted", record_id
+
+
+def cleanup_cv_job(
+    progress_callback: Callable[[str, str, int], None] | None = None,
+) -> dict[str, Any]:
+    """Stage conservative CSV-backed cleanup suggestions; never mutate CV records."""
+    with connect() as con:
+        settings = settings_for_llm_task(cv_import_settings(con, include_secret=True), "cv_cleanup")
+        result = run_cleanup_review(con, llm_json, settings, progress_callback)
+        con.commit()
+        result["inbox_pending"] = pending_inbox_count(con)
+    return result
 
 
 def grant_end_has_passed(value: Any, today: date | None = None) -> bool:
@@ -3257,7 +3393,7 @@ def list_import_inbox(
 ) -> dict[str, Any]:
     if status not in {"pending", "accepted", "rejected", "skipped", "all"}:
         raise HTTPException(status_code=400, detail="Unsupported inbox status")
-    if target_type not in {"all", "entry", "publication", "person", "identifier", "narrative_report", "contribution"}:
+    if target_type not in {"all", "entry", "publication", "person", "identifier", "narrative_report", "contribution", "cleanup_suggestion"}:
         raise HTTPException(status_code=400, detail="Unsupported inbox type")
     clauses = []
     params: list[Any] = []
@@ -3384,7 +3520,7 @@ async def accept_import_inbox(request: Request) -> dict[str, Any]:
                     orcid_accepted = orcid_accepted or bool(clean_orcid_id(item["payload"].get("orcid_id")))
                 elif item["target_type"] == "identifier":
                     orcid_accepted = orcid_accepted or str(item["payload"].get("platform") or "").casefold() == "orcid"
-                mark_inbox_item(con, int(item["id"]), "accepted", f"Imported as {item['target_type']} {target_id}.")
+                mark_inbox_item(con, int(item["id"]), "accepted", accepted_inbox_note(item, target_id))
             elif status == "duplicate":
                 duplicates += 1
                 mark_inbox_item(con, int(item["id"]), "skipped", f"Skipped duplicate of existing record {target_id}.")
@@ -3598,6 +3734,7 @@ def accept_high_confidence_import_inbox() -> dict[str, Any]:
                 WHERE status='pending'
                   AND confidence='high'
                   AND duplicate_of_id IS NULL
+                  AND target_type != 'cleanup_suggestion'
                 ORDER BY id
                 """
             ).fetchall()
@@ -6529,6 +6666,15 @@ def enrich_cv_action() -> JSONResponse:
         payload = enrich_cv_job(update_last_run=True)
         schedule_background_refresh(publications_changed=True)
         return JSONResponse(payload)
+    except RuntimeError as exc:
+        return JSONResponse({"ok": False, "stderr": str(exc)[-4000:]}, status_code=500)
+
+
+@app.post("/api/actions/cleanup-cv")
+def cleanup_cv_action() -> JSONResponse:
+    require_hosted_vitamine_plus()
+    try:
+        return JSONResponse(cleanup_cv_job())
     except RuntimeError as exc:
         return JSONResponse({"ok": False, "stderr": str(exc)[-4000:]}, status_code=500)
 

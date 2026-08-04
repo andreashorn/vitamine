@@ -88,7 +88,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 12
+CLOUD_SCHEMA_VERSION = 13
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
 PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
@@ -227,7 +227,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     id TEXT PRIMARY KEY,
     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
     database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv')),
+    kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
     base_revision INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
@@ -519,7 +519,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     id TEXT PRIMARY KEY,
     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
     database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv')),
+    kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv')),
     status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
     base_revision INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
@@ -1803,6 +1803,84 @@ def migration_012_vitamine_plus(con: GatewayConnection) -> None:
         con.execute("DELETE FROM premium_account_transactions")
 
 
+def migration_013_cleanup_cv_jobs(con: GatewayConnection) -> None:
+    """Permit the additive cleanup job kind without changing any private CV data."""
+    if con.backend == "postgres":
+        rows = con.execute(
+            """
+            SELECT conname FROM pg_constraint
+            WHERE conrelid='background_jobs'::regclass AND contype='c'
+              AND pg_get_constraintdef(oid) LIKE '%%kind%%'
+            """
+        ).fetchall()
+        for row in rows:
+            name = str(row["conname"])
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                con.execute(f'ALTER TABLE background_jobs DROP CONSTRAINT "{name}"')
+        con.execute(
+            "ALTER TABLE background_jobs ADD CONSTRAINT background_jobs_kind_check "
+            "CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv'))"
+        )
+        return
+    schema_row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='background_jobs'"
+    ).fetchone()
+    schema_sql = str(schema_row["sql"] or "") if schema_row else ""
+    # Some early SQLite test/dev stores had no kind CHECK at all, and so
+    # already accept the new additive value without a risky table rebuild.
+    if "CHECK" not in schema_sql.upper() or "cleanup_cv" in schema_sql:
+        return
+    # SQLite cannot alter a CHECK constraint. Rebuild only the queue table and
+    # preserve every existing job and index-defining column.
+    con.execute("ALTER TABLE background_jobs RENAME TO background_jobs_before_cleanup")
+    con.execute(
+        """
+        CREATE TABLE background_jobs (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv')),
+            status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+            base_revision INTEGER NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            request_fingerprint TEXT,
+            progress_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT,
+            error_message TEXT,
+            support_id TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            heartbeat_at TEXT,
+            finished_at TEXT,
+            updated_at TEXT NOT NULL,
+            acknowledged_at TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO background_jobs
+          SELECT id, member_id, database_id, kind, status, base_revision, payload_json,
+                 idempotency_key, request_fingerprint, progress_json, result_json,
+                 error_message, support_id, created_at, started_at, heartbeat_at,
+                 finished_at, updated_at, acknowledged_at
+        FROM background_jobs_before_cleanup
+        """
+    )
+    con.execute("DROP TABLE background_jobs_before_cleanup")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_background_jobs_member ON background_jobs(member_id, status, created_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_background_jobs_database ON background_jobs(database_id, status, created_at)")
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_idempotency "
+        "ON background_jobs(member_id, database_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+    )
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_support_id "
+        "ON background_jobs(support_id) WHERE support_id IS NOT NULL"
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -1816,6 +1894,7 @@ CLOUD_MIGRATIONS = (
     (10, migration_010_zotero_oauth),
     (11, migration_011_paypal_beta_topups),
     (12, migration_012_vitamine_plus),
+    (13, migration_013_cleanup_cv_jobs),
 )
 
 
@@ -3299,7 +3378,7 @@ def fail_background_job(job_id: str, error: Exception) -> None:
         ).fetchone()
         job_kind = (
             str(job["kind"])
-            if job and job["kind"] in {"cv_import", "enrich_cv"}
+            if job and job["kind"] in {"cv_import", "enrich_cv", "cleanup_cv"}
             else "unknown"
         )
         con.execute(
@@ -4437,6 +4516,29 @@ def queue_enrichment_job(
         kind="enrich_cv",
         payload={},
         job_id=job_id,
+        idempotency_key=idempotency_key,
+    )
+    return JSONResponse(
+        {"ok": True, "background": True, "idempotent_replay": not created, "job": job},
+        status_code=202 if created else 200,
+    )
+
+
+@app.post("/api/cloud/jobs/cleanup-cv")
+def queue_cleanup_job(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+    workspace = workspace_for_request(request, authorization)
+    with connect() as con:
+        member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
+    require_vitamine_plus(member)
+    job, created = create_background_job(
+        workspace=workspace,
+        kind="cleanup_cv",
+        payload={},
+        job_id=secrets.token_urlsafe(18),
         idempotency_key=idempotency_key,
     )
     return JSONResponse(

@@ -363,6 +363,14 @@ function cloudJobMessage(job) {
   return `${progress.message || "VitaMine is working in the background"}${suffix}`;
 }
 
+function cloudJobCompletionMessage(kind) {
+  return {
+    cv_import: "CV import completed and saved",
+    enrich_cv: "CV enrichment completed and saved",
+    cleanup_cv: "CV cleanup suggestions are ready in the Inbox",
+  }[kind] || "Background process completed";
+}
+
 async function waitForCloudJob(jobId) {
   let previousPhase = "";
   while (true) {
@@ -397,7 +405,7 @@ async function resumeCloudBackgroundJob() {
   if (!job) return;
   if (job.status === "succeeded" || job.status === "failed") {
     if (job.status === "succeeded") {
-      setStatus(job.kind === "cv_import" ? "CV import completed and saved" : "CV enrichment completed and saved");
+      setStatus(cloudJobCompletionMessage(job.kind));
     } else {
       setStatus(job.error || "The background process failed.", { error: true });
     }
@@ -409,7 +417,7 @@ async function resumeCloudBackgroundJob() {
   setActionButtons(true);
   try {
     await waitForCloudJob(job.id);
-    setStatus(job.kind === "cv_import" ? "CV import completed and saved" : "CV enrichment completed and saved");
+    setStatus(cloudJobCompletionMessage(job.kind));
     window.location.reload();
   } catch (error) {
     setStatus(error.message, { error: true });
@@ -423,6 +431,7 @@ async function resumeCloudBackgroundJob() {
 function setActionButtons(disabled) {
   [
     "#enrichCvDashboard",
+    "#cleanupCvDashboard",
     "#connectionsForm button[type='submit']",
     "#connectZotero",
     "#testZoteroConnection",
@@ -608,6 +617,7 @@ function inboxTypeLabel(type) {
     identifier: "Identifier",
     narrative_report: "Narrative",
     contribution: "Contribution",
+    cleanup_suggestion: "Cleanup suggestion",
   }[type] || type || "Candidate";
 }
 
@@ -643,12 +653,13 @@ function inboxItemMarkup(item, options = {}) {
   const selectableStatuses = options.selectableStatuses || ["pending"];
   const selectable = selectableStatuses.includes(item.status || "pending");
   const duplicate = item.duplicate_of_id ? `<span class="duplicateBadge">Possible duplicate</span>` : "";
+  const cleanup = item.target_type === "cleanup_suggestion";
   const cautiousHonor = item.target_type === "entry" && item.payload?.section_key === "honors";
   const identityReview = Boolean(item.payload?._identity_review_required);
   const manualReview = cautiousHonor || identityReview
     ? `<span class="duplicateBadge">${identityReview ? "Identity uncertain" : "Review manually"}</span>`
     : "";
-  const checked = selectable && !item.duplicate_of_id && !cautiousHonor && !identityReview && item.confidence !== "low" ? "checked" : "";
+  const checked = selectable && !cleanup && !item.duplicate_of_id && !cautiousHonor && !identityReview && item.confidence !== "low" ? "checked" : "";
   const disabled = selectable ? "" : "disabled";
   const raw = item.raw_text || item.payload?.raw_citation || item.payload?.raw_text || "";
   return `
@@ -667,6 +678,7 @@ function inboxItemMarkup(item, options = {}) {
         <strong>${escapeHtml(item.title || inboxTypeLabel(item.target_type))}</strong>
         ${item.subtitle ? `<small>${escapeHtml(item.subtitle)}</small>` : ""}
         ${identityReview ? `<small>${escapeHtml(item.payload?._identity_review_reason || "The registries could not distinguish this author from a namesake.")}</small>` : ""}
+        ${cleanup ? `<small>${escapeHtml(item.payload?.cleanup_csv?.rationale || "Review the proposed change before applying it.")}</small>` : ""}
         ${raw ? `<p>${escapeHtml(raw).slice(0, 900)}</p>` : ""}
       </div>
     </article>
@@ -4665,6 +4677,23 @@ async function init() {
   };
   $("#enrichCvDashboard").addEventListener("click", () => {
     if (requirePlusUi()) enrichCv();
+  });
+  const cleanupCv = async () => {
+    const cleanupPath = state.cloud.enabled && state.cloud.workspace?.background_jobs
+      ? "/api/cloud/jobs/cleanup-cv"
+      : "/api/actions/cleanup-cv";
+    const data = await runAction(
+      cleanupPath,
+      "CV cleanup suggestions are ready in the Inbox",
+      "Reviewing compact CV sections for corrections, duplicates, and junk entries...",
+      { idempotent: cleanupPath.startsWith("/api/cloud/jobs/") },
+    );
+    setStatus(`${data.suggestions_staged || 0} cleanup suggestions added to Inbox`);
+    actionLog("#syncOutput", data);
+    await loadImportInbox();
+  };
+  $("#cleanupCvDashboard").addEventListener("click", () => {
+    if (requirePlusUi()) cleanupCv();
   });
   $("#workspacePlusButton")?.addEventListener("click", toggleWorkspaceDeveloperPlus);
   $("#closeWorkspacePlusDialog")?.addEventListener("click", () => $("#workspacePlusDialog")?.close());

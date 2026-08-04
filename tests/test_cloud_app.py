@@ -449,6 +449,15 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
         self.assertIn("already has a background process", duplicate.json()["detail"])
 
+    def test_cloud_cleanup_is_a_distinct_queued_job(self):
+        self.create_account()
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+
+        queued = self.client.post("/api/cloud/jobs/cleanup-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        self.assertEqual(queued.json()["job"]["kind"], "cleanup_cv")
+
     def test_cloud_enrichment_retry_reuses_the_idempotent_job(self):
         self.create_account()
         opened = self.client.post("/gateway/workspace/new")

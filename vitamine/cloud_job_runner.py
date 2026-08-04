@@ -130,6 +130,17 @@ def run_enrichment(progress_path: Path) -> dict[str, Any]:
     return result
 
 
+def run_cleanup(progress_path: Path) -> dict[str, Any]:
+    from vitamine import app as worker_app
+
+    progress(progress_path, "cleanup", "Preparing compact CV sections for cleanup review", 6)
+    result = worker_app.cleanup_cv_job(
+        progress_callback=lambda phase, message, percent: progress(progress_path, phase, message, percent),
+    )
+    result["job_kind"] = "cleanup_cv"
+    return result
+
+
 def execute(
     *,
     kind: str,
@@ -147,6 +158,8 @@ def execute(
         result = run_cv_import(payload, payload_path.parent, progress_path)
     elif kind == "enrich_cv":
         result = run_enrichment(progress_path)
+    elif kind == "cleanup_cv":
+        result = run_cleanup(progress_path)
     else:
         raise RuntimeError(f"Unsupported background job: {kind}")
     with sqlite3.connect(database_path) as con:
@@ -176,7 +189,7 @@ def execute(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--kind", required=True, choices=("cv_import", "enrich_cv"))
+    parser.add_argument("--kind", required=True, choices=("cv_import", "enrich_cv", "cleanup_cv"))
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--payload", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)

@@ -492,6 +492,29 @@ a.disabledLink {
   outline-offset: 2px;
 }
 
+.topbarCleanupButton {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  border-color: #94a3b8;
+  border-radius: 8px;
+  padding: 9px 15px;
+  background: #ffffff;
+  color: #164e63;
+  font-weight: 700;
+}
+
+.topbarCleanupButton:hover {
+  border-color: #0e7490;
+  background: #ecfeff;
+}
+
+.topbarCleanupButton:focus-visible {
+  outline: 3px solid rgb(14 116 144 / 24%);
+  outline-offset: 2px;
+}
+
 .topbarEnrichIcon {
   width: 20px;
   height: 20px;

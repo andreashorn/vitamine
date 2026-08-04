@@ -317,6 +317,24 @@ CREATE TABLE IF NOT EXISTS import_inbox_items (
 CREATE INDEX IF NOT EXISTS idx_import_inbox_items_status
 ON import_inbox_items(status, target_type, created_at);
 
+CREATE TABLE IF NOT EXISTS cleanup_change_log (
+  id INTEGER PRIMARY KEY,
+  inbox_item_id INTEGER NOT NULL UNIQUE REFERENCES import_inbox_items(id) ON DELETE RESTRICT,
+  operation TEXT NOT NULL,
+  record_type TEXT NOT NULL,
+  record_id INTEGER NOT NULL,
+  related_record_id INTEGER,
+  field_name TEXT,
+  old_text TEXT,
+  new_text TEXT,
+  applied_json TEXT NOT NULL DEFAULT '{}',
+  orcid_sync_status TEXT NOT NULL DEFAULT 'not_applicable',
+  applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_cleanup_change_log_orcid
+ON cleanup_change_log(orcid_sync_status, applied_at);
+
 CREATE TABLE IF NOT EXISTS discovery_rejections (
   id INTEGER PRIMARY KEY,
   fingerprint TEXT NOT NULL UNIQUE,
