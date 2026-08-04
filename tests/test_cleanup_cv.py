@@ -10,7 +10,12 @@ from vitamine.app import (
     ensure_cleanup_change_log_table,
     ensure_import_inbox_table,
 )
-from vitamine.cleanup_cv import CLEANUP_CSV_COLUMNS, parse_cleanup_csv, run_cleanup_review
+from vitamine.cleanup_cv import (
+    CLEANUP_CSV_COLUMNS,
+    parse_cleanup_csv,
+    run_cleanup_review,
+    verify_publication_cleanup_suggestions,
+)
 
 
 class CleanupCvTests(unittest.TestCase):
@@ -58,6 +63,7 @@ class CleanupCvTests(unittest.TestCase):
             self.con,
             lambda _prompt, _schema, _settings: ({"csv": csv_text}, None),
             {"provider": "openai"},
+            crossref_lookup=lambda _doi: {},
         )
 
         self.assertEqual(result["suggestions_staged"], 1)
@@ -100,6 +106,67 @@ class CleanupCvTests(unittest.TestCase):
             }
         )
         self.assertEqual(parse_cleanup_csv(csv_text, rows), [])
+
+    def test_crossref_replaces_llm_venue_text_for_a_flagged_publication(self):
+        suggestion = {
+            "operation": "edit", "record_type": "publication", "record_id": "7", "field": "venue",
+            "old_text": "BRAIN", "new_text": "Brain", "related_record_type": "", "related_record_id": "",
+            "rationale": "Normalize venue casing.", "confidence": "high",
+        }
+        records = {
+            ("publication", "7"): {
+                "record_type": "publication", "record_id": "7",
+                "fields": {"doi": "10.1000/example", "venue": "BRAIN"},
+            }
+        }
+
+        resolved, replaced, skipped = verify_publication_cleanup_suggestions(
+            [suggestion],
+            records,
+            lambda doi: {"doi": doi, "venue": "Brain: A Journal of Neurology"},
+        )
+
+        self.assertEqual((replaced, skipped), (1, 0))
+        self.assertEqual(resolved[0]["new_text"], "Brain: A Journal of Neurology")
+        self.assertEqual(resolved[0]["rationale"], "Verified against Crossref DOI metadata.")
+
+    def test_crossref_removes_a_suggestion_when_the_current_value_is_canonical(self):
+        suggestion = {
+            "operation": "edit", "record_type": "publication", "record_id": "7", "field": "venue",
+            "old_text": "Brain", "new_text": "BRAIN", "related_record_type": "", "related_record_id": "",
+            "rationale": "Normalize venue casing.", "confidence": "high",
+        }
+        records = {
+            ("publication", "7"): {
+                "record_type": "publication", "record_id": "7",
+                "fields": {"doi": "10.1000/example", "venue": "Brain"},
+            }
+        }
+
+        resolved, replaced, skipped = verify_publication_cleanup_suggestions(
+            [suggestion], records, lambda doi: {"doi": doi, "venue": "Brain"}
+        )
+
+        self.assertEqual((resolved, replaced, skipped), ([], 0, 0))
+
+    def test_crossref_does_not_shorten_a_more_descriptive_venue_proposal(self):
+        suggestion = {
+            "operation": "edit", "record_type": "publication", "record_id": "7", "field": "venue",
+            "old_text": "Brain : a journal of neurology", "new_text": "Brain: A Journal of Neurology",
+            "related_record_type": "", "related_record_id": "", "rationale": "Fix spacing and casing.", "confidence": "high",
+        }
+        records = {
+            ("publication", "7"): {
+                "record_type": "publication", "record_id": "7",
+                "fields": {"doi": "10.1000/example", "venue": suggestion["old_text"]},
+            }
+        }
+
+        resolved, replaced, skipped = verify_publication_cleanup_suggestions(
+            [suggestion], records, lambda doi: {"doi": doi, "venue": "Brain"}
+        )
+
+        self.assertEqual((resolved, replaced, skipped), ([suggestion], 0, 0))
 
     def test_existing_cleanup_suggestion_receives_a_live_record_preview(self):
         item = {

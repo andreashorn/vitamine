@@ -10,6 +10,8 @@ import sqlite3
 from collections import Counter
 from typing import Any, Callable
 
+from .scripts.enrich_publications_by_doi import crossref_metadata, normalize_doi
+
 
 CLEANUP_CSV_COLUMNS = (
     "operation",
@@ -33,6 +35,8 @@ RECORD_FIELDS = {
 }
 MAX_RECORDS_PER_BATCH = 32
 MAX_BATCHES = 24
+MAX_CROSSREF_VERIFICATIONS = 96
+CROSSREF_VERIFIED_FIELDS = {"title", "venue", "year"}
 
 
 def _text(value: Any, limit: int = 2400) -> str:
@@ -41,6 +45,10 @@ def _text(value: Any, limit: int = 2400) -> str:
 
 def _same_text(left: str, right: str) -> bool:
     return re.sub(r"\s+", " ", left).strip() == re.sub(r"\s+", " ", right).strip()
+
+
+def _tokens(value: Any) -> set[str]:
+    return set(re.findall(r"[\w]+", str(value or "").casefold()))
 
 
 def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
@@ -159,6 +167,77 @@ def parse_cleanup_csv(raw_csv: str, records: list[dict[str, Any]]) -> list[dict[
     return suggestions
 
 
+def verify_publication_cleanup_suggestions(
+    suggestions: list[dict[str, str]],
+    records: dict[tuple[str, str], dict[str, Any]],
+    crossref_lookup: Callable[[str], dict[str, Any]] = crossref_metadata,
+) -> tuple[list[dict[str, str]], int, int]:
+    """Replace LLM text proposals with DOI-matched Crossref values when available.
+
+    Crossref is deliberately used only after the LLM has identified a specific
+    publication field worth reviewing. This keeps the pass bounded and avoids
+    turning general metadata refreshes into a noisy cleanup inbox.
+    """
+    candidates: list[tuple[str, str]] = []
+    for suggestion in suggestions:
+        if (
+            suggestion.get("operation") != "edit"
+            or suggestion.get("record_type") != "publication"
+            or suggestion.get("field") not in CROSSREF_VERIFIED_FIELDS
+        ):
+            continue
+        key = ("publication", str(suggestion.get("record_id") or ""))
+        record = records.get(key) or {}
+        doi = normalize_doi(str((record.get("fields") or {}).get("doi") or ""))
+        if doi and (doi, key[1]) not in candidates:
+            candidates.append((doi, key[1]))
+
+    verified: dict[str, dict[str, Any]] = {}
+    for doi, record_id in candidates[:MAX_CROSSREF_VERIFICATIONS]:
+        metadata = crossref_lookup(doi) or {}
+        if normalize_doi(str(metadata.get("doi") or doi)) == doi:
+            verified[record_id] = metadata
+
+    resolved: list[dict[str, str]] = []
+    replaced = 0
+    for suggestion in suggestions:
+        metadata = verified.get(str(suggestion.get("record_id") or ""))
+        if not (
+            metadata
+            and suggestion.get("operation") == "edit"
+            and suggestion.get("record_type") == "publication"
+            and suggestion.get("field") in CROSSREF_VERIFIED_FIELDS
+        ):
+            resolved.append(suggestion)
+            continue
+        canonical = _text(metadata.get(suggestion["field"]), 8000)
+        if not canonical:
+            resolved.append(suggestion)
+            continue
+        if _same_text(canonical, suggestion.get("old_text") or ""):
+            # The DOI registry confirms the current value, so do not create a
+            # casing-only LLM suggestion for the user to review.
+            continue
+        proposed = suggestion.get("new_text") or ""
+        if (
+            suggestion["field"] == "venue"
+            and len(canonical) < len(proposed)
+            and _tokens(canonical) < _tokens(proposed)
+        ):
+            # Crossref commonly exposes a compact journal title (for example,
+            # "Brain") while the CV and the LLM may hold its fuller title.
+            # Do not use registry verification to throw away that extra detail.
+            resolved.append(suggestion)
+            continue
+        verified_suggestion = dict(suggestion)
+        if not _same_text(canonical, proposed):
+            replaced += 1
+        verified_suggestion["new_text"] = canonical
+        verified_suggestion["rationale"] = "Verified against Crossref DOI metadata."
+        resolved.append(verified_suggestion)
+    return resolved, replaced, max(0, len(candidates) - MAX_CROSSREF_VERIFICATIONS)
+
+
 def stage_cleanup_suggestions(con: sqlite3.Connection, suggestions: list[dict[str, str]]) -> int:
     """Keep cleanup review items in the existing inbox; no CV data is changed here."""
     con.execute("DELETE FROM import_inbox_items WHERE source='cv_cleanup' AND status='pending'")
@@ -195,6 +274,7 @@ def run_cleanup_review(
     llm_json: Callable[[str, dict[str, Any], dict[str, Any]], tuple[dict[str, Any] | None, str | None]],
     settings: dict[str, Any],
     progress: Callable[[str, str, int], None] | None = None,
+    crossref_lookup: Callable[[str], dict[str, Any]] = crossref_metadata,
 ) -> dict[str, Any]:
     batches, total_records = cleanup_batches(con)
     summary = {"record_counts": dict(Counter(record["record_type"] for batch in batches for record in batch["records"]))}
@@ -211,6 +291,21 @@ def run_cleanup_review(
             warnings.append(f"{batch['scope']}: the cleanup response was empty.")
             continue
         suggestions.extend(parse_cleanup_csv(str(response.get("csv") or ""), batch["records"]))
+    records = {
+        (record["record_type"], record["record_id"]): record
+        for batch in batches
+        for record in batch["records"]
+    }
+    if suggestions:
+        if progress:
+            progress("cleanup", "Verifying proposed publication changes against Crossref", 90)
+        suggestions, crossref_replaced, crossref_skipped = verify_publication_cleanup_suggestions(
+            suggestions, records, crossref_lookup
+        )
+        if crossref_replaced:
+            warnings.append(f"Crossref supplied canonical values for {crossref_replaced} publication cleanup suggestion(s).")
+        if crossref_skipped:
+            warnings.append(f"Crossref verification was limited to {MAX_CROSSREF_VERIFICATIONS} publication suggestions in this pass.")
     staged = stage_cleanup_suggestions(con, suggestions)
     reviewed = sum(len(batch["records"]) for batch in batches)
     if reviewed < total_records:

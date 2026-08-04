@@ -768,7 +768,7 @@ function inboxItemMarkup(item, options = {}) {
   const manualReview = cautiousHonor || identityReview
     ? `<span class="duplicateBadge">${identityReview ? "Identity uncertain" : "Review manually"}</span>`
     : "";
-  const checked = selectable && !cleanup && !item.duplicate_of_id && !cautiousHonor && !identityReview && item.confidence !== "low" ? "checked" : "";
+  const checked = selectable && (cleanup || (!item.duplicate_of_id && !cautiousHonor && !identityReview && item.confidence !== "low")) ? "checked" : "";
   const disabled = selectable ? "" : "disabled";
   const raw = item.raw_text || item.payload?.raw_citation || item.payload?.raw_text || "";
   const rawPreviewLimit = cleanup ? 360 : 900;
