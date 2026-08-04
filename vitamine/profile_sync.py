@@ -352,6 +352,10 @@ def prepare_recommendation_action(
 ) -> list[dict[str, Any]]:
     if direction not in {ADD_REMOTE, REMOVE_REMOTE}:
         return []
+    # The dialog can remain open while a publication is hidden or otherwise
+    # becomes ineligible. Refresh immediately before a provider write so a
+    # stale browser selection can never export that record.
+    refresh_recommendations(con, service)
     valid_ids = sorted({int(value) for value in ids if int(value) > 0})
     if not valid_ids:
         return []

@@ -152,10 +152,13 @@ class ProfileSyncTests(unittest.TestCase):
             """
         )
         observe_remote_publications(con, service, [])
-        self.assertEqual(pending_recommendations(con, service)["counts"][ADD_REMOTE], 1)
+        pending = pending_recommendations(con, service)
+        self.assertEqual(pending["counts"][ADD_REMOTE], 1)
+        recommendation_id = pending["items"][0]["id"]
 
         con.execute("UPDATE publications SET suppress_display=1 WHERE id=7")
 
+        self.assertEqual(prepare_recommendation_action(con, service, ADD_REMOTE, [recommendation_id]), [])
         self.assertEqual(pending_recommendations(con, service)["counts"][ADD_REMOTE], 0)
         self.assertEqual(
             con.execute(
