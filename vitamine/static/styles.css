@@ -2779,7 +2779,7 @@ label.invalid input {
   margin-top: 10px;
   border: 1px solid #d7e0ea;
   border-radius: 6px;
-  background: #f8fafc;
+  background: #fff;
 }
 
 .cleanupPreview summary {
@@ -2790,40 +2790,39 @@ label.invalid input {
   font-weight: 700;
 }
 
-.cleanupPreviewRecord {
+.cleanupPreviewComparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
   padding: 0 10px 10px;
 }
 
-.cleanupPreviewRecord + .cleanupPreviewRecord {
-  border-top: 1px solid #d7e0ea;
-  padding-top: 10px;
-}
-
-.cleanupPreviewRecord h4 {
+.cleanupPreviewColumn h4 {
   margin: 0 0 7px;
   color: #334155;
   font-size: 12px;
 }
 
-.cleanupPreviewRecord dl {
+.cleanupPreviewColumn dl {
   display: grid;
   gap: 5px;
   margin: 0;
 }
 
-.cleanupPreviewRecord dl div {
+.cleanupPreviewColumn dl div {
   display: grid;
-  grid-template-columns: minmax(104px, 180px) minmax(0, 1fr);
+  grid-template-columns: minmax(88px, 136px) minmax(0, 1fr);
   gap: 9px;
 }
 
-.cleanupPreviewRecord dt {
+.cleanupPreviewColumn dt {
   color: #64748b;
   font-size: 12px;
   font-weight: 700;
 }
 
-.cleanupPreviewRecord dd {
+.cleanupPreviewColumn dd {
   min-width: 0;
   margin: 0;
   color: #334155;
@@ -2833,34 +2832,40 @@ label.invalid input {
   white-space: pre-wrap;
 }
 
-.cleanupValueDiff {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.cleanupOldValue,
-.cleanupNewValue {
-  min-width: 0;
-  padding: 2px 5px;
-  border-radius: 4px;
-}
-
-.cleanupOldValue {
-  background: #fff0e6;
-  color: #9a3412;
-}
-
-.cleanupNewValue {
-  background: #e4f8fa;
-  color: #0e5f6b;
-}
-
-.cleanupDiffArrow {
-  flex: 0 0 auto;
-  padding-top: 2px;
+.cleanupComparisonArrow {
+  align-self: center;
   color: #475569;
+  font-size: 22px;
   font-weight: 700;
+}
+
+.cleanupChangedOld {
+  color: #b45309;
+  font-weight: 700;
+}
+
+.cleanupChangedNew {
+  color: #0f7180;
+  font-weight: 700;
+}
+
+.cleanupRemovalPreview p {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@media (max-width: 720px) {
+  .cleanupPreviewComparison {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .cleanupComparisonArrow {
+    justify-self: center;
+    transform: rotate(90deg);
+  }
 }
 
 .duplicateBadge {

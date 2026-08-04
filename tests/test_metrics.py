@@ -134,7 +134,7 @@ class MetricsTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
-        self.assertIn("20260803-zotero-group-libraries", document)
+        self.assertIn("20260804-cleanup-side-by-side-preview", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")

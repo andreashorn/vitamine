@@ -675,7 +675,29 @@ function cleanupFieldLabel(field) {
   }[field] || String(field || "Field").replace(/_/g, " ");
 }
 
-function cleanupRecordPreviewMarkup(record, label, suggestion = {}) {
+function cleanupInlineDiff(value, replacement, changeClass) {
+  const current = String(value || "").slice(0, 1800);
+  const proposed = String(replacement || "").slice(0, 1800);
+  let prefixEnd = 0;
+  while (prefixEnd < current.length && prefixEnd < proposed.length && current[prefixEnd] === proposed[prefixEnd]) {
+    prefixEnd += 1;
+  }
+  let suffixLength = 0;
+  while (
+    suffixLength < current.length - prefixEnd
+    && suffixLength < proposed.length - prefixEnd
+    && current[current.length - suffixLength - 1] === proposed[proposed.length - suffixLength - 1]
+  ) {
+    suffixLength += 1;
+  }
+  const source = changeClass === "cleanupChangedOld" ? current : proposed;
+  const changed = source.slice(prefixEnd, suffixLength ? source.length - suffixLength : source.length);
+  const before = source.slice(0, prefixEnd);
+  const after = suffixLength ? source.slice(source.length - suffixLength) : "";
+  return `${escapeHtml(before)}${changed ? `<span class="${changeClass}">${escapeHtml(changed)}</span>` : ""}${escapeHtml(after)}`;
+}
+
+function cleanupRecordColumnMarkup(record, label, suggestion = {}, side = "current") {
   const fields = Object.entries(record?.fields || {}).filter(([, value]) => String(value || "").trim());
   if (!record || !fields.length) return "";
   const changedField = suggestion.operation === "edit"
@@ -683,24 +705,57 @@ function cleanupRecordPreviewMarkup(record, label, suggestion = {}) {
     && String(suggestion.record_id) === String(record.record_id)
     ? suggestion.field : "";
   return `
-    <section class="cleanupPreviewRecord">
+    <section class="cleanupPreviewColumn">
       <h4>${escapeHtml(label)} · ${escapeHtml(record.record_type)} #${escapeHtml(record.record_id)}</h4>
-      <dl>${fields.map(([field, value]) => `
-        <div><dt>${escapeHtml(cleanupFieldLabel(field))}</dt><dd>${field === changedField ? `
-          <span class="cleanupValueDiff"><span class="cleanupOldValue">${escapeHtml(String(value)).slice(0, 1800)}</span><span class="cleanupDiffArrow" aria-hidden="true">→</span><span class="cleanupNewValue">${escapeHtml(String(suggestion.new_text || "")).slice(0, 1800)}</span></span>
-        ` : escapeHtml(String(value)).slice(0, 1800)}</dd></div>
-      `).join("")}</dl>
+      <dl>${fields.map(([field, value]) => {
+        const changed = field === changedField;
+        const text = changed
+          ? cleanupInlineDiff(value, suggestion.new_text, side === "current" ? "cleanupChangedOld" : "cleanupChangedNew")
+          : escapeHtml(String(value)).slice(0, 1800);
+        return `<div><dt>${escapeHtml(cleanupFieldLabel(field))}</dt><dd>${text}</dd></div>`;
+      }).join("")}</dl>
     </section>
   `;
+}
+
+function cleanupRemovalColumnMarkup() {
+  return `
+    <section class="cleanupPreviewColumn cleanupRemovalPreview">
+      <h4>Proposed action</h4>
+      <p>Remove this record.</p>
+    </section>
+  `;
+}
+
+function cleanupComparisonMarkup(left, right) {
+  return `<div class="cleanupPreviewComparison">${left}<span class="cleanupComparisonArrow" aria-hidden="true">→</span>${right}</div>`;
 }
 
 function cleanupPreviewMarkup(item) {
   if (item.target_type !== "cleanup_suggestion") return "";
   const suggestion = item.payload?.cleanup_csv || {};
-  const current = cleanupRecordPreviewMarkup(item.payload?.record_preview, "Current record", suggestion);
-  const related = cleanupRecordPreviewMarkup(item.payload?.related_record_preview, "Record to keep", suggestion);
-  if (!current && !related) return "";
-  return `<details class="cleanupPreview" open><summary>Preview current record</summary>${current}${related}</details>`;
+  const currentRecord = item.payload?.record_preview;
+  const relatedRecord = item.payload?.related_record_preview;
+  const operation = suggestion.operation;
+  const current = cleanupRecordColumnMarkup(
+    currentRecord,
+    operation === "merge" ? "Duplicate record" : "Current record",
+    suggestion,
+    "current",
+  );
+  let proposed = "";
+  if (operation === "edit") {
+    proposed = cleanupRecordColumnMarkup(currentRecord, "Proposed record", suggestion, "proposed");
+  } else if (operation === "merge") {
+    proposed = cleanupRecordColumnMarkup(relatedRecord, "Record to keep", suggestion, "proposed");
+  } else if (operation === "delete") {
+    proposed = cleanupRemovalColumnMarkup();
+  }
+  if (!current && !proposed) return "";
+  const content = current && proposed
+    ? cleanupComparisonMarkup(current, proposed)
+    : current || proposed;
+  return `<details class="cleanupPreview" open><summary>Preview suggested change</summary>${content}</details>`;
 }
 
 function inboxItemMarkup(item, options = {}) {
