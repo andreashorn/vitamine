@@ -87,6 +87,25 @@ available locally. Use `--scene problem` to render one scene for review, or
 format. Run `python3 scripts/render_landing_story.py --help` for the complete
 set of options.
 
+## Build the promotional film
+
+`promo-video/` is a dedicated Remotion motion-graphics project. Unlike the
+landing-story renderer, it uses native 16:9 compositions and an explicit video
+timeline, so the web page's responsive layout cannot distort the artwork.
+
+```sh
+npm --prefix promo-video install
+sh scripts/render_vitamine_promo.sh
+```
+
+The command produces `output/vitamine-promo-draft.mp4`: a 72-second 1080p
+H.264 draft with a locally generated English timing voice-over. Its narration
+is kept in `promo-video/public/narration.txt`; on macOS it is spoken by the
+system's Samantha voice so timing can be reviewed without any cloud service.
+For release, replace the ignored `promo-video/public/voiceover.m4a` with a
+professionally recorded or licensed narration, then rerun the Remotion render.
+Use `npm --prefix promo-video run studio` to preview and refine the timeline.
+
 ## Build a macOS app
 
 ```sh

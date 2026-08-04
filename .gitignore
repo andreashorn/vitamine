@@ -8,6 +8,10 @@ dist/
 *.spec.bak
 output/*
 !output/.gitkeep
+/promo-video/node_modules/
+/promo-video/out/
+/promo-video/public/voiceover.aiff
+/promo-video/public/voiceover.m4a
 data/active_db.txt
 andreashorn.sqlite
 *.vitamine
