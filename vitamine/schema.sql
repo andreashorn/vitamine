@@ -370,3 +370,12 @@ CREATE TABLE IF NOT EXISTS profile_sync_recommendations (
 
 CREATE INDEX IF NOT EXISTS idx_profile_sync_recommendations_pending
 ON profile_sync_recommendations(service, status, direction, created_at);
+
+CREATE TABLE IF NOT EXISTS r4ri_contribution_sections (
+  section_key TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  title_de TEXT,
+  body_de TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

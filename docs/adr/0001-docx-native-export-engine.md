@@ -45,10 +45,10 @@ account, payment, or executable third-party template code in this phase.
 | Short Academic CV | Preinstalled | Usually 2–4 pages | Career overview and selected output | Experimental |
 | Formal Academic CV | Preinstalled | Long | Complete medical-academic dossier | Experimental; handmade design source captured |
 | NIH-Style Biosketch Draft | Preinstalled | Legacy short form | Project fit and contributions | Draft/reference only |
-| DFG Research CV | Local, installable | Maximum 4 pages | Qualitative record and up to 10 works | Preview package |
+| DFG Research CV | Local, installable | Maximum 4 pages | Qualitative record and up to 10 works | Working draft against the 07/25 form |
 | ERC CV & Track Record | Local, installable | Maximum 4 pages | Independence, outputs, track record | Preview package |
-| Narrative Research CV | Local, installable | Call-dependent | Knowledge, people, culture, society | Preview package |
-| Modern Publication-First | Local, installable | Usually 3–6 pages | Research identity and selected output | Preview package |
+| Narrative Research CV | Local, installable | Call-dependent | Knowledge, people, culture, society | Original editable R4RI-inspired working draft |
+| Modern Publication-First | Local, installable | Usually 3–6 pages | Research identity and selected output | Original editable Word export |
 
 Catalogue metadata lives in `vitamine/static/export-formats.json`. It contains stable IDs,
 descriptions, length/focus/audience metadata, quality state, preview artwork, source provenance,
@@ -185,6 +185,7 @@ rewrite citations, or claim page-limit compliance without opening the result in 
 - Catalogue schema: 8 unique entries, 4 preinstalled.
 - Install/remove preference behavior: tested with an isolated preference file.
 - Default exporters: all four return DOCX and no PDF/HTML/Typst/Markdown links.
+- Additional working exports: DFG, Narrative Research CV, and Modern Publication-First return original editable DOCX files; ERC remains a preview until current call-year requirements are implemented.
 - Sanitized templates: load successfully with `python-docx`; no retained personal content,
   custom XML, external relationships, or personal metadata found.
 - Tabular One Page: generated from the sanitized template with no leaked placeholders.

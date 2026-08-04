@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from vitamine.app import EXPORT_CONTENT_PROFILES, export_format_catalog
+from vitamine.app import EXPORT_CONTENT_PROFILES, PROMPT_CAPABLE_EXPORTERS, export_format_catalog
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +60,14 @@ class ExportFormatCatalogTests(unittest.TestCase):
 
         self.assertIn("Export CV in this format", script)
         self.assertNotIn("Export Word document", script)
+
+    def test_prompt_guidance_is_limited_to_the_canonical_exporters(self):
+        formats = export_format_catalog()
+        prompt_capable = {"long", "short", "ultrashort"}
+        self.assertEqual(PROMPT_CAPABLE_EXPORTERS, prompt_capable)
+        self.assertTrue(all(item["exporter"] not in prompt_capable for item in formats if item["id"].startswith("vitamine.r4ri")))
+        script = (ROOT / "vitamine" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('["long", "short", "ultrashort"].includes(format.exporter)', script)
 
 
 if __name__ == "__main__":

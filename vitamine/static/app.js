@@ -2478,7 +2478,7 @@ async function loadExportFormats() {
 }
 
 function promptCapableFormats() {
-  return state.exportFormats.filter((format) => !format.custom_template && format.installed && format.exporter && ["long", "short", "one_page"].includes(format.content_profile));
+  return state.exportFormats.filter((format) => !format.custom_template && format.installed && ["long", "short", "ultrashort"].includes(format.exporter));
 }
 
 function customTemplateDefaultName(filename) {
@@ -3530,6 +3530,39 @@ async function saveNarrativeReport(event) {
     }),
   });
   setStatus("Narrative report saved");
+}
+
+function r4riContributionMarkup(section) {
+  const key = escapeHtml(section.section_key || "");
+  const title = escapeHtml(section.title || "Contribution");
+  return `
+    <article class="r4riContribution" data-r4ri-section="${key}">
+      <label>English heading<input data-r4ri-field="title" value="${title}"></label>
+      <label>English contribution<textarea data-r4ri-field="body" rows="5">${escapeHtml(section.body || "")}</textarea></label>
+      <label>German heading (optional)<input data-r4ri-field="title_de" value="${escapeHtml(section.title_de || "")}"></label>
+      <label>German contribution (optional)<textarea data-r4ri-field="body_de" rows="5">${escapeHtml(section.body_de || "")}</textarea></label>
+    </article>`;
+}
+
+async function loadR4riContributions() {
+  const data = await api("/api/r4ri-contributions");
+  const container = $("#r4riContributionFields");
+  if (container) container.innerHTML = (data.sections || []).map(r4riContributionMarkup).join("");
+}
+
+async function saveR4riContributions() {
+  const sections = $$("[data-r4ri-section]").map((card) => {
+    const field = (name) => card.querySelector(`[data-r4ri-field="${name}"]`)?.value || "";
+    return {
+      section_key: card.dataset.r4riSection,
+      title: field("title"),
+      body: field("body"),
+      title_de: field("title_de"),
+      body_de: field("body_de"),
+    };
+  });
+  await api("/api/r4ri-contributions", { method: "PUT", body: JSON.stringify({ sections }) });
+  setStatus("R4RI contributions saved");
 }
 
 function publicationCategoryLabel(key) {
@@ -4600,6 +4633,7 @@ async function init() {
   });
   $("#deleteIdentifier").addEventListener("click", deleteIdentifier);
   $("#narrativeForm").addEventListener("submit", saveNarrativeReport);
+  $("#saveR4riContributions").addEventListener("click", saveR4riContributions);
   const enrichCv = async () => {
     if (state.onboarding?.step === "enrich") {
       const coach = $("#onboardingCoach");
@@ -4659,6 +4693,7 @@ async function init() {
   await loadStartupStep("Entries", loadEntries);
   await loadStartupStep("Person", loadPerson);
   await loadStartupStep("Narrative report", loadNarrativeReport);
+  await loadStartupStep("R4RI contributions", loadR4riContributions);
   await loadStartupStep("Publications", loadPublications);
   await loadStartupStep("Onboarding", loadOnboarding);
   await resumeCloudBackgroundJob();

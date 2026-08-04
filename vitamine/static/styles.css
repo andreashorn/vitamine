@@ -1405,6 +1405,42 @@ legend {
   line-height: 1.45;
 }
 
+.r4riEditor {
+  max-width: 980px;
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  padding: 14px;
+  background: var(--panel);
+}
+
+.r4riEditor h2 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+
+.r4riEditor > div > p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.r4riContributionFields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 12px;
+}
+
+.r4riContribution {
+  border: 1px solid var(--line);
+  padding: 10px;
+  background: #fcfdfd;
+}
+
+.r4riContribution textarea {
+  min-height: 132px;
+  line-height: 1.4;
+}
+
 .summaryGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

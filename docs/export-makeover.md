@@ -11,7 +11,7 @@ Vitamine now has one export promise: an editable Word document.
 - No Typst dependency in the packaged export path.
 - One academic-format catalogue in the Exports view.
 - Four current formats installed by default.
-- Four additional scientist-focused local preview entries.
+- Four additional scientist-focused local library entries, of which DFG, Narrative Research CV, and Modern Publication-First now have editable Word exports.
 - Local install/remove behavior with no account, network catalogue, or payment layer.
 
 The catalogue distinguishes installation from quality. This lets the current formats remain
@@ -70,7 +70,7 @@ generated in SciENcv.
 
 ## Local catalogue entries
 
-The four extra entries are design briefs that can be installed into the local library:
+The extra entries can be installed into the local library:
 
 - DFG Research CV;
 - ERC CV & Track Record;
@@ -78,10 +78,12 @@ The four extra entries are design briefs that can be installed into the local li
 - Modern Publication-First.
 
 Their preview icons are original schematic artwork. External sites are linked as provenance
-and requirements/design references; their logos and page screenshots are not bundled.
+and requirements/design references; their logos and page screenshots are not bundled. DFG is
+implemented against its documented form; the Narrative and Modern entries use original Word
+layouts. ERC remains a design brief until its current call-year requirements are mapped.
 
 An installed preview entry remains visibly “DOCX template planned” until it has a working Word
-template and field mapping.
+template and field mapping. This currently applies only to ERC.
 
 ## Format metadata
 

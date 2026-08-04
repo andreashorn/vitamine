@@ -225,6 +225,7 @@ R4RI_CONTRIBUTION_SECTIONS = (
     ("research_community", "Contributions to the wider research and innovation community"),
     ("society", "Contributions to broader society and the economy"),
 )
+PROMPT_CAPABLE_EXPORTERS = {"long", "short", "ultrashort"}
 EXPORT_CONTENT_PROFILES = {
     "long": {
         "label": "Long CV",
@@ -3026,6 +3027,64 @@ async def update_narrative_report(request: Request) -> dict[str, Any]:
     return {"ok": True}
 
 
+@app.get("/api/r4ri-contributions")
+def get_r4ri_contributions() -> dict[str, Any]:
+    with connect() as con:
+        rows = rows_dict(
+            con.execute(
+                """
+                SELECT section_key, title, body, title_de, body_de
+                FROM r4ri_contribution_sections
+                ORDER BY CASE section_key
+                  WHEN 'knowledge' THEN 1
+                  WHEN 'people' THEN 2
+                  WHEN 'research_community' THEN 3
+                  WHEN 'society' THEN 4
+                  ELSE 99
+                END
+                """
+            ).fetchall()
+        )
+    return {"sections": rows}
+
+
+@app.put("/api/r4ri-contributions")
+async def update_r4ri_contributions(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    values = payload.get("sections") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        raise HTTPException(status_code=400, detail="Provide the four R4RI contribution sections.")
+    allowed = {key for key, _title in R4RI_CONTRIBUTION_SECTIONS}
+    submitted = {
+        str(item.get("section_key") or ""): item
+        for item in values
+        if isinstance(item, dict) and str(item.get("section_key") or "") in allowed
+    }
+    with connect() as con:
+        for section_key, default_title in R4RI_CONTRIBUTION_SECTIONS:
+            item = submitted.get(section_key, {})
+            title = str(item.get("title") or default_title).strip() or default_title
+            title_de = str(item.get("title_de") or "").strip()
+            body = str(item.get("body") or "").strip()
+            body_de = str(item.get("body_de") or "").strip()
+            con.execute(
+                """
+                INSERT INTO r4ri_contribution_sections
+                  (section_key, title, body, title_de, body_de, updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(section_key) DO UPDATE SET
+                  title=excluded.title,
+                  body=excluded.body,
+                  title_de=excluded.title_de,
+                  body_de=excluded.body_de,
+                  updated_at=excluded.updated_at
+                """,
+                (section_key, title, body, title_de, body_de),
+            )
+        con.commit()
+    return {"ok": True}
+
+
 @app.get("/api/entries")
 def list_entries(section: str | None = None, q: str | None = None, limit: int = 250) -> dict[str, Any]:
     clauses = []
@@ -5527,8 +5586,7 @@ async def create_export_prompt_plan(format_id: str, request: Request) -> dict[st
     require_hosted_vitamine_plus()
     item = export_format_by_id(format_id, export_format_catalog())
     exporter = str(item.get("exporter") or "")
-    content_profile = str(item["content_profile"])
-    if not exporter or content_profile not in {"long", "short", "one_page"}:
+    if exporter not in PROMPT_CAPABLE_EXPORTERS:
         raise HTTPException(status_code=422, detail="Prompt planning is currently available for the formal, short, and one-page Word exporters.")
     payload = await request.json()
     prompt = str(payload.get("prompt") or "").strip()
@@ -6538,6 +6596,14 @@ def build_biosketch_action(lang: str = "en") -> JSONResponse:
     return JSONResponse(build_response(imported_stdout + result.stdout, cache_key, {"language": lang}))
 
 
+def build_designed_cv_action(format_name: str, lang: str = "en") -> JSONResponse:
+    lang = "de" if lang in {"de", "secondary"} else "en"
+    result = run_script("build_designed_cv.py", "--format", format_name, "--lang", lang)
+    if result.returncode != 0:
+        return JSONResponse({"ok": False, "stderr": result.stderr[-4000:]}, status_code=500)
+    return JSONResponse(build_response(result.stdout, str(int(time.time())), {"language": lang}))
+
+
 def built_docx_path(relative_docx: str) -> Path:
     relative = Path(str(relative_docx or ""))
     if relative.is_absolute():
@@ -6735,7 +6801,13 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
         raise HTTPException(status_code=422, detail="This local format is a preview package; its Word exporter is not implemented yet.")
     if exporter == "bundled_docx":
         return build_bundled_export_template(item, lang)
-    response = builders[content_profile](lang)
+    if exporter == "modern":
+        response_builder = lambda: build_designed_cv_action("modern", lang)
+    elif exporter == "r4ri":
+        response_builder = lambda: build_designed_cv_action("r4ri", lang)
+    else:
+        response_builder = lambda: builders[content_profile](lang)
+    response = response_builder()
     if response.status_code >= 400:
         return response
     payload = json.loads(response.body)
@@ -6755,7 +6827,7 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
             settings = cv_import_settings(con, include_secret=True)
             quality_audit = run_export_quality_audit(con, docx_path, llm_json, settings)
         if quality_audit["applied_count"]:
-            rebuilt = builders[content_profile](lang)
+            rebuilt = response_builder()
             if rebuilt.status_code >= 400:
                 return rebuilt
             payload = json.loads(rebuilt.body)

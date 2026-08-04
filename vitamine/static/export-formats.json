@@ -165,18 +165,18 @@
       "preview": "/static/export-previews/r4ri-narrative.svg",
       "preinstalled": false,
       "content_profile": "short",
-      "exporter": null,
+      "exporter": "r4ri",
       "quality": {
-        "key": "preview",
-        "label": "Local preview package",
-        "description": "Installable in the local library as a design brief. The working Word template has not been implemented yet."
+        "key": "working_draft",
+        "label": "Working draft",
+        "description": "Editable R4RI-inspired Word draft with four contribution sections. Check the current funder instructions before submission."
       },
       "source": {
         "kind": "open_official_template",
         "title": "UKRI Résumé for Research and Innovation",
         "url": "https://www.ukri.org/publications/resume-for-research-and-innovation-r4ri-template/",
-        "note": "The official Word template is a reference; Vitamine will not redistribute it without a separate reuse review.",
-        "reviewed_on": "2026-07-28"
+        "note": "The official Word template remains a structural reference only; VitaMine ships an original Word layout rather than redistributing it.",
+        "reviewed_on": "2026-08-04"
       }
     },
     {
@@ -189,18 +189,18 @@
       "preview": "/static/export-previews/modern-publication-first.svg",
       "preinstalled": false,
       "content_profile": "long",
-      "exporter": null,
+      "exporter": "modern",
       "quality": {
-        "key": "preview",
-        "label": "Local preview package",
-        "description": "Installable in the local library as an original design brief. The working Word template has not been implemented yet."
+        "key": "ready",
+        "label": "",
+        "description": "Ready"
       },
       "source": {
         "kind": "open_design_reference",
         "title": "RenderCV on Typst Universe",
         "url": "https://typst.app/universe/package/rendercv",
-        "note": "MIT-licensed layout ecosystem used only for visual research; this Vitamine preview is an original schematic.",
-        "reviewed_on": "2026-07-28"
+        "note": "MIT-licensed layout ecosystem used for visual research; this Vitamine Word export is an original design.",
+        "reviewed_on": "2026-08-04"
       }
     }
   ]
