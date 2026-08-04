@@ -2833,6 +2833,36 @@ label.invalid input {
   white-space: pre-wrap;
 }
 
+.cleanupValueDiff {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cleanupOldValue,
+.cleanupNewValue {
+  min-width: 0;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.cleanupOldValue {
+  background: #fff0e6;
+  color: #9a3412;
+}
+
+.cleanupNewValue {
+  background: #e4f8fa;
+  color: #0e5f6b;
+}
+
+.cleanupDiffArrow {
+  flex: 0 0 auto;
+  padding-top: 2px;
+  color: #475569;
+  font-weight: 700;
+}
+
 .duplicateBadge {
   border-color: #fecaca;
   background: #fff1f2;

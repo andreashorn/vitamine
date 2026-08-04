@@ -657,14 +657,20 @@ function cleanupFieldLabel(field) {
   }[field] || String(field || "Field").replace(/_/g, " ");
 }
 
-function cleanupRecordPreviewMarkup(record, label) {
+function cleanupRecordPreviewMarkup(record, label, suggestion = {}) {
   const fields = Object.entries(record?.fields || {}).filter(([, value]) => String(value || "").trim());
   if (!record || !fields.length) return "";
+  const changedField = suggestion.operation === "edit"
+    && suggestion.record_type === record.record_type
+    && String(suggestion.record_id) === String(record.record_id)
+    ? suggestion.field : "";
   return `
     <section class="cleanupPreviewRecord">
       <h4>${escapeHtml(label)} · ${escapeHtml(record.record_type)} #${escapeHtml(record.record_id)}</h4>
       <dl>${fields.map(([field, value]) => `
-        <div><dt>${escapeHtml(cleanupFieldLabel(field))}</dt><dd>${escapeHtml(String(value)).slice(0, 1800)}</dd></div>
+        <div><dt>${escapeHtml(cleanupFieldLabel(field))}</dt><dd>${field === changedField ? `
+          <span class="cleanupValueDiff"><span class="cleanupOldValue">${escapeHtml(String(value)).slice(0, 1800)}</span><span class="cleanupDiffArrow" aria-hidden="true">→</span><span class="cleanupNewValue">${escapeHtml(String(suggestion.new_text || "")).slice(0, 1800)}</span></span>
+        ` : escapeHtml(String(value)).slice(0, 1800)}</dd></div>
       `).join("")}</dl>
     </section>
   `;
@@ -672,10 +678,11 @@ function cleanupRecordPreviewMarkup(record, label) {
 
 function cleanupPreviewMarkup(item) {
   if (item.target_type !== "cleanup_suggestion") return "";
-  const current = cleanupRecordPreviewMarkup(item.payload?.record_preview, "Current record");
-  const related = cleanupRecordPreviewMarkup(item.payload?.related_record_preview, "Record to keep");
+  const suggestion = item.payload?.cleanup_csv || {};
+  const current = cleanupRecordPreviewMarkup(item.payload?.record_preview, "Current record", suggestion);
+  const related = cleanupRecordPreviewMarkup(item.payload?.related_record_preview, "Record to keep", suggestion);
   if (!current && !related) return "";
-  return `<details class="cleanupPreview"><summary>Preview current record</summary>${current}${related}</details>`;
+  return `<details class="cleanupPreview" open><summary>Preview current record</summary>${current}${related}</details>`;
 }
 
 function inboxItemMarkup(item, options = {}) {
