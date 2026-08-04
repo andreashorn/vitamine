@@ -5926,7 +5926,7 @@ def enrich_cv_job(
     ]
     return {
         "ok": True,
-        "policy": policy,
+        "policy": LLM_POLICY,
         "results": source_results,
         "doi_stdout": doi_result.stdout,
         "maintenance": maintenance,

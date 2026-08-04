@@ -1,12 +1,14 @@
 import sqlite3
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from vitamine.app import (
     ai_web_discovery_enabled,
     connected_publication_sources,
     discover_ai_profile_candidates,
     discover_researcher_profiles,
+    enrich_cv_job,
 )
 
 
@@ -86,6 +88,30 @@ class ConnectedPublicationSourcesTests(unittest.TestCase):
         self.assertEqual(result["sources_checked"], 1)
         self.assertFalse(result["results"][0]["ok"])
         self.assertIn("Profile discovery was skipped (RuntimeError).", result["warnings"][0])
+
+    def test_enrichment_returns_the_configured_policy(self):
+        con = MagicMock()
+        con.execute.return_value.fetchone.return_value = {
+            "visible_publications": 1,
+            "publications_with_citations": 1,
+            "citation_total": 2,
+        }
+        connection = MagicMock()
+        connection.__enter__.return_value = con
+        script_result = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            patch("vitamine.app.connect", return_value=connection),
+            patch("vitamine.app.connected_publication_sources", return_value=()),
+            patch("vitamine.app.run_script", return_value=script_result),
+            patch("vitamine.app.reconcile_enrichment_changes", return_value={}),
+            patch("vitamine.app.maintain", return_value={}),
+            patch("vitamine.app.discover_researcher_profiles", return_value={"accepted": 0, "staged": 0}),
+            patch("vitamine.app.discover_ai_profile_candidates", return_value={"candidates_staged": 0}),
+            patch("vitamine.app.pending_inbox_count", return_value=0),
+        ):
+            result = enrich_cv_job()
+        self.assertTrue(result["ok"])
+        self.assertIn("provider", result["policy"])
 
 
 if __name__ == "__main__":
