@@ -69,6 +69,24 @@ and path, never the suspected value. Exact synthetic/example files are
 allowlisted per rule. This is a local guardrail; it complements rather than
 replaces GitHub secret scanning or a dedicated secrets scanner.
 
+## Render the landing-story movie
+
+The signed-out landing page's "What is VitaMine?" visuals can be rendered as
+an MP4 without screen recording. The renderer drives each scroll-linked scene
+through Chrome's DevTools protocol, draws only its visual canvas, and encodes
+the frames with `ffmpeg`.
+
+```sh
+python3 scripts/render_landing_story.py
+```
+
+The default output is `output/vitamine-landing-story.mp4`: a 1920×1080,
+30fps, 21-second sequence. Google Chrome (or Chromium) and `ffmpeg` must be
+available locally. Use `--scene problem` to render one scene for review, or
+`--width`, `--height`, `--fps`, and `--seconds-per-scene` to create another
+format. Run `python3 scripts/render_landing_story.py --help` for the complete
+set of options.
+
 ## Build a macOS app
 
 ```sh
