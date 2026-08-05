@@ -3932,6 +3932,22 @@ label.invalid input {
   min-height: 150px;
 }
 
+.citationNetworkDialog { width: min(1020px, calc(100vw - 32px)); }
+
+.citationNetworkGraph {
+  min-height: 420px;
+  border: 1px solid var(--line);
+  background: radial-gradient(circle at 50% 45%, #f8fffe, #edf5f7);
+}
+
+.citationNetworkSvg { display: block; width: 100%; height: auto; min-height: 420px; }
+.citationNetworkSvg a { min-height: 0; border: 0; border-radius: 0; padding: 0; background: transparent; }
+.citationNetworkEdge { stroke: #91aaa9; stroke-width: 1.5; stroke-linecap: round; opacity: .7; }
+.citationNetworkNode { cursor: grab; stroke-width: 2; }
+.citationNetworkNode.own { fill: var(--accent); stroke: #075e55; }
+.citationNetworkNode.citing { fill: #7392a8; stroke: #4c6476; }
+.citationNetworkNode:hover { stroke: #172554; stroke-width: 3; }
+
 .compactCitationPanel {
   min-width: min(700px, calc(100vw - 32px));
 }

@@ -80,6 +80,7 @@ const state = {
     citingWorks: [],
     nextCitingPage: null,
   },
+  citationNetwork: { data: null, positions: {}, animation: null, dragging: null },
   activity: {
     timer: null,
     startedAt: null,
@@ -2445,6 +2446,77 @@ function renderCitingWorks(total, source) {
     </article>`;
   }).join("") : `<p class="emptyState">OpenAlex has no citing works to show for this paper yet.</p>`;
   if (more) more.hidden = !state.citationExplorer.nextCitingPage;
+}
+
+function citationNetworkDoi(node) {
+  return citationDoiHref(node.doi);
+}
+
+function networkNodeTooltip(node) {
+  return [node.title, node.authors, [node.venue, node.year].filter(Boolean).join(" · "), `${formatMetricNumber(node.citations)} citations`]
+    .filter(Boolean).join("\n");
+}
+
+function positionCitationNetwork() {
+  const nodes = state.citationNetwork.data?.nodes || [];
+  const width = 960; const height = 540;
+  const positions = state.citationNetwork.positions;
+  nodes.forEach((node, index) => {
+    if (!positions[node.id]) {
+      const angle = index * 2.399963;
+      const radius = 60 + Math.sqrt(index) * 29;
+      positions[node.id] = { x: width / 2 + Math.cos(angle) * radius, y: height / 2 + Math.sin(angle) * radius, vx: 0, vy: 0 };
+    }
+  });
+  for (let step = 0; step < 90; step += 1) {
+    const links = state.citationNetwork.data.links || [];
+    links.forEach((link) => {
+      const source = positions[link.source]; const target = positions[link.target];
+      if (!source || !target) return;
+      const dx = target.x - source.x; const dy = target.y - source.y;
+      const distance = Math.max(1, Math.hypot(dx, dy)); const force = (distance - 130) * 0.004;
+      source.vx += dx / distance * force; source.vy += dy / distance * force;
+      target.vx -= dx / distance * force; target.vy -= dy / distance * force;
+    });
+    nodes.forEach((node, index) => nodes.slice(index + 1).forEach((other) => {
+      const a = positions[node.id]; const b = positions[other.id]; const dx = b.x - a.x; const dy = b.y - a.y;
+      const d2 = Math.max(1600, dx * dx + dy * dy); const force = 210 / d2;
+      a.vx -= dx * force; a.vy -= dy * force; b.vx += dx * force; b.vy += dy * force;
+    }));
+    nodes.forEach((node) => { const p = positions[node.id]; p.vx += (width / 2 - p.x) * 0.0008; p.vy += (height / 2 - p.y) * 0.0008; p.x = Math.max(24, Math.min(width - 24, p.x + p.vx)); p.y = Math.max(24, Math.min(height - 24, p.y + p.vy)); p.vx *= 0.82; p.vy *= 0.82; });
+  }
+}
+
+function renderCitationNetwork() {
+  const chart = $("#citationNetworkGraph");
+  const data = state.citationNetwork.data;
+  if (!chart || !data) return;
+  if (!data.cached) { chart.innerHTML = `<p class="emptyState">Build the first cached citation network to explore connections.</p>`; return; }
+  positionCitationNetwork();
+  const positions = state.citationNetwork.positions; const byId = Object.fromEntries(data.nodes.map((node) => [node.id, node]));
+  const links = data.links.map((link) => ({ ...link, source: positions[link.source], target: positions[link.target] })).filter((link) => link.source && link.target);
+  chart.innerHTML = `<svg class="citationNetworkSvg" viewBox="0 0 960 540" role="img" aria-label="Citation network graph">${links.map((link) => `<line class="citationNetworkEdge" x1="${link.source.x.toFixed(1)}" y1="${link.source.y.toFixed(1)}" x2="${link.target.x.toFixed(1)}" y2="${link.target.y.toFixed(1)}"></line>`).join("")}${data.nodes.map((node) => { const p = positions[node.id]; const radius = node.kind === "own" ? 10 + Math.min(10, Math.sqrt(node.citations || 0) / 4) : 4 + Math.min(5, Math.sqrt(node.citations || 0) / 13); const href = citationNetworkDoi(node); const inner = `<circle class="citationNetworkNode ${node.kind}" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${radius.toFixed(1)}"></circle><title>${escapeHtml(networkNodeTooltip(node))}</title>`; return href ? `<a data-network-node="${escapeHtml(node.id)}" href="${href}" target="_blank" rel="noopener noreferrer">${inner}</a>` : `<g data-network-node="${escapeHtml(node.id)}">${inner}</g>`; }).join("")}</svg>`;
+  $("#citationNetworkSummary").textContent = `${data.nodes.filter((node) => node.kind === "own").length} own papers · ${data.nodes.filter((node) => node.kind === "citing").length} citing papers · drag a dot to arrange the graph`;
+  bindCitationNetworkDrag(chart, byId);
+}
+
+function bindCitationNetworkDrag(chart) {
+  chart.onpointerdown = (event) => { const element = event.target.closest("[data-network-node]"); if (!element) return; const id = element.dataset.networkNode; if (element.tagName.toLowerCase() === "a") event.preventDefault(); chart.setPointerCapture(event.pointerId); state.citationNetwork.dragging = { id, pointerId: event.pointerId }; };
+  chart.onpointermove = (event) => { const drag = state.citationNetwork.dragging; if (!drag || drag.pointerId !== event.pointerId) return; const rect = chart.getBoundingClientRect(); const p = state.citationNetwork.positions[drag.id]; p.x = (event.clientX - rect.left) / rect.width * 960; p.y = (event.clientY - rect.top) / rect.height * 540; p.vx = 0; p.vy = 0; renderCitationNetwork(); };
+  chart.onpointerup = () => { state.citationNetwork.dragging = null; };
+}
+
+async function openCitationNetwork() {
+  const dialog = $("#citationNetworkDialog"); if (!dialog) return;
+  if (!dialog.open) dialog.showModal();
+  $("#citationNetworkGraph").innerHTML = `<p class="emptyState">Loading citation network…</p>`;
+  try { state.citationNetwork.data = await api("/api/citation-network"); renderCitationNetwork(); } catch (error) { $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message)}</p>`; }
+}
+
+async function refreshCitationNetwork() {
+  const path = state.cloud.enabled ? "/api/cloud/jobs/citation-network" : "/api/actions/refresh-citation-network";
+  const result = await runAction(path, "Citation network ready", "Collecting citing papers from OpenAlex…", { idempotent: state.cloud.enabled });
+  state.citationNetwork.data = result; await openCitationNetwork();
 }
 
 async function openHIndexHistory(scope = "all") {
@@ -5162,6 +5234,7 @@ async function init() {
   $("#workspacePlusButton")?.addEventListener("click", toggleWorkspaceDeveloperPlus);
   $("#closeWorkspacePlusDialog")?.addEventListener("click", () => $("#workspacePlusDialog")?.close());
   $("#exploreCitations")?.addEventListener("click", openCitationExplorer);
+  $("#exploreCitationNetwork")?.addEventListener("click", openCitationNetwork);
   $("#closeCitationExplorer")?.addEventListener("click", () => $("#citationExplorerDialog")?.close());
   $("#citationExplorerDialog")?.addEventListener("click", (event) => {
     if (event.target === $("#citationExplorerDialog")) $("#citationExplorerDialog")?.close();
@@ -5189,6 +5262,13 @@ async function init() {
   $("#closeHIndexHistory")?.addEventListener("click", () => $("#hIndexHistoryDialog")?.close());
   $("#hIndexHistoryDialog")?.addEventListener("click", (event) => {
     if (event.target === $("#hIndexHistoryDialog")) $("#hIndexHistoryDialog")?.close();
+  });
+  $("#closeCitationNetwork")?.addEventListener("click", () => $("#citationNetworkDialog")?.close());
+  $("#citationNetworkDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("#citationNetworkDialog")) $("#citationNetworkDialog")?.close();
+  });
+  $("#refreshCitationNetwork")?.addEventListener("click", () => {
+    if (requirePlusUi()) refreshCitationNetwork();
   });
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));

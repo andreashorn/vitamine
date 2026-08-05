@@ -1587,6 +1587,36 @@ def ensure_collaboration_tables(con: sqlite3.Connection) -> None:
         ON citation_institutions(author_id, author_name)
         """
     )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS citation_network_works (
+          openalex_work_id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          authors TEXT,
+          venue TEXT,
+          year TEXT,
+          doi TEXT,
+          cited_by_count INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS citation_network_links (
+          source_openalex_work_id TEXT NOT NULL REFERENCES citation_network_works(openalex_work_id) ON DELETE CASCADE,
+          target_publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+          target_openalex_work_id TEXT NOT NULL,
+          PRIMARY KEY(source_openalex_work_id, target_publication_id)
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_citation_network_links_target
+        ON citation_network_links(target_publication_id)
+        """
+    )
 
 
 def ensure_biosketch_tables(con: sqlite3.Connection) -> None:
@@ -2656,6 +2686,127 @@ def citation_profile_cited_by(publication_id: int, page: int = 1) -> dict[str, A
         "next_page": page + 1 if page * 50 < total else None,
         "source": "OpenAlex",
     }
+
+
+CITATION_NETWORK_MAX_OWN_WORKS = 24
+CITATION_NETWORK_PER_WORK = 20
+
+
+def openalex_work_short_id(value: Any) -> str:
+    return str(value or "").strip().rstrip("/").rsplit("/", 1)[-1]
+
+
+def refresh_citation_network(
+    progress_callback: Callable[[str, str, int], None] | None = None,
+) -> dict[str, Any]:
+    """Cache a deliberately bounded first-hop OpenAlex citation network."""
+    with connect() as con:
+        publications = rows_dict(con.execute(
+            """
+            SELECT id, title, raw_citation, authors, venue, year, doi, openalex_work_id,
+                   COALESCE(openalex_cited_by_count, 0) AS citations
+            FROM publications
+            WHERE COALESCE(suppress_display, 0)=0 AND openalex_work_id IS NOT NULL
+            ORDER BY COALESCE(openalex_cited_by_count, 0) DESC, id
+            LIMIT ?
+            """,
+            (CITATION_NETWORK_MAX_OWN_WORKS,),
+        ).fetchall())
+    cached: dict[str, dict[str, Any]] = {}
+    links: set[tuple[str, int, str]] = set()
+    warnings: list[str] = []
+    for index, publication in enumerate(publications, start=1):
+        target_work_id = openalex_work_short_id(publication.get("openalex_work_id"))
+        if not target_work_id:
+            continue
+        if progress_callback:
+            progress_callback(
+                "citation-network",
+                f"Collecting citing papers for {index} of {len(publications)} key publications",
+                8 + round(index / max(1, len(publications)) * 78),
+            )
+        params = urllib.parse.urlencode({
+            "filter": f"cites:{target_work_id}",
+            "sort": "cited_by_count:desc",
+            "per-page": CITATION_NETWORK_PER_WORK,
+        })
+        try:
+            payload = fetch_json_url(f"https://api.openalex.org/works?{params}", timeout=15)
+        except HTTPException:
+            warnings.append(str(publication.get("title") or publication.get("raw_citation") or "a publication"))
+            continue
+        for work in payload.get("results") or []:
+            source_work_id = openalex_work_short_id(work.get("id"))
+            if not source_work_id:
+                continue
+            cached[source_work_id] = openalex_citing_work_payload(work) | {"openalex_work_id": source_work_id}
+            links.add((source_work_id, int(publication["id"]), target_work_id))
+    with connect() as con:
+        con.execute("DELETE FROM citation_network_links")
+        con.execute("DELETE FROM citation_network_works")
+        for work in cached.values():
+            con.execute(
+                """
+                INSERT INTO citation_network_works
+                  (openalex_work_id, title, authors, venue, year, doi, cited_by_count, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    work["openalex_work_id"], work["title"], work.get("authors"), work.get("venue"),
+                    str(work.get("year") or ""), work.get("doi"), int(work.get("citations") or 0),
+                ),
+            )
+        con.executemany(
+            """
+            INSERT INTO citation_network_links
+              (source_openalex_work_id, target_publication_id, target_openalex_work_id)
+            VALUES (?, ?, ?)
+            """,
+            sorted(links),
+        )
+        con.commit()
+    if progress_callback:
+        progress_callback("citation-network", "Saved the citation network", 92)
+    return {"ok": True, "job_kind": "citation_network", "publications": len(publications), "works": len(cached), "links": len(links), "warnings": warnings}
+
+
+@app.post("/api/actions/refresh-citation-network")
+def refresh_citation_network_action() -> JSONResponse:
+    require_hosted_vitamine_plus()
+    return JSONResponse(refresh_citation_network())
+
+
+@app.get("/api/citation-network")
+def citation_network() -> dict[str, Any]:
+    require_hosted_vitamine_plus()
+    with connect() as con:
+        own = rows_dict(con.execute(
+            """
+            SELECT id, title, raw_citation, authors, venue, year, doi, openalex_work_id,
+                   COALESCE(openalex_cited_by_count, 0) AS citations
+            FROM publications
+            WHERE COALESCE(suppress_display, 0)=0 AND openalex_work_id IS NOT NULL
+            ORDER BY COALESCE(openalex_cited_by_count, 0) DESC, id LIMIT ?
+            """, (CITATION_NETWORK_MAX_OWN_WORKS,)).fetchall())
+        citing = rows_dict(con.execute("SELECT * FROM citation_network_works ORDER BY cited_by_count DESC LIMIT 480").fetchall())
+        links = rows_dict(con.execute("SELECT * FROM citation_network_links").fetchall())
+    own_ids = {int(row["id"]) for row in own}
+    nodes = [
+        {"id": f"own-{row['id']}", "kind": "own", "title": str(row["title"] or row["raw_citation"] or "Untitled publication"),
+         "authors": str(row["authors"] or ""), "venue": str(row["venue"] or ""), "year": str(row["year"] or ""),
+         "doi": str(row["doi"] or ""), "citations": int(row["citations"] or 0)}
+        for row in own
+    ]
+    nodes.extend(
+        {"id": f"work-{row['openalex_work_id']}", "kind": "citing", "title": row["title"], "authors": str(row["authors"] or ""),
+         "venue": str(row["venue"] or ""), "year": str(row["year"] or ""), "doi": str(row["doi"] or ""), "citations": int(row["cited_by_count"] or 0)}
+        for row in citing
+    )
+    graph_links = [
+        {"source": f"work-{row['source_openalex_work_id']}", "target": f"own-{row['target_publication_id']}"}
+        for row in links if int(row["target_publication_id"]) in own_ids
+    ]
+    return {"nodes": nodes, "links": graph_links, "cached": bool(citing), "limits": {"own": CITATION_NETWORK_MAX_OWN_WORKS, "per_work": CITATION_NETWORK_PER_WORK}}
 
 
 @app.get("/api/collaboration-map")

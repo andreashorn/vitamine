@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260805-clean-white-citation-sheets">
+  <link rel="stylesheet" href="/static/styles.css?v=20260805-citation-network">
 </head>
 <body>
   <header class="topbar">
@@ -300,6 +300,7 @@
                 <div class="citationProfileActions">
                   <span id="citationProfileCoverage"></span>
                   <button id="exploreCitations" type="button">Explore citations</button>
+                  <button id="exploreCitationNetwork" type="button">Citation network</button>
                 </div>
               </div>
               <div class="citationProfileBody">
@@ -956,6 +957,14 @@
     </section>
   </dialog>
 
-  <script src="/static/app.js?v=20260805-citation-author-highlight"></script>
+  <dialog id="citationNetworkDialog" class="citationExplorerDialog citationNetworkDialog">
+    <section class="citationExplorerPanel">
+      <div class="dialogHeader"><div><h2>Citation network</h2><p id="citationNetworkSummary">A bounded, cached view of papers that cite your most-cited work.</p></div><button id="closeCitationNetwork" type="button">Close</button></div>
+      <div id="citationNetworkGraph" class="citationNetworkGraph"></div>
+      <div class="formActions"><button id="refreshCitationNetwork" type="button">Refresh network from OpenAlex</button></div>
+    </section>
+  </dialog>
+
+  <script src="/static/app.js?v=20260805-citation-network"></script>
 </body>
 </html>

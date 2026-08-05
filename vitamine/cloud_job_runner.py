@@ -94,8 +94,13 @@ def run_cv_import(payload: dict[str, Any], job_directory: Path, progress_path: P
     }
 
 
-def run_enrichment(progress_path: Path) -> dict[str, Any]:
+def run_enrichment(progress_path: Path, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     from vitamine import app as worker_app
+
+    if (payload or {}).get("scope") == "citation_network":
+        return worker_app.refresh_citation_network(
+            progress_callback=lambda phase, message, percent: progress(progress_path, phase, message, percent),
+        )
 
     progress(
         progress_path,
@@ -157,7 +162,7 @@ def execute(
     if kind == "cv_import":
         result = run_cv_import(payload, payload_path.parent, progress_path)
     elif kind == "enrich_cv":
-        result = run_enrichment(progress_path)
+        result = run_enrichment(progress_path, payload)
     elif kind == "cleanup_cv":
         result = run_cleanup(progress_path)
     else:

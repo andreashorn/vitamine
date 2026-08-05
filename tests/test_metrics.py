@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vitamine.app import citation_profile_cited_by, citation_profile_publications, collaboration_map, metrics
+from vitamine.app import citation_network, citation_profile_cited_by, citation_profile_publications, collaboration_map, metrics
 from vitamine.paths import create_blank_database
 
 
@@ -189,6 +189,21 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(payload["works"][0]["title"], "A citing study")
             self.assertEqual(payload["works"][0]["authors"], "Grace Hopper")
 
+    def test_citation_network_returns_cached_citing_work_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "citation-network.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                publication_id = con.execute("INSERT INTO publications(category, raw_citation, title, openalex_work_id, openalex_cited_by_count) VALUES ('peer_reviewed', 'Own work', 'Own work', 'https://openalex.org/W1', 8)").lastrowid
+                con.execute("INSERT INTO citation_network_works(openalex_work_id, title, cited_by_count) VALUES ('W2', 'Citing work', 4)")
+                con.execute("INSERT INTO citation_network_links(source_openalex_work_id, target_publication_id, target_openalex_work_id) VALUES ('W2', ?, 'W1')", (publication_id,))
+                con.commit()
+            with patch("vitamine.app.active_db_path", return_value=path):
+                payload = citation_network()
+            self.assertTrue(payload["cached"])
+            self.assertEqual(len(payload["links"]), 1)
+            self.assertEqual({row["kind"] for row in payload["nodes"]}, {"own", "citing"})
+
     def test_dashboard_uses_public_facing_metric_labels(self):
         script = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "app.js"
@@ -221,6 +236,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationTitleLink", script)
         self.assertIn("citationDoiHref", script)
         self.assertIn("citationAuthorsMarkup", script)
+        self.assertIn("citationNetworkGraph", script)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
@@ -228,6 +244,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationPaperLoader", styles)
         self.assertIn("citationCitedByDialog", styles)
         self.assertIn("citationResearcherAuthor", styles)
+        self.assertIn("citationNetworkNode", styles)
         self.assertIn('citationCountButton[aria-busy="true"]', styles)
         self.assertIn("background: #fff;", styles)
         self.assertIn("min-height: 82px;", styles)

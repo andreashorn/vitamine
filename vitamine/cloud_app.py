@@ -5019,6 +5019,29 @@ def queue_enrichment_job(
     )
 
 
+@app.post("/api/cloud/jobs/citation-network")
+def queue_citation_network_job(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> JSONResponse:
+    workspace = workspace_for_request(request, authorization)
+    with connect() as con:
+        member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
+    require_vitamine_plus(member)
+    job, created = create_background_job(
+        workspace=workspace,
+        kind="enrich_cv",
+        payload={"scope": "citation_network"},
+        job_id=secrets.token_urlsafe(18),
+        idempotency_key=idempotency_key,
+    )
+    return JSONResponse(
+        {"ok": True, "background": True, "idempotent_replay": not created, "job": job},
+        status_code=202 if created else 200,
+    )
+
+
 @app.post("/api/cloud/jobs/cleanup-cv")
 def queue_cleanup_job(
     request: Request,

@@ -241,6 +241,27 @@ ON citation_institutions(publication_id);
 CREATE INDEX IF NOT EXISTS idx_citation_institutions_author
 ON citation_institutions(author_id, author_name);
 
+CREATE TABLE IF NOT EXISTS citation_network_works (
+  openalex_work_id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  authors TEXT,
+  venue TEXT,
+  year TEXT,
+  doi TEXT,
+  cited_by_count INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS citation_network_links (
+  source_openalex_work_id TEXT NOT NULL REFERENCES citation_network_works(openalex_work_id) ON DELETE CASCADE,
+  target_publication_id INTEGER NOT NULL REFERENCES publications(id) ON DELETE CASCADE,
+  target_openalex_work_id TEXT NOT NULL,
+  PRIMARY KEY(source_openalex_work_id, target_publication_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_citation_network_links_target
+ON citation_network_links(target_publication_id);
+
 CREATE TABLE IF NOT EXISTS biosketch_contributions (
   id INTEGER PRIMARY KEY,
   document_id INTEGER REFERENCES documents(id) ON DELETE SET NULL,
