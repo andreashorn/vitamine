@@ -4436,8 +4436,8 @@ async def apply_orcid_profile_sync_actions(
         raise HTTPException(status_code=409, detail="Wait for the current background process to finish before updating ORCID.")
     payload = await request.json()
     direction = str(payload.get("direction") or "")
-    if direction not in {"add_remote", "remove_remote"}:
-        raise HTTPException(status_code=400, detail="Unsupported profile-sync action.")
+    if direction != "add_remote":
+        raise HTTPException(status_code=400, detail="Profile sync only adds current VitaMine publications to ORCID.")
     ids = payload.get("ids") or []
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="Choose at least one publication.")
@@ -4458,26 +4458,15 @@ async def apply_orcid_profile_sync_actions(
                 publication = item.get("payload") or {}
                 if not recommendation_id or not isinstance(publication, dict):
                     continue
-                if direction == "remove_remote":
-                    remote_id = str(publication.get("remote_id") or publication.get("orcid_put_code") or "").strip()
-                    if not remote_id:
-                        continue
-                    response = await client.delete(
-                        f"{api_base}/v3.0/{quote(orcid_id, safe='')}/work/{quote(remote_id, safe='')}",
-                        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-                    )
-                    if response.status_code not in {204, 404}:
-                        response.raise_for_status()
-                else:
-                    response = await client.post(
-                        f"{api_base}/v3.0/{quote(orcid_id, safe='')}/work",
-                        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Content-Type": "application/json"},
-                        json=orcid_work_payload(publication),
-                    )
-                    response.raise_for_status()
-                    remote_id = orcid_put_code_from_location(response.headers.get("Location", ""))
-                    if remote_id:
-                        remote_ids[recommendation_id] = remote_id
+                response = await client.post(
+                    f"{api_base}/v3.0/{quote(orcid_id, safe='')}/work",
+                    headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Content-Type": "application/json"},
+                    json=orcid_work_payload(publication),
+                )
+                response.raise_for_status()
+                remote_id = orcid_put_code_from_location(response.headers.get("Location", ""))
+                if remote_id:
+                    remote_ids[recommendation_id] = remote_id
                 completed_ids.append(recommendation_id)
     except httpx.HTTPStatusError as exc:
         raise HTTPException(status_code=502, detail="ORCID could not apply this profile update. Please try again.") from exc
@@ -4500,8 +4489,8 @@ async def apply_zotero_profile_sync_actions(
         raise HTTPException(status_code=409, detail="Wait for the current background process to finish before updating Zotero.")
     payload = await request.json()
     direction = str(payload.get("direction") or "")
-    if direction not in {"add_remote", "remove_remote"}:
-        raise HTTPException(status_code=400, detail="Unsupported profile-sync action.")
+    if direction != "add_remote":
+        raise HTTPException(status_code=400, detail="Profile sync only adds current VitaMine publications to Zotero.")
     ids = payload.get("ids") or []
     if not isinstance(ids, list) or not ids:
         raise HTTPException(status_code=400, detail="Choose at least one publication.")
@@ -4528,26 +4517,9 @@ async def apply_zotero_profile_sync_actions(
                 publication = item.get("payload") or {}
                 if not recommendation_id or not isinstance(publication, dict):
                     continue
-                if direction == "remove_remote":
-                    remote_id = str(publication.get("remote_id") or publication.get("zotero_key") or "").strip()
-                    if not remote_id:
-                        continue
-                    if source["source_mode"] == "library":
-                        # Whole-library sync is an explicit user choice. A
-                        # removal is therefore a real Zotero item deletion.
-                        await zotero_delete_from_selected_library(
-                            client, prefix=prefix, api_key=api_key, remote_id=remote_id
-                        )
-                    else:
-                        # Collections and My Publications retain the item and
-                        # remove only its selected-source membership.
-                        await zotero_patch_source_membership(
-                            client, prefix=prefix, api_key=api_key, source=source, remote_id=remote_id, present=False
-                        )
-                else:
-                    remote_ids[recommendation_id] = await zotero_add_to_selected_source(
-                        client, api_key=api_key, source=source, publication=publication
-                    )
+                remote_ids[recommendation_id] = await zotero_add_to_selected_source(
+                    client, api_key=api_key, source=source, publication=publication
+                )
                 completed_ids.append(recommendation_id)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 412:

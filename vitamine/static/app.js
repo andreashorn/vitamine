@@ -533,21 +533,18 @@ function profileSyncIsWholeZoteroLibrary(provider, service) {
   return provider === "zotero" && String(service || "").endsWith(":library");
 }
 
-function profileSyncTitle(provider, direction, wholeLibrary = false) {
+function profileSyncTitle(provider, wholeLibrary = false) {
   const target = provider === "zotero"
     ? (wholeLibrary ? "selected Zotero library" : "selected Zotero source")
     : "ORCID record";
-  return direction === "remove_remote"
-    ? `We’ve found publications that are on your ${target} for which you declared they do not belong to you.`
-    : `We’ve found papers that you authored that are not on your ${target}.`;
+  return `We’ve found current VitaMine publications that are not on your ${target}.`;
 }
 
-function profileSyncActionLabel(provider, direction, wholeLibrary = false) {
+function profileSyncActionLabel(provider, wholeLibrary = false) {
   if (provider === "zotero") {
-    if (wholeLibrary) return direction === "remove_remote" ? "Delete from selected Zotero library" : "Add to selected Zotero library";
-    return direction === "remove_remote" ? "Remove from selected Zotero source" : "Add to selected Zotero source";
+    return wholeLibrary ? "Add to selected Zotero library" : "Add to selected Zotero source";
   }
-  return direction === "remove_remote" ? "Delete from ORCID profile" : "Add to ORCID profile";
+  return "Add to ORCID profile";
 }
 
 async function loadProfileSync() {
@@ -578,9 +575,9 @@ function selectedProfileSyncIds() {
 
 async function openProfileSync() {
   const data = await loadProfileSync();
-  const candidates = data.items || [];
-  const first = candidates.find((item) => item.direction === "remove_remote") || candidates[0];
-  const items = first ? candidates.filter((item) => item.direction === first.direction && item.service === first.service) : [];
+  const candidates = (data.items || []).filter((item) => item.direction === "add_remote");
+  const first = candidates[0];
+  const items = first ? candidates.filter((item) => item.service === first.service) : [];
   if (!items.length) {
     setStatus("Your connected profiles are in sync.");
     return;
@@ -591,14 +588,12 @@ async function openProfileSync() {
   state.profileSyncProvider = provider;
   state.profileSyncService = items[0].service;
   state.profileSyncWholeLibrary = profileSyncIsWholeZoteroLibrary(provider, state.profileSyncService);
-  $("#profileSyncTitle").textContent = profileSyncTitle(provider, direction, state.profileSyncWholeLibrary);
+  $("#profileSyncTitle").textContent = profileSyncTitle(provider, state.profileSyncWholeLibrary);
   const target = provider === "zotero"
     ? (state.profileSyncWholeLibrary ? "the selected Zotero library" : "the selected Zotero source")
     : "ORCID";
-  $("#profileSyncDescription").textContent = direction === "remove_remote"
-    ? `These were rejected after ${profileSyncProviderName(provider)} enrichment. They are selected so you can ${state.profileSyncWholeLibrary ? "delete them from" : "remove them from"} ${target}.${state.profileSyncWholeLibrary ? " This affects everyone who uses this library." : ""}`
-    : `These DOI-backed papers are selected so you can add them to ${target}.`;
-  $("#applyProfileSync").textContent = profileSyncActionLabel(provider, direction, state.profileSyncWholeLibrary);
+  $("#profileSyncDescription").textContent = `These DOI-backed papers are in the active VitaMine database and are selected so you can add them to ${target}.`;
+  $("#applyProfileSync").textContent = profileSyncActionLabel(provider, state.profileSyncWholeLibrary);
   $("#profileSyncList").innerHTML = items.map(profileSyncItemMarkup).join("");
   $("#profileSyncDialog").showModal();
 }
@@ -626,7 +621,7 @@ async function applyProfileSync() {
     const result = await api(`/gateway/profile-sync/${provider}/actions`, {
       method: "POST", body: JSON.stringify({ direction, ids }),
     });
-    setStatus(`${profileSyncActionLabel(provider, direction, state.profileSyncWholeLibrary)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
+    setStatus(`${profileSyncActionLabel(provider, state.profileSyncWholeLibrary)}: ${result.completed || 0} publication${result.completed === 1 ? "" : "s"}.`);
     $("#profileSyncDialog").close();
     await Promise.all([loadProfileSync(), loadPublications()]);
   } catch (error) {

@@ -6,7 +6,6 @@ from vitamine.profile_sync import (
     ADD_REMOTE,
     ORCID,
     ZOTERO,
-    REMOVE_REMOTE,
     complete_recommendations,
     ensure_profile_sync_tables,
     observe_remote_publications,
@@ -39,18 +38,14 @@ def database():
 
 
 class ProfileSyncTests(unittest.TestCase):
-    def test_rejected_orcid_import_becomes_a_remove_recommendation(self):
+    def test_rejected_orcid_inbox_item_never_becomes_a_provider_action(self):
         con = database()
         con.execute(
             "INSERT INTO import_inbox_items VALUES (1, 'orcid', 'publication', 'rejected', ?)",
             (json.dumps({"title": "Wrong paper", "doi": "10.1000/wrong", "orcid_put_code": "123"}),),
         )
         payload = pending_recommendations(con)
-        self.assertEqual(payload["counts"][REMOVE_REMOTE], 1)
-        item = payload["items"][0]
-        self.assertEqual(item["payload"]["remote_id"], "123")
-        prepared = prepare_recommendation_action(con, ORCID, REMOVE_REMOTE, [item["id"]])
-        self.assertEqual(prepared[0]["payload"]["orcid_put_code"], "123")
+        self.assertEqual(payload["total"], 0)
 
     def test_doi_publication_missing_from_observed_orcid_becomes_add_recommendation(self):
         con = database()
@@ -98,7 +93,6 @@ class ProfileSyncTests(unittest.TestCase):
         observe_remote_publications(con, other, [{"title": "My paper", "doi": "10.1000/mine", "zotero_key": "OTHER"}])
         payload = pending_recommendations(con, selected)
         self.assertEqual(payload["provider"], ZOTERO)
-        self.assertEqual(payload["counts"][REMOVE_REMOTE], 1)
         self.assertEqual(payload["counts"][ADD_REMOTE], 1)
         self.assertEqual(pending_recommendations(con, other)["total"], 0)
 
@@ -167,6 +161,47 @@ class ProfileSyncTests(unittest.TestCase):
             ).fetchone()[0],
             "resolved",
         )
+
+    def test_deleting_a_publication_withdraws_a_stale_export_suggestion(self):
+        con = database()
+        service = zotero_service({"library_type": "users", "library_id": "42", "source_mode": "my_publications"})
+        self.assertIsNotNone(service)
+        con.execute(
+            """
+            INSERT INTO publications (id, source, item_type, title, venue, year, doi, orcid_put_code, zotero_key)
+            VALUES (7, 'manual', 'journalArticle', 'Deleted paper', 'Journal', '2025', '10.1000/deleted', '', '')
+            """
+        )
+        observe_remote_publications(con, service, [])
+        recommendation_id = pending_recommendations(con, service)["items"][0]["id"]
+
+        con.execute("DELETE FROM publications WHERE id=7")
+
+        self.assertEqual(prepare_recommendation_action(con, service, ADD_REMOTE, [recommendation_id]), [])
+        self.assertEqual(pending_recommendations(con, service)["total"], 0)
+        self.assertEqual(
+            con.execute(
+                "SELECT status FROM profile_sync_recommendations WHERE service=? AND id=?",
+                (service, recommendation_id),
+            ).fetchone()[0],
+            "resolved",
+        )
+
+    def test_provider_write_uses_the_current_vitamine_publication_payload(self):
+        con = database()
+        con.execute(
+            """
+            INSERT INTO publications (id, source, item_type, title, venue, year, doi, orcid_put_code, zotero_key)
+            VALUES (7, 'manual', 'journal-article', 'Original title', 'Journal', '2025', '10.1000/mine', '', '')
+            """
+        )
+        observe_remote_publications(con, ORCID, [])
+        recommendation_id = pending_recommendations(con, ORCID)["items"][0]["id"]
+        con.execute("UPDATE publications SET title='Corrected title' WHERE id=7")
+
+        prepared = prepare_recommendation_action(con, ORCID, ADD_REMOTE, [recommendation_id])
+
+        self.assertEqual(prepared[0]["payload"]["title"], "Corrected title")
 
     def test_zotero_whole_library_is_an_explicit_separate_source(self):
         whole_library = zotero_service({"library_type": "groups", "library_id": "42", "source_mode": "library"})

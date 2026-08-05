@@ -19,10 +19,11 @@ REMOVE_REMOTE = "remove_remote"
 
 
 # Provider synchronizers keep their observed records in ``publications`` so
-# VitaMine can reconcile and review them.  Those records are not curated CV
-# publications merely by virtue of being present in that table.  Outbound
-# profile updates must therefore originate only from visible, clean VitaMine
-# records and never relay an ORCID or Zotero import into another service.
+# VitaMine can reconcile and review them. Those records are not curated CV
+# publications merely by virtue of being present in that table. Outbound
+# profile updates are deliberately one-way: a current, clean VitaMine record
+# may be added to ORCID or Zotero; no imported, Inbox, rejected, hidden, or
+# provider-originated record can cause any provider write.
 OUTBOUND_PUBLICATION_ELIGIBILITY_SQL = """
     trim(COALESCE(doi, '')) != ''
     AND COALESCE(suppress_display, 0) = 0
@@ -197,11 +198,13 @@ def _resolve_ineligible_add_recommendations(con: sqlite3.Connection, service: st
         UPDATE profile_sync_recommendations
         SET status='resolved', updated_at=datetime('now')
         WHERE service=? AND direction=? AND status='pending'
-          AND publication_id IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM publications
-            WHERE publications.id = profile_sync_recommendations.publication_id
-              AND {OUTBOUND_PUBLICATION_ELIGIBILITY_SQL}
+          AND (
+            publication_id IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM publications
+              WHERE publications.id = profile_sync_recommendations.publication_id
+                AND {OUTBOUND_PUBLICATION_ELIGIBILITY_SQL}
+            )
           )
         """,
         (service, ADD_REMOTE),
@@ -209,7 +212,7 @@ def _resolve_ineligible_add_recommendations(con: sqlite3.Connection, service: st
 
 
 def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> dict[str, int]:
-    """Derive actionable mismatches from inbox decisions and observed profile data."""
+    """Derive one-way VitaMine-to-provider additions from curated publications."""
     ensure_profile_sync_tables(con)
     removed_candidates = 0
     added_candidates = 0
@@ -217,51 +220,16 @@ def refresh_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
     if provider not in {ORCID, ZOTERO}:
         return {"remove_remote": 0, "add_remote": 0}
 
-    rejected = con.execute(
-        """
-        SELECT id, payload_json FROM import_inbox_items
-        WHERE target_type='publication' AND status='rejected' AND lower(source)=?
-        """,
-        (provider,),
-    ).fetchall()
-    for row in rejected:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            continue
-        if provider == ZOTERO and str(payload.get("profile_sync_service") or "") != service:
-            continue
-        remote_id = str(
-            (payload.get("orcid_put_code") if provider == ORCID else payload.get("zotero_key")) or ""
-        ).strip()
-        if not remote_id:
-            continue
-        payload["remote_id"] = remote_id
-        _upsert_recommendation(
-            con,
-            service=service,
-            direction=REMOVE_REMOTE,
-            entity_key=f"remote:{remote_id}",
-            payload=payload,
-            source_inbox_id=int(row["id"]),
-        )
-        removed_candidates += 1
-
-    # Restoring an Inbox item means that its prior rejection is no longer a
-    # reason to suggest a remote deletion. Skipped/completed choices remain
-    # historical user decisions and are intentionally left untouched.
+    # Inbox decisions and provider observations are never sources for outbound
+    # writes. Retire legacy pending removal suggestions created by older
+    # versions before they can reach a provider action.
     con.execute(
         """
         UPDATE profile_sync_recommendations
         SET status='resolved', updated_at=datetime('now')
         WHERE service=? AND direction=? AND status='pending'
-          AND source_inbox_id IS NOT NULL
-          AND source_inbox_id NOT IN (
-            SELECT id FROM import_inbox_items
-            WHERE target_type='publication' AND status='rejected' AND lower(source)=?
-          )
         """,
-        (service, REMOVE_REMOTE, provider),
+        (service, REMOVE_REMOTE),
     )
 
     observed = con.execute(
@@ -350,7 +318,7 @@ def pending_recommendations(con: sqlite3.Connection, service: str = ORCID) -> di
 def prepare_recommendation_action(
     con: sqlite3.Connection, service: str, direction: str, ids: list[int]
 ) -> list[dict[str, Any]]:
-    if direction not in {ADD_REMOTE, REMOVE_REMOTE}:
+    if direction != ADD_REMOTE:
         return []
     # The dialog can remain open while a publication is hidden or otherwise
     # becomes ineligible. Refresh immediately before a provider write so a
@@ -362,19 +330,21 @@ def prepare_recommendation_action(
     placeholders = ",".join("?" for _ in valid_ids)
     rows = con.execute(
         f"""
-        SELECT * FROM profile_sync_recommendations
-        WHERE service=? AND direction=? AND status='pending' AND id IN ({placeholders})
-        ORDER BY id
+        SELECT r.id AS recommendation_id, r.publication_id, p.*
+        FROM profile_sync_recommendations r
+        JOIN publications p ON p.id = r.publication_id
+        WHERE r.service=? AND r.direction=? AND r.status='pending' AND r.id IN ({placeholders})
+          AND {OUTBOUND_PUBLICATION_ELIGIBILITY_SQL}
+        ORDER BY r.id
         """,
         (service, direction, *valid_ids),
     ).fetchall()
     prepared: list[dict[str, Any]] = []
     for row in rows:
-        try:
-            payload = json.loads(row["payload_json"] or "{}")
-        except json.JSONDecodeError:
-            payload = {}
-        prepared.append({"id": int(row["id"]), "payload": payload, "publication_id": row["publication_id"]})
+        payload = dict(row)
+        recommendation_id = int(payload.pop("recommendation_id"))
+        publication_id = int(payload.pop("publication_id"))
+        prepared.append({"id": recommendation_id, "payload": payload, "publication_id": publication_id})
     return prepared
 
 
@@ -385,6 +355,8 @@ def complete_recommendations(
     ids: list[int],
     remote_ids: dict[int, str] | None = None,
 ) -> int:
+    if direction != ADD_REMOTE:
+        return 0
     valid_ids = sorted({int(value) for value in ids if int(value) > 0})
     if not valid_ids:
         return 0
