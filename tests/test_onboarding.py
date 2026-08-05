@@ -70,12 +70,13 @@ class OnboardingTests(unittest.TestCase):
             con = sqlite3.connect(path)
             con.row_factory = sqlite3.Row
             try:
-                con.execute("UPDATE person SET full_name='Test Researcher' WHERE id=1")
+                con.execute(
+                    "UPDATE person SET full_name='Test Researcher', orcid_id='0000-0000-0000-0000' WHERE id=1"
+                )
                 con.executemany(
                     "INSERT OR REPLACE INTO app_settings(key, value) VALUES (?, ?)",
                     [
                         ("onboarding_enabled", "1"),
-                        ("orcid_id", "0000-0000-0000-0000"),
                     ],
                 )
                 con.commit()
