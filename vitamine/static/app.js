@@ -2530,7 +2530,12 @@ async function queueCitationNetworkRefresh() {
       state.cloud.activeJob = result.job;
       setCloudJobControls(true);
       setStatus("Collecting citing papers in the background…");
-      waitForCloudJob(result.job.id).then(() => openCitationNetwork()).catch((error) => {
+      waitForCloudJob(result.job.id).then(async (completed) => {
+        const size = Number(completed?.database_size_bytes || 0);
+        const footprint = size ? ` The CV database is now ${(size / 1024 / 1024).toFixed(1)} MB.` : "";
+        setStatus(`Citation network ready.${footprint}`);
+        await openCitationNetwork();
+      }).catch((error) => {
         $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message)}</p>`;
       }).finally(() => { state.citationNetwork.refreshing = false; if (button) { button.disabled = false; button.textContent = "Refresh network from OpenAlex"; } });
     } else {
