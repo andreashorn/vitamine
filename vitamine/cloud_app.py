@@ -62,6 +62,8 @@ RESERVED_SLUGS = {
     "support",
     "www",
 }
+ADMIN_SESSION_COOKIE = "vitamine_admin_session"
+ADMIN_SESSION_MAX_AGE = 60 * 60 * 8
 MAX_SNAPSHOT_BYTES = 512_000
 TOKEN_PREFIX = "vtd_"
 SESSION_COOKIE = "vitamine_session"
@@ -88,7 +90,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 13
+CLOUD_SCHEMA_VERSION = 14
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
 PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
@@ -128,8 +130,19 @@ CREATE TABLE IF NOT EXISTS members (
     email_verified_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_login_at TEXT,
     revoked_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS member_activity_events (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN ('login', 'cv_import', 'enrich_cv', 'cleanup_cv')),
+    occurred_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_member_activity_events_member_time
+ON member_activity_events(member_id, occurred_at);
 
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
     token_hash TEXT PRIMARY KEY,
@@ -432,8 +445,19 @@ CREATE TABLE IF NOT EXISTS members (
     email_verified_at TEXT,
     created_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
+    last_login_at TEXT,
     revoked_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS member_activity_events (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL CHECK (event_type IN ('login', 'cv_import', 'enrich_cv', 'cleanup_cv')),
+    occurred_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_member_activity_events_member_time
+ON member_activity_events(member_id, occurred_at);
 
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
     token_hash TEXT PRIMARY KEY,
@@ -726,6 +750,11 @@ class AccountRegistration(BaseModel):
 
 class AccountLogin(BaseModel):
     email: str = Field(min_length=3, max_length=254)
+    password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
+
+
+class AdminLogin(BaseModel):
+    username: str = Field(min_length=1, max_length=160)
     password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
 
 
@@ -1547,6 +1576,204 @@ def verify_password(password: str, encoded: str) -> bool:
         return False
 
 
+def record_member_activity(con: GatewayConnection, member_id: str, event_type: str, *, occurred_at: str | None = None) -> None:
+    """Store structural account activity only; never request or CV content."""
+    if event_type not in {"login", "cv_import", "enrich_cv", "cleanup_cv"}:
+        raise ValueError("Unsupported member activity event.")
+    con.execute(
+        "INSERT INTO member_activity_events(id, member_id, event_type, occurred_at) VALUES (?, ?, ?, ?)",
+        (secrets.token_urlsafe(18), member_id, event_type, occurred_at or utc_now()),
+    )
+
+
+def admin_settings() -> tuple[str, str] | None:
+    """Return the configured operator identity without ever exposing its secret."""
+    password_hash = os.environ.get("VITAMINE_ADMIN_PASSWORD_HASH", "").strip()
+    if not password_hash:
+        return None
+    username = os.environ.get("VITAMINE_ADMIN_USERNAME", "admin").strip() or "admin"
+    return username, password_hash
+
+
+def admin_session_signature(payload: str, password_hash: str) -> str:
+    pepper = os.environ.get("VITAMINE_CLOUD_PEPPER", "")
+    return hmac.new(
+        pepper.encode("utf-8"),
+        f"admin-session\\0{password_hash}\\0{payload}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def issue_admin_session(password_hash: str) -> str:
+    expires_at = int(time.time()) + ADMIN_SESSION_MAX_AGE
+    payload = f"{expires_at}.{secrets.token_urlsafe(24)}"
+    return f"{payload}.{admin_session_signature(payload, password_hash)}"
+
+
+def authenticated_admin(request: Request) -> None:
+    settings = admin_settings()
+    if settings is None:
+        raise HTTPException(status_code=503, detail="The operator dashboard is not configured.")
+    _, password_hash = settings
+    token = str(request.cookies.get(ADMIN_SESSION_COOKIE) or "")
+    expires_at, separator, remainder = token.partition(".")
+    nonce, separator2, signature = remainder.partition(".") if separator else ("", "", "")
+    payload = f"{expires_at}.{nonce}"
+    if (
+        not separator2
+        or not expires_at.isdigit()
+        or int(expires_at) < int(time.time())
+        or not nonce
+        or not hmac.compare_digest(signature, admin_session_signature(payload, password_hash))
+    ):
+        raise HTTPException(status_code=401, detail="Operator sign-in is required.")
+
+
+def set_admin_session_cookie(response: Response, request: Request, token: str) -> None:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    response.set_cookie(
+        key=ADMIN_SESSION_COOKIE,
+        value=token,
+        max_age=ADMIN_SESSION_MAX_AGE,
+        httponly=True,
+        secure=request.url.scheme == "https" or forwarded_proto == "https",
+        samesite="strict",
+        path="/",
+    )
+
+
+def admin_member_reference(member_id: str) -> str:
+    """Stable dashboard-only pseudonym; no account identifier leaves the API."""
+    return f"Member {secret_hash(f'admin-member:{member_id}')[:12]}"
+
+
+def admin_dashboard_payload() -> dict[str, Any]:
+    """Return operational aggregates without emails, names, CV data, or raw IDs."""
+    now = datetime.now(timezone.utc)
+    cutoff_30 = (now - timedelta(days=30)).isoformat()
+    with connect() as con:
+        members = con.execute(
+            """
+            SELECT m.id, COALESCE(m.account_created_at, m.created_at) AS joined_at,
+                   m.last_seen_at, m.last_login_at,
+                   (SELECT COUNT(*) FROM member_activity_events e
+                    WHERE e.member_id=m.id AND e.event_type='login') AS login_count,
+                   (SELECT COUNT(*) FROM background_jobs j
+                    WHERE j.member_id=m.id AND j.kind='enrich_cv') AS enrichment_count,
+                   (SELECT COUNT(*) FROM background_jobs j
+                    WHERE j.member_id=m.id AND j.kind='cv_import') AS import_count,
+                   (SELECT COUNT(*) FROM background_jobs j
+                    WHERE j.member_id=m.id AND j.kind='cleanup_cv') AS cleanup_count,
+                   (SELECT COUNT(*) FROM llm_usage_events u
+                    WHERE u.member_id=m.id) AS llm_call_count,
+                   (SELECT COALESCE(SUM(u.input_tokens), 0) FROM llm_usage_events u
+                    WHERE u.member_id=m.id) AS input_tokens,
+                   (SELECT COALESCE(SUM(u.output_tokens), 0) FROM llm_usage_events u
+                    WHERE u.member_id=m.id) AS output_tokens,
+                   (SELECT COALESCE(SUM(u.wholesale_cost_microusd), 0) FROM llm_usage_events u
+                    WHERE u.member_id=m.id) AS cost_microusd
+            FROM members m
+            WHERE m.email IS NOT NULL AND m.password_hash IS NOT NULL AND m.revoked_at IS NULL
+            ORDER BY m.last_seen_at DESC
+            """
+        ).fetchall()
+        usage_30 = con.execute(
+            """
+            SELECT COUNT(*) AS llm_calls, COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(wholesale_cost_microusd), 0) AS cost_microusd
+            FROM llm_usage_events WHERE created_at>=?
+            """,
+            (cutoff_30,),
+        ).fetchone()
+        jobs_30 = con.execute(
+            """
+            SELECT kind, status, COUNT(*) AS count FROM background_jobs
+            WHERE created_at>=? GROUP BY kind, status ORDER BY kind, status
+            """,
+            (cutoff_30,),
+        ).fetchall()
+        daily_logins = con.execute(
+            """
+            SELECT SUBSTR(occurred_at, 1, 10) AS day, COUNT(*) AS count
+            FROM member_activity_events
+            WHERE event_type='login' AND occurred_at>=?
+            GROUP BY SUBSTR(occurred_at, 1, 10)
+            """,
+            (cutoff_30,),
+        ).fetchall()
+        daily_jobs = con.execute(
+            """
+            SELECT SUBSTR(created_at, 1, 10) AS day, kind, COUNT(*) AS count
+            FROM background_jobs WHERE created_at>=?
+            GROUP BY SUBSTR(created_at, 1, 10), kind
+            """,
+            (cutoff_30,),
+        ).fetchall()
+        daily_llm = con.execute(
+            """
+            SELECT SUBSTR(created_at, 1, 10) AS day, COUNT(*) AS count
+            FROM llm_usage_events WHERE created_at>=?
+            GROUP BY SUBSTR(created_at, 1, 10)
+            """,
+            (cutoff_30,),
+        ).fetchall()
+
+    def days_since(value: Any) -> int | None:
+        parsed = parsed_utc(value)
+        return max(0, int((now - parsed).total_seconds() // 86_400)) if parsed else None
+
+    member_rows = [
+        {
+            "reference": admin_member_reference(str(row["id"])),
+            "account_age_days": days_since(row["joined_at"]),
+            "inactive_days": days_since(row["last_seen_at"]),
+            "last_login_days": days_since(row["last_login_at"]),
+            "logins_since_dashboard_enabled": int(row["login_count"] or 0),
+            "enrichment_calls": int(row["enrichment_count"] or 0),
+            "imports": int(row["import_count"] or 0),
+            "cleanup_calls": int(row["cleanup_count"] or 0),
+            "llm_calls": int(row["llm_call_count"] or 0),
+            "input_tokens": int(row["input_tokens"] or 0),
+            "output_tokens": int(row["output_tokens"] or 0),
+            "cost_microusd": int(row["cost_microusd"] or 0),
+        }
+        for row in members
+    ]
+    daily: dict[str, dict[str, Any]] = {}
+    for offset in range(29, -1, -1):
+        day = (now - timedelta(days=offset)).date().isoformat()
+        daily[day] = {"day": day, "logins": 0, "enrichments": 0, "imports": 0, "cleanup": 0, "llm_calls": 0}
+    for row in daily_logins:
+        if row["day"] in daily:
+            daily[row["day"]]["logins"] = int(row["count"])
+    for row in daily_jobs:
+        if row["day"] in daily:
+            target = {"enrich_cv": "enrichments", "cv_import": "imports", "cleanup_cv": "cleanup"}.get(str(row["kind"]))
+            if target:
+                daily[row["day"]][target] = int(row["count"])
+    for row in daily_llm:
+        if row["day"] in daily:
+            daily[row["day"]]["llm_calls"] = int(row["count"])
+    jobs = [dict(row) for row in jobs_30]
+    return {
+        "generated_at": now.isoformat(),
+        "privacy": "Each row uses a dashboard-only pseudonym. No email, name, CV content, filename, raw account ID, prompt, or model output is returned.",
+        "overview": {
+            "members": len(member_rows),
+            "active_7_days": sum(row["inactive_days"] is not None and row["inactive_days"] < 7 for row in member_rows),
+            "active_30_days": sum(row["inactive_days"] is not None and row["inactive_days"] < 30 for row in member_rows),
+            "llm_calls_30_days": int(usage_30["llm_calls"] or 0),
+            "input_tokens_30_days": int(usage_30["input_tokens"] or 0),
+            "output_tokens_30_days": int(usage_30["output_tokens"] or 0),
+            "cost_microusd_30_days": int(usage_30["cost_microusd"] or 0),
+        },
+        "jobs_30_days": jobs,
+        "daily_30_days": list(daily.values()),
+        "members": member_rows,
+    }
+
+
 class GatewayConnection:
     def __init__(self, raw: Any, backend: str):
         self.raw = raw
@@ -2062,6 +2289,33 @@ def migration_013_cleanup_cv_jobs(con: GatewayConnection) -> None:
     )
 
 
+def migration_014_admin_usage_dashboard(con: GatewayConnection) -> None:
+    """Add privacy-minimal account activity needed by the operator dashboard."""
+    # A few very early development fixtures intentionally contain only the
+    # table introduced by the migration under test. A real cloud store always
+    # has members from migration 1, but keep that historical test path safe.
+    if not cloud_table_exists(con, "members"):
+        return
+    if con.backend == "postgres":
+        con.execute("ALTER TABLE members ADD COLUMN IF NOT EXISTS last_login_at TEXT")
+    elif "last_login_at" not in sqlite_column_names(con, "members"):
+        con.execute("ALTER TABLE members ADD COLUMN last_login_at TEXT")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS member_activity_events (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL CHECK (event_type IN ('login', 'cv_import', 'enrich_cv', 'cleanup_cv')),
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_member_activity_events_member_time "
+        "ON member_activity_events(member_id, occurred_at)"
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -2076,6 +2330,7 @@ CLOUD_MIGRATIONS = (
     (11, migration_011_paypal_beta_topups),
     (12, migration_012_vitamine_plus),
     (13, migration_013_cleanup_cv_jobs),
+    (14, migration_014_admin_usage_dashboard),
 )
 
 
@@ -3214,6 +3469,7 @@ def create_background_job(
                 parameters,
             )
         row = con.execute("SELECT * FROM background_jobs WHERE id=?", (job_id,)).fetchone()
+        record_member_activity(con, member_id, kind, occurred_at=now)
     return background_job_payload(row), True
 
 
@@ -5142,6 +5398,16 @@ def account_javascript() -> FileResponse:
     return FileResponse(CLOUD_STATIC / "account.js", media_type="text/javascript")
 
 
+@app.get("/assets/admin.css", response_class=FileResponse)
+def admin_css() -> FileResponse:
+    return FileResponse(CLOUD_STATIC / "admin.css", media_type="text/css")
+
+
+@app.get("/assets/admin.js", response_class=FileResponse)
+def admin_javascript() -> FileResponse:
+    return FileResponse(CLOUD_STATIC / "admin.js", media_type="text/javascript")
+
+
 @app.get("/assets/public-profile.css", response_class=FileResponse)
 def public_profile_css() -> FileResponse:
     return FileResponse(CLOUD_STATIC / "public-profile.css", media_type="text/css")
@@ -5348,7 +5614,9 @@ def login_account(payload: AccountLogin, request: Request) -> JSONResponse:
         raise HTTPException(status_code=401, detail="Email or password is incorrect.")
     with connect() as con:
         token = issue_device_credential(con, member["id"])
-        con.execute("UPDATE members SET last_seen_at=? WHERE id=?", (utc_now(), member["id"]))
+        now = utc_now()
+        con.execute("UPDATE members SET last_seen_at=?, last_login_at=? WHERE id=?", (now, now, member["id"]))
+        record_member_activity(con, str(member["id"]), "login", occurred_at=now)
     response = JSONResponse(
         {
             "ok": bool(member["email_verified_at"]),
@@ -5572,7 +5840,8 @@ def complete_passkey_login(payload: PasskeyResponse, request: Request) -> JSONRe
             (int(verified.new_sign_count), now, credential_id),
         )
         token = issue_device_credential(con, credential["member_id"])
-        con.execute("UPDATE members SET last_seen_at=? WHERE id=?", (now, credential["member_id"]))
+        con.execute("UPDATE members SET last_seen_at=?, last_login_at=? WHERE id=?", (now, now, credential["member_id"]))
+        record_member_activity(con, str(credential["member_id"]), "login", occurred_at=now)
     response = JSONResponse({"ok": True})
     set_session_cookie(response, request, token)
     return response
@@ -5960,6 +6229,47 @@ def unpublish_profile(
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="No owned public profile was found at that address.")
     return {"ok": True}
+
+
+@app.get("/admin", response_class=FileResponse)
+def admin_dashboard_page() -> FileResponse:
+    return FileResponse(
+        CLOUD_STATIC / "admin.html",
+        media_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/admin/login")
+def login_admin(payload: AdminLogin, request: Request) -> JSONResponse:
+    settings = admin_settings()
+    if settings is None:
+        raise HTTPException(status_code=503, detail="The operator dashboard is not configured.")
+    username, password_hash = settings
+    attempted_identity = f"admin:{payload.username.strip().casefold()[:160]}"
+    with connect() as con:
+        enforce_login_rate_limit(con, request, attempted_identity)
+        valid = hmac.compare_digest(payload.username.strip(), username) and verify_password(payload.password, password_hash)
+        record_login_attempt(con, request, attempted_identity, valid)
+    if not valid:
+        raise HTTPException(status_code=401, detail="Operator username or password is incorrect.")
+    response = JSONResponse({"ok": True})
+    set_admin_session_cookie(response, request, issue_admin_session(password_hash))
+    return response
+
+
+@app.post("/api/admin/logout")
+def logout_admin(request: Request) -> JSONResponse:
+    authenticated_admin(request)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/admin/dashboard")
+def admin_dashboard_data(request: Request) -> dict[str, Any]:
+    authenticated_admin(request)
+    return admin_dashboard_payload()
 
 
 @app.get("/api/public/{slug}")

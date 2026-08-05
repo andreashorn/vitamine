@@ -81,6 +81,8 @@ class CloudMigrationTests(unittest.TestCase):
         self.assertIn("zotero_oauth_connections", tables)
         self.assertIn("password_reset_tokens", tables)
         self.assertIn("passkey_credentials", tables)
+        self.assertIn("member_activity_events", tables)
+        self.assertIn("last_login_at", self.table_columns("members"))
 
     def test_version_seven_usage_is_normalized_to_at_cost_and_trialed(self):
         self.seed_version(7)

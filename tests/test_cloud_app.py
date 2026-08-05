@@ -17,6 +17,7 @@ from vitamine.cloud_app import (
     claim_next_background_job,
     create_blank_workspace_database,
     execute_background_job,
+    hash_password,
     fail_background_job,
     register_workspace,
     workspace_worker_is_running,
@@ -1279,6 +1280,47 @@ class CloudAppTests(unittest.TestCase):
             json={"display_name": "Admin"},
         )
         self.assertEqual(response.status_code, 422)
+
+    def test_operator_dashboard_uses_separate_login_and_anonymized_usage(self):
+        self.create_account(email="private-member@example.org")
+        password_login = self.client.post(
+            "/api/account/login",
+            json={"email": "private-member@example.org", "password": "correct-horse-battery-staple"},
+        )
+        self.assertEqual(password_login.status_code, 200, password_login.text)
+        with patch.dict(
+            os.environ,
+            {
+                "VITAMINE_ADMIN_USERNAME": "operator",
+                "VITAMINE_ADMIN_PASSWORD_HASH": hash_password("admin-correct-horse-password"),
+            },
+        ):
+            page = self.client.get("/admin")
+            self.assertEqual(page.status_code, 200, page.text)
+            self.assertIn("Operator dashboard", page.text)
+            self.assertEqual(self.client.get("/api/admin/dashboard").status_code, 401)
+            denied = self.client.post(
+                "/api/admin/login",
+                json={"username": "operator", "password": "incorrect-password"},
+            )
+            self.assertEqual(denied.status_code, 401)
+            login = self.client.post(
+                "/api/admin/login",
+                json={"username": "operator", "password": "admin-correct-horse-password"},
+            )
+            self.assertEqual(login.status_code, 200, login.text)
+            dashboard = self.client.get("/api/admin/dashboard")
+            self.assertEqual(dashboard.status_code, 200, dashboard.text)
+            serialized = json.dumps(dashboard.json())
+            self.assertNotIn("private-member@example.org", serialized)
+            self.assertNotIn("tester@example.org", serialized)
+            member = dashboard.json()["members"][0]
+            self.assertTrue(member["reference"].startswith("Member "))
+            self.assertEqual(member["logins_since_dashboard_enabled"], 1)
+            self.assertNotIn("id", member)
+            self.assertNotIn("email", member)
+            self.assertEqual(self.client.post("/api/admin/logout").status_code, 200)
+            self.assertEqual(self.client.get("/api/admin/dashboard").status_code, 401)
 
 
 if __name__ == "__main__":

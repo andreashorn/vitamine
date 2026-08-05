@@ -504,6 +504,31 @@ same environment wrapper and `-m vitamine.scripts.manage_cloud premium-accounts`
 Token counts and costs are operational measurements only. They are not shown
 to users and do not represent a prepaid balance.
 
+## Operator usage dashboard
+
+The separate operator dashboard lives at `https://vitamine.cloud/admin`. It is
+disabled unless `/etc/vitamine-cloud.env` sets both
+`VITAMINE_ADMIN_USERNAME` and `VITAMINE_ADMIN_PASSWORD_HASH`. The password
+value must be a VitaMine scrypt digest, not a plaintext password; treat the
+digest as a secret and never commit it or paste it into logs or chat. The
+dashboard has its own HTTP-only, `SameSite=Strict`, eight-hour session cookie
+and does not accept a normal VitaMine member session.
+
+It returns only a stable dashboard pseudonym per account, account age,
+relative inactivity, login/event counts, background-job counts, LLM token
+totals, model-call totals, and provider-cost totals. It deliberately excludes
+email addresses, names, raw account/CV/job identifiers, CV content,
+filenames, prompts, outputs, tokens, and credentials. Successful password and
+passkey logins are recorded in the privacy-minimal `member_activity_events`
+ledger from cloud schema migration 14 onward; historical job and LLM ledgers
+remain available for their existing retention periods.
+
+Before deploying migration 14, follow the normal cloud schema migration
+procedure above: ensure no jobs are running and verify a fresh PostgreSQL
+backup. After deployment, configure the admin digest in the protected service
+environment, restart the service, and verify `/admin` signs in and
+`/api/admin/dashboard` returns anonymized JSON only.
+
 Schema migration 8 added the unencrypted central Premium Features Account
 ledger. Schema migration 12 retires promotional credits and normalizes the
 ledger to the underlying OpenAI cost with no markup. Usage events snapshot the
