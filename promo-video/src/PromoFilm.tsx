@@ -65,6 +65,12 @@ const Topline: React.FC<{light?: boolean; label: string}> = ({light, label}) => 
   </div>
 );
 
+const LandingArrowhead: React.FC<{x: number; y: number; angle: number; arrival: number; color: string; length: number; width: number}> = ({x, y, angle, arrival, color, length, width}) => {
+  if (arrival <= 0) return null;
+  const scale = interpolate(arrival, [0, .42, .76, 1], [.25, 1.24, .92, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+  return <path d={`M0 0 L-${length} -${width} L-${length} ${width} Z`} fill={color} opacity={Math.min(1, arrival * 4)} transform={`translate(${x} ${y}) rotate(${angle}) scale(${scale})`} />;
+};
+
 const RequestCard: React.FC<{x: number; y: number; label: string; text: string; visible: number}> = ({x, y, label, text, visible}) => (
   <div style={{position: 'absolute', left: `${x}%`, top: `${y}%`, width: 278, padding: '18px 20px', borderRadius: 16, background: 'rgba(255,255,255,.94)', boxShadow: '0 18px 45px rgba(23,45,41,.15)', opacity: visible, transform: `translateY(${(1 - visible) * -40}px) rotate(${(x - 50) / 18}deg)`}}>
     <div style={{color: colors.green, fontSize: 14, fontWeight: 800, letterSpacing: '.1em', textTransform: 'uppercase'}}>{label}</div>
@@ -118,7 +124,7 @@ const ImportScene: React.FC<{frame: number}> = ({frame}) => {
         <div style={{display: 'grid', placeItems: 'center', width: 48, height: 48, borderRadius: 7, background: '#2b579a', color: colors.white, fontWeight: 900}}>W</div><div style={{marginTop: 24, fontWeight: 800}}>academic-cv.docx</div><div style={{height: 7, marginTop: 25, borderRadius: 9, background: '#dbe4e1'}} /><div style={{height: 7, marginTop: 12, width: '74%', borderRadius: 9, background: '#dbe4e1'}} /><div style={{height: 7, marginTop: 12, borderRadius: 9, background: '#dbe4e1'}} />
       </div>
       <div style={{position: 'absolute', right: 55, top: 225, display: 'grid', placeItems: 'center', width: 235, height: 235, border: '2px solid rgba(130,212,184,.45)', borderRadius: '50%', background: 'rgba(130,212,184,.1)', boxShadow: '0 0 85px rgba(85,199,157,.24)', color: colors.white, transform: `scale(${interpolate(progress(local, 108, 70), [0, 1], [.75, 1])})`}}><div style={{textAlign: 'center'}}><div style={{fontSize: 52}}>◫</div><b style={{fontSize: 28}}>.vitamine</b><div style={{marginTop: 7, color: '#aecbc1', fontSize: 15}}>your portable database</div></div></div>
-      {chips.map((chip, index) => <div key={chip} style={{position: 'absolute', left: [10, 340, 435, 15, 290, 430, 22, 285, 472, 40, 265, 455][index], top: [585, 70, 530, 665, 625, 680, 120, 185, 305, 735, 744, 605][index], border: '1px solid rgba(255,255,255,.18)', borderRadius: 999, padding: '11px 16px', background: 'rgba(255,255,255,.09)', color: colors.white, fontSize: 16, fontWeight: 700, opacity: enter(local, 145 + index * 8), transform: `translateY(${(1 - enter(local, 145 + index * 8)) * 28}px)`}}>{chip}</div>)}
+      {chips.map((chip, index) => <div key={chip} style={{position: 'absolute', left: [10, 340, 435, 15, 290, 430, 22, 285, 472, 40, 265, 455][index], top: [585, 70, 530, 665, 625, 680, 120, 185, 478, 735, 744, 605][index], border: '1px solid rgba(255,255,255,.18)', borderRadius: 999, padding: '11px 16px', background: 'rgba(255,255,255,.09)', color: colors.white, fontSize: 16, fontWeight: 700, opacity: enter(local, 145 + index * 8), transform: `translateY(${(1 - enter(local, 145 + index * 8)) * 28}px)`}}>{chip}</div>)}
     </div>
   </Frame>;
 };
@@ -128,15 +134,27 @@ const SyncScene: React.FC<{frame: number}> = ({frame}) => {
   const local = frame - start;
   const opacity = fade(frame, start, sceneStarts[4]);
   const nodes = [{x: 135, y: 450, text: 'iD', color: '#6aaf38'}, {x: 450, y: 105, text: 'Scholar', color: '#4774b8'}, {x: 765, y: 450, text: 'Z', color: '#aa3330'}, {x: 450, y: 790, text: 'OpenAlex', color: '#7765a7'}];
-  const links = ['M193 450 C275 410 325 420 370 440', 'M450 163 C430 260 438 340 445 370', 'M707 450 C620 420 570 425 530 445', 'M450 732 C470 650 462 580 455 530'];
+  const links = [
+    {d: 'M193 450 C245 410 278 422 310 450', x: 310, y: 450, angle: 0},
+    {d: 'M450 163 C430 236 438 278 450 310', x: 450, y: 310, angle: 90},
+    {d: 'M707 450 C640 420 612 425 590 450', x: 590, y: 450, angle: 180},
+    {d: 'M450 719 C470 650 462 620 450 590', x: 450, y: 590, angle: -90},
+  ];
   return <Frame background={colors.mint} opacity={opacity}>
     <Topline label="Always up-to-date" />
     <div style={{position: 'absolute', left: 100, top: 300}}><Headline eyebrow="Your academic ecosystem" title={<>Keep your record up-to-date.<br />Effortlessly.</>} body="Connect VitaMine with the scholarly services you already trust." /></div>
     <div style={{position: 'absolute', left: 955, top: 80, width: 900, height: 900}}>
       <svg viewBox="0 0 900 900" width="100%" height="100%" style={{overflow: 'visible'}}>
         <circle cx="450" cy="450" r="180" fill="none" stroke="rgba(23,107,91,.18)" strokeWidth="2" /><circle cx="450" cy="450" r="345" fill="none" stroke="rgba(23,107,91,.18)" strokeWidth="2" />
-        <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill={colors.green} /></marker></defs>
-        {links.map((d, index) => { const visible = progress(local, 20 + index * 28, 80); return <path key={d} d={d} fill="none" stroke={colors.green} strokeWidth="9" strokeLinecap="round" strokeDasharray="1" pathLength="1" strokeDashoffset={1 - visible} markerEnd="url(#arrow)" />; })}
+        {links.map((link, index) => {
+          const routeStart = 20 + index * 28;
+          const visible = progress(local, routeStart, 80);
+          const arrowArrival = progress(local, routeStart + 80, 16);
+          return <React.Fragment key={link.d}>
+            <path d={link.d} fill="none" stroke={colors.green} strokeWidth="9" strokeLinecap="round" strokeDasharray="1" pathLength="1" strokeDashoffset={1 - visible} />
+            <LandingArrowhead x={link.x} y={link.y} angle={link.angle} arrival={arrowArrival} color={colors.green} length={29} width={16} />
+          </React.Fragment>;
+        })}
         <circle cx="450" cy="450" r="126" fill={colors.white} style={{filter: 'drop-shadow(0 24px 35px rgba(23,67,58,.16))'}} />
         <text x="450" y="440" textAnchor="middle" fill={colors.green} fontSize="52">▤</text><text x="450" y="485" textAnchor="middle" fill={colors.ink} fontSize="22" fontWeight="800">Your living CV</text>
         {nodes.map((node, index) => <g key={node.text} opacity={enter(local, 13 + index * 20)} transform={`translate(${node.x} ${node.y}) scale(${enter(local, 13 + index * 20)})`}><circle r={node.text === 'OpenAlex' ? 67 : 54} fill={colors.white} style={{filter: 'drop-shadow(0 16px 24px rgba(23,67,58,.14))'}} /><text y="7" textAnchor="middle" fill={node.color} fontSize={node.text.length > 3 ? 17 : 30} fontWeight="800">{node.text}</text></g>)}
@@ -202,14 +220,30 @@ const MapScene: React.FC<{frame: number}> = ({frame}) => {
   const start = sceneStarts[7];
   const local = frame - start;
   const opacity = fade(frame, start, sceneStarts[8]);
-  const routes = ['M519 109 Q405 35 294 137', 'M519 109 Q702 45 888 151', 'M519 109 Q712 232 919 342', 'M519 109 Q500 235 551 344', 'M294 137 Q202 230 304 342', 'M294 137 Q222 104 165 143', 'M888 151 Q805 238 708 278'];
+  const routes = [
+    {d: 'M519 109 Q405 35 305 127', x: 305, y: 127, angle: 137},
+    {d: 'M519 109 Q702 45 875 144', x: 875, y: 144, angle: 30},
+    {d: 'M519 109 Q712 232 906 335', x: 906, y: 335, angle: 28},
+    {d: 'M519 109 Q500 235 545 330', x: 545, y: 330, angle: 65},
+    {d: 'M294 137 Q202 230 294 331', x: 294, y: 331, angle: 46},
+    {d: 'M294 137 Q222 104 177 135', x: 177, y: 135, angle: 146},
+    {d: 'M888 151 Q805 238 722 272', x: 722, y: 272, angle: 158},
+  ];
   const points = [[519, 109], [294, 137], [888, 151], [919, 342], [551, 344], [304, 342], [165, 143], [708, 278]];
   return <Frame background="#13242c" opacity={opacity}>
     <Topline light label="Your network, visualized" />
     <div style={{position: 'absolute', left: 100, top: 300}}><Headline light eyebrow="Collaboration without borders" title={<>See where your<br />research connects.</>} body="Explore the people and places behind your academic network." /></div>
     <div style={{position: 'absolute', right: 70, top: 210, width: 950, height: 590}}>
       <Img src={staticFile('world-map.svg')} style={{position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain'}} />
-      <svg viewBox="0 0 1000 500" width="100%" height="100%" style={{position: 'absolute', inset: 0}}><defs><marker id="mapArrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 8 4 0 8Z" fill={colors.bright}/></marker></defs>{routes.map((route, index) => <path key={route} d={route} fill="none" stroke={colors.bright} strokeWidth="2.5" strokeLinecap="round" pathLength="1" strokeDasharray="1" strokeDashoffset={1 - progress(local, 25 + Math.floor(index / 2) * 34, 55)} markerEnd="url(#mapArrow)" />)}{points.map(([x, y], index) => <circle key={`${x}-${y}`} cx={x} cy={y} r={index === 0 ? 8 : 6} fill="#d7f3e9" stroke={colors.bright} strokeWidth="4" opacity={enter(local, index * 13)} />)}</svg>
+      <svg viewBox="0 0 1000 500" width="100%" height="100%" style={{position: 'absolute', inset: 0}}>{routes.map((route, index) => {
+        const routeStart = 25 + Math.floor(index / 2) * 34;
+        const visible = progress(local, routeStart, 55);
+        const arrowArrival = progress(local, routeStart + 55, 14);
+        return <React.Fragment key={route.d}>
+          <path d={route.d} fill="none" stroke={colors.bright} strokeWidth="2.5" strokeLinecap="round" pathLength="1" strokeDasharray="1" strokeDashoffset={1 - visible} />
+          <LandingArrowhead x={route.x} y={route.y} angle={route.angle} arrival={arrowArrival} color={colors.bright} length={15} width={8} />
+        </React.Fragment>;
+      })}{points.map(([x, y], index) => <circle key={`${x}-${y}`} cx={x} cy={y} r={index === 0 ? 8 : 6} fill="#d7f3e9" stroke={colors.bright} strokeWidth="4" opacity={enter(local, index * 13)} />)}</svg>
       <div style={{position: 'absolute', right: 40, bottom: 22, borderRadius: 15, padding: '16px 20px', background: 'rgba(16,37,44,.86)', color: colors.white}}><b style={{fontSize: 24}}>18 collaborators</b><span style={{display: 'block', marginTop: 4, color: '#9bb1b7'}}>across the world</span></div>
     </div>
   </Frame>;
