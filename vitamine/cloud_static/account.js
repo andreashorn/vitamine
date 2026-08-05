@@ -874,6 +874,7 @@ function initializeFeatureStory() {
       const localProgress = stagedProgress(syncProgress, syncStarts[source - 1], .42);
       line.style.strokeDashoffset = String(1 - localProgress);
       line.style.strokeWidth = String(2.5 + (Math.sin(localProgress * Math.PI * 5) * .65));
+      line.style.markerEnd = localProgress >= .96 ? "url(#syncArrow)" : "none";
     });
     syncChapter?.querySelectorAll("[data-sync-pulse]").forEach((pulse) => {
       const source = Number(pulse.dataset.syncPulse);
@@ -963,6 +964,7 @@ function initializeFeatureStory() {
     const importDocument = $(".import-document");
     if (importDocument) { importDocument.style.opacity = "1"; importDocument.style.transform = "none"; }
     document.querySelectorAll(".sync-lines path, .chart-line").forEach((line) => { line.style.strokeDashoffset = "0"; });
+    document.querySelectorAll(".sync-lines [data-sync-source]").forEach((line) => { line.style.markerEnd = "url(#syncArrow)"; });
     document.querySelectorAll(".cv-document-icon i").forEach((line) => { line.style.transform = "scaleX(1)"; });
     const chartArea = $(".chart-area");
     if (chartArea) chartArea.style.opacity = ".75";

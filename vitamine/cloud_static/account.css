@@ -340,7 +340,7 @@ h1, h2 { color: var(--ink); }
 .feature-sync { background: #dceee8; }
 .sync-visual { min-height: 520px; }
 .sync-lines { position: absolute; inset: 0; width: 100%; height: 100%; }
-.sync-lines path[data-sync-source] { fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linecap:round; stroke-dasharray:1; stroke-dashoffset:1; marker-end:url(#syncArrow); filter:drop-shadow(0 0 3px rgba(23,107,91,.25)); }
+.sync-lines path[data-sync-source] { fill:none; stroke:var(--accent); stroke-width:2.5; stroke-linecap:round; stroke-dasharray:1; stroke-dashoffset:1; filter:drop-shadow(0 0 3px rgba(23,107,91,.25)); }
 .sync-lines marker path { fill:var(--accent); }.sync-lines circle { fill:#65c9a7; stroke:#dff7ef; stroke-width:3; opacity:0; filter:drop-shadow(0 0 7px rgba(35,160,119,.8)); }
 .sync-orbit { position: absolute; inset: 50%; border: 1px solid rgba(23,107,91,.22); border-radius: 50%; transform: translate(-50%,-50%); }
 .orbit-one { width: 310px; height: 310px; }.orbit-two { width: 470px; height: 470px; }
