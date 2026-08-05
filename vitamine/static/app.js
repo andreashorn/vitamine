@@ -72,6 +72,14 @@ const state = {
     origin: null,
     drag: null,
   },
+  citationExplorer: {
+    data: null,
+    sort: "citations",
+    firstLastOnly: false,
+    selectedPublication: null,
+    citingWorks: [],
+    nextCitingPage: null,
+  },
   activity: {
     timer: null,
     startedAt: null,
@@ -2141,8 +2149,8 @@ function renderCitationProfile(profile) {
     <strong>${formatMetricNumber(all.citations)}</strong>
     <strong>${formatMetricNumber(recent.citations)}</strong>
     <span>h-index</span>
-    <strong>${formatMetricNumber(all.h_index)}</strong>
-    <strong>${formatMetricNumber(recent.h_index)}</strong>
+    <button type="button" class="citationMetricButton" data-h-index-scope="all" title="View h-index over time">${formatMetricNumber(all.h_index)}</button>
+    <button type="button" class="citationMetricButton" data-h-index-scope="all" title="View h-index over time">${formatMetricNumber(recent.h_index)}</button>
     <span>i10-index</span>
     <strong>${formatMetricNumber(all.i10_index)}</strong>
     <strong>${formatMetricNumber(recent.i10_index)}</strong>
@@ -2154,8 +2162,8 @@ function renderCitationProfile(profile) {
     <strong>${formatMetricNumber(firstLast.citations)}</strong>
     <strong>${formatMetricNumber(firstLastRecent.citations)}</strong>
     <span>h-index</span>
-    <strong>${formatMetricNumber(firstLast.h_index)}</strong>
-    <strong>${formatMetricNumber(firstLastRecent.h_index)}</strong>
+    <button type="button" class="citationMetricButton" data-h-index-scope="first_last" title="View h-index over time">${formatMetricNumber(firstLast.h_index)}</button>
+    <button type="button" class="citationMetricButton" data-h-index-scope="first_last" title="View h-index over time">${formatMetricNumber(firstLastRecent.h_index)}</button>
     <span>i10-index</span>
     <strong>${formatMetricNumber(firstLast.i10_index)}</strong>
     <strong>${formatMetricNumber(firstLastRecent.i10_index)}</strong>
@@ -2245,6 +2253,171 @@ function renderCitationProfile(profile) {
       item.addEventListener("click", () => showDetail(item));
     });
   }
+  table.querySelectorAll("[data-h-index-scope]").forEach((button) => {
+    button.addEventListener("click", () => openHIndexHistory(button.dataset.hIndexScope));
+  });
+}
+
+async function openCitationExplorer() {
+  const dialog = $("#citationExplorerDialog");
+  if (!dialog) return;
+  if (!state.citationExplorer.data) {
+    $("#citationExplorerList").innerHTML = `<p class="emptyState">Loading citation profile…</p>`;
+    dialog.showModal();
+    try {
+      state.citationExplorer.data = await api("/api/citation-profile/publications");
+    } catch (error) {
+      $("#citationExplorerList").innerHTML = `<p class="emptyState">${escapeHtml(error.message || "Citation profile could not load.")}</p>`;
+      return;
+    }
+  } else if (!dialog.open) {
+    dialog.showModal();
+  }
+  renderCitationExplorer();
+}
+
+function citationExplorerPublications() {
+  const rows = state.citationExplorer.data?.publications || [];
+  const filtered = state.citationExplorer.firstLastOnly
+    ? rows.filter((row) => ["first", "last", "first_last"].includes(row.authorship))
+    : [...rows];
+  return filtered.sort((left, right) => {
+    if (state.citationExplorer.sort === "year") {
+      const yearDifference = Number(right.year || 0) - Number(left.year || 0);
+      if (yearDifference) return yearDifference;
+    }
+    const citationDifference = Number(right.citations || 0) - Number(left.citations || 0);
+    if (citationDifference) return citationDifference;
+    return String(left.title || left.raw_citation || "").localeCompare(String(right.title || right.raw_citation || ""));
+  });
+}
+
+function renderCitationExplorer() {
+  const container = $("#citationExplorerList");
+  if (!container) return;
+  const rows = citationExplorerPublications();
+  const hIndex = rows.reduce((score, row, index) => Number(row.citations || 0) >= index + 1 ? index + 1 : score, 0);
+  const summary = $("#citationExplorerSummary");
+  const hint = $("#citationExplorerHint");
+  if (summary) summary.textContent = `${formatMetricNumber(rows.length)} publications with OpenAlex citation data`;
+  if (hint) {
+    hint.textContent = state.citationExplorer.sort === "citations"
+      ? `The teal divider marks the ${formatMetricNumber(hIndex)} papers that currently meet this h-index.`
+      : "Publication year order does not show an h-index divider. Switch to citations to see it.";
+  }
+  document.querySelectorAll("[data-citation-sort]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.citationSort === state.citationExplorer.sort));
+  });
+  const toggle = $("#citationFirstLastOnly");
+  if (toggle) toggle.checked = state.citationExplorer.firstLastOnly;
+  if (!rows.length) {
+    container.innerHTML = `<p class="emptyState">No publications with OpenAlex citation data are available yet.</p>`;
+    return;
+  }
+  const ordered = rows.map((row, index) => {
+    const title = row.title || row.raw_citation || "Untitled publication";
+    const authors = row.authors ? escapeHtml(row.authors) : "Authors unavailable";
+    const venueParts = [row.venue, row.year].filter(Boolean).map(escapeHtml);
+    const marker = state.citationExplorer.sort === "citations" && hIndex && index + 1 === hIndex
+      ? `<div class="citationHIndexMarker"><span>h-index ${formatMetricNumber(hIndex)}</span></div>`
+      : "";
+    return `<article class="citationPublicationRow">
+      <div class="citationPublicationMain">
+        <h3>${escapeHtml(title)}</h3>
+        <p>${authors}${venueParts.length ? ` · ${venueParts.join(" · ")}` : ""}</p>
+      </div>
+      <button type="button" class="citationCountButton" data-cited-publication-id="${Number(row.id)}" aria-label="Show works citing ${escapeHtml(title)}">
+        <strong>${formatMetricNumber(row.citations)}</strong><span>Citations</span>
+      </button>
+    </article>${marker}`;
+  });
+  container.innerHTML = ordered.join("");
+  container.querySelectorAll("[data-cited-publication-id]").forEach((button) => {
+    button.addEventListener("click", () => openCitingWorks(Number(button.dataset.citedPublicationId)));
+  });
+}
+
+function renderPaperCitationHistory(publication) {
+  const chart = $("#paperCitationHistoryChart");
+  if (!chart) return;
+  const years = publication?.citation_years || [];
+  const max = Math.max(...years.map((row) => Number(row.citations || 0)), 0);
+  if (!years.length || !max) {
+    chart.innerHTML = `<p class="emptyState">No annual OpenAlex citation counts are available for this paper yet.</p>`;
+    return;
+  }
+  chart.innerHTML = `<div class="paperCitationBars">${years.map((row) => {
+    const height = Math.max(5, Number(row.citations || 0) / max * 100);
+    return `<div class="paperCitationBarItem" title="${escapeHtml(row.year)}: ${formatMetricNumber(row.citations)} citations">
+      <span>${formatMetricNumber(row.citations)}</span><i style="height:${height.toFixed(1)}%"></i><strong>${escapeHtml(row.year)}</strong>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function openCitingWorks(publicationId, page = 1) {
+  const publication = (state.citationExplorer.data?.publications || []).find((row) => Number(row.id) === Number(publicationId));
+  if (!publication) return;
+  const dialog = $("#citationCitedByDialog");
+  if (!dialog) return;
+  if (page === 1) {
+    state.citationExplorer.selectedPublication = publication;
+    state.citationExplorer.citingWorks = [];
+    $("#citationCitedByTitle").textContent = publication.title || publication.raw_citation || "Publication";
+    renderPaperCitationHistory(publication);
+    $("#citationCitedBySummary").textContent = "Loading current citing works from OpenAlex…";
+    $("#citationCitedByList").innerHTML = `<p class="emptyState">Loading citing works…</p>`;
+    if (!dialog.open) dialog.showModal();
+  }
+  try {
+    const data = await api(`/api/citation-profile/publications/${encodeURIComponent(publicationId)}/cited-by?page=${encodeURIComponent(page)}`);
+    state.citationExplorer.citingWorks = page === 1 ? (data.works || []) : [...state.citationExplorer.citingWorks, ...(data.works || [])];
+    state.citationExplorer.nextCitingPage = data.next_page;
+    renderCitingWorks(data.total, data.source);
+  } catch (error) {
+    $("#citationCitedBySummary").textContent = error.message || "Citing works could not load.";
+    if (page === 1) $("#citationCitedByList").innerHTML = `<p class="emptyState">Try again in a moment.</p>`;
+  }
+}
+
+function renderCitingWorks(total, source) {
+  const works = state.citationExplorer.citingWorks;
+  const list = $("#citationCitedByList");
+  const summary = $("#citationCitedBySummary");
+  const more = $("#loadMoreCitingWorks");
+  if (summary) summary.textContent = `${formatMetricNumber(works.length)} of ${formatMetricNumber(total || works.length)} citing works shown · live data from ${source || "OpenAlex"}`;
+  if (list) list.innerHTML = works.length ? works.map((work) => {
+    const metadata = [work.venue, work.year].filter(Boolean).map(escapeHtml).join(" · ");
+    return `<article class="citationPublicationRow citingWorkRow">
+      <div class="citationPublicationMain"><h3>${escapeHtml(work.title || "Untitled work")}</h3>
+        <p>${escapeHtml(work.authors || "Authors unavailable")}${metadata ? ` · ${metadata}` : ""}</p></div>
+      <span class="citingWorkCount"><strong>${formatMetricNumber(work.citations)}</strong><span>Citations</span></span>
+    </article>`;
+  }).join("") : `<p class="emptyState">OpenAlex has no citing works to show for this paper yet.</p>`;
+  if (more) more.hidden = !state.citationExplorer.nextCitingPage;
+}
+
+async function openHIndexHistory(scope = "all") {
+  if (!state.citationExplorer.data) {
+    try {
+      state.citationExplorer.data = await api("/api/citation-profile/publications");
+    } catch (error) {
+      setStatus(error.message || "Citation profile could not load.", { error: true });
+      return;
+    }
+  }
+  const history = state.citationExplorer.data?.h_index_history || [];
+  const dialog = $("#hIndexHistoryDialog");
+  const chart = $("#hIndexHistoryChart");
+  if (!dialog || !chart) return;
+  const label = scope === "first_last" ? "first/last-author h-index" : "h-index";
+  $("#hIndexHistoryTitle").textContent = `${label} over time`;
+  const max = Math.max(...history.map((row) => Number(row[scope] || 0)), 0);
+  chart.innerHTML = history.length && max
+    ? `<div class="hIndexBars">${history.map((row) => `<div class="hIndexBarItem" title="${escapeHtml(row.year)}: ${formatMetricNumber(row[scope])}">
+        <span>${formatMetricNumber(row[scope])}</span><i style="height:${Math.max(5, Number(row[scope] || 0) / max * 100).toFixed(1)}%"></i><strong>${escapeHtml(row.year)}</strong>
+      </div>`).join("")}</div>`
+    : `<p class="emptyState">Annual OpenAlex citation counts are needed before this history can be calculated.</p>`;
+  if (!dialog.open) dialog.showModal();
 }
 
 const MAP_WIDTH = 1000;
@@ -4937,6 +5110,35 @@ async function init() {
   });
   $("#workspacePlusButton")?.addEventListener("click", toggleWorkspaceDeveloperPlus);
   $("#closeWorkspacePlusDialog")?.addEventListener("click", () => $("#workspacePlusDialog")?.close());
+  $("#exploreCitations")?.addEventListener("click", openCitationExplorer);
+  $("#closeCitationExplorer")?.addEventListener("click", () => $("#citationExplorerDialog")?.close());
+  $("#citationExplorerDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("#citationExplorerDialog")) $("#citationExplorerDialog")?.close();
+  });
+  document.querySelectorAll("[data-citation-sort]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.citationExplorer.sort = button.dataset.citationSort || "citations";
+      renderCitationExplorer();
+    });
+  });
+  $("#citationFirstLastOnly")?.addEventListener("change", (event) => {
+    state.citationExplorer.firstLastOnly = event.currentTarget.checked;
+    renderCitationExplorer();
+  });
+  $("#closeCitationCitedBy")?.addEventListener("click", () => $("#citationCitedByDialog")?.close());
+  $("#citationCitedByDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("#citationCitedByDialog")) $("#citationCitedByDialog")?.close();
+  });
+  $("#loadMoreCitingWorks")?.addEventListener("click", () => {
+    const publication = state.citationExplorer.selectedPublication;
+    if (publication && state.citationExplorer.nextCitingPage) {
+      openCitingWorks(publication.id, state.citationExplorer.nextCitingPage);
+    }
+  });
+  $("#closeHIndexHistory")?.addEventListener("click", () => $("#hIndexHistoryDialog")?.close());
+  $("#hIndexHistoryDialog")?.addEventListener("click", (event) => {
+    if (event.target === $("#hIndexHistoryDialog")) $("#hIndexHistoryDialog")?.close();
+  });
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });

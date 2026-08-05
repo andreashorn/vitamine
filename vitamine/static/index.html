@@ -297,7 +297,10 @@
             <div class="citationProfile" aria-label="Citation profile from current publications">
               <div class="citationProfileHeader">
                 <h3>Citation Profile</h3>
-                <span id="citationProfileCoverage"></span>
+                <div class="citationProfileActions">
+                  <span id="citationProfileCoverage"></span>
+                  <button id="exploreCitations" type="button">Explore citations</button>
+                </div>
               </div>
               <div class="citationProfileBody">
                 <div id="citationProfileTable" class="citationProfileTable"></div>
@@ -903,6 +906,51 @@
     </div>
   </dialog>
 
-  <script src="/static/app.js?v=20260805-managed-llm-onboarding"></script>
+  <dialog id="citationExplorerDialog" class="citationExplorerDialog">
+    <section class="citationExplorerPanel">
+      <div class="dialogHeader">
+        <div><h2>Explore citations</h2><p id="citationExplorerSummary"></p></div>
+        <button id="closeCitationExplorer" type="button" aria-label="Close citation explorer">Close</button>
+      </div>
+      <div class="citationExplorerControls">
+        <div class="citationSortControl" role="group" aria-label="Publication order">
+          <span>Order by</span>
+          <button type="button" data-citation-sort="citations" aria-pressed="true">Citations</button>
+          <button type="button" data-citation-sort="year" aria-pressed="false">Year</button>
+        </div>
+        <label class="inlineCheck"><input id="citationFirstLastOnly" type="checkbox"> First/last-author papers only</label>
+      </div>
+      <p id="citationExplorerHint" class="citationExplorerHint"></p>
+      <div id="citationExplorerList" class="citationExplorerList" aria-live="polite"></div>
+    </section>
+  </dialog>
+
+  <dialog id="citationCitedByDialog" class="citationExplorerDialog citationCitedByDialog">
+    <section class="citationExplorerPanel">
+      <div class="dialogHeader">
+        <div><h2>Cited by</h2><p id="citationCitedByTitle"></p></div>
+        <button id="closeCitationCitedBy" type="button" aria-label="Close citing works">Close</button>
+      </div>
+      <section class="paperCitationHistory">
+        <h3>Citations per year</h3>
+        <div id="paperCitationHistoryChart"></div>
+      </section>
+      <p id="citationCitedBySummary" class="citationExplorerHint"></p>
+      <div id="citationCitedByList" class="citationExplorerList citationCitedByList" aria-live="polite"></div>
+      <div class="formActions"><button id="loadMoreCitingWorks" type="button" hidden>Load more</button></div>
+    </section>
+  </dialog>
+
+  <dialog id="hIndexHistoryDialog" class="citationExplorerDialog hIndexHistoryDialog">
+    <section class="citationExplorerPanel compactCitationPanel">
+      <div class="dialogHeader">
+        <div><h2 id="hIndexHistoryTitle">h-index over time</h2><p>Calculated from the annual OpenAlex citation counts saved for this CV.</p></div>
+        <button id="closeHIndexHistory" type="button" aria-label="Close h-index history">Close</button>
+      </div>
+      <div id="hIndexHistoryChart" class="hIndexHistoryChart"></div>
+    </section>
+  </dialog>
+
+  <script src="/static/app.js?v=20260805-citation-explorer"></script>
 </body>
 </html>

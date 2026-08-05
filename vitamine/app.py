@@ -2468,6 +2468,150 @@ def metrics() -> dict[str, Any]:
     }
 
 
+def citation_profile_publication_rows(con: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Return the citation-bearing publications that drive the profile views."""
+    return rows_dict(
+        con.execute(
+            """
+            SELECT id, title, raw_citation, authors, year, venue, doi,
+                   openalex_work_id, COALESCE(openalex_cited_by_count, 0) AS citations,
+                   openalex_counts_by_year_json
+            FROM publications
+            WHERE COALESCE(suppress_display, 0) = 0
+              AND openalex_cited_by_count IS NOT NULL
+            """
+        ).fetchall()
+    )
+
+
+def citation_counts_by_year(value: Any) -> dict[int, int]:
+    """Normalize OpenAlex's per-work annual citation snapshot."""
+    try:
+        items = json.loads(value or "[]")
+    except (TypeError, json.JSONDecodeError):
+        items = []
+    counts: dict[int, int] = {}
+    for item in items if isinstance(items, list) else []:
+        try:
+            year = int(item.get("year"))
+            citations = max(0, int(item.get("cited_by_count") or 0))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if 1900 <= year <= 3000:
+            counts[year] = citations
+    return counts
+
+
+def citation_h_index_history(rows: list[dict[str, Any]]) -> list[dict[str, int]]:
+    """Calculate cumulative all- and first/last-author h-indexes by calendar year."""
+    years = sorted({year for row in rows for year in citation_counts_by_year(row.get("openalex_counts_by_year_json"))})
+    if not years:
+        return []
+    all_running = [0] * len(rows)
+    first_last_running = [0] * len(rows)
+    history: list[dict[str, int]] = []
+    for year in range(years[0], years[-1] + 1):
+        for index, row in enumerate(rows):
+            annual = citation_counts_by_year(row.get("openalex_counts_by_year_json")).get(year, 0)
+            all_running[index] += annual
+            if row.get("authorship") in {"first", "last", "first_last"}:
+                first_last_running[index] += annual
+        history.append(
+            {
+                "year": year,
+                "all": h_index(all_running),
+                "first_last": h_index(first_last_running),
+            }
+        )
+    return history
+
+
+@app.get("/api/citation-profile/publications")
+def citation_profile_publications() -> dict[str, Any]:
+    """Publication rows for the interactive citation profile, sourced from the CV."""
+    with connect() as con:
+        rows = citation_profile_publication_rows(con)
+        person = con.execute("SELECT full_name, display_name FROM person WHERE id=1").fetchone()
+    name_terms = researcher_name_terms(person)
+    for row in rows:
+        row["authorship"] = researcher_authorship(row.get("authors"), name_terms)
+    history = citation_h_index_history(rows)
+    for row in rows:
+        row["citation_years"] = [
+            {"year": year, "citations": citations}
+            for year, citations in sorted(citation_counts_by_year(row.get("openalex_counts_by_year_json")).items())
+        ]
+        row.pop("openalex_counts_by_year_json", None)
+    return {"publications": rows, "h_index_history": history}
+
+
+def openalex_citing_work_payload(work: dict[str, Any]) -> dict[str, Any]:
+    authors = [
+        str((authorship.get("author") or {}).get("display_name") or "").strip()
+        for authorship in work.get("authorships") or []
+        if str((authorship.get("author") or {}).get("display_name") or "").strip()
+    ]
+    location = (work.get("primary_location") or {}).get("source") or {}
+    work_id = str(work.get("id") or "").strip()
+    return {
+        "id": work_id.rsplit("/", 1)[-1],
+        "title": str(work.get("display_name") or "Untitled work").strip(),
+        "authors": ", ".join(authors),
+        "year": work.get("publication_year"),
+        "venue": str(location.get("display_name") or "").strip(),
+        "citations": int(work.get("cited_by_count") or 0),
+        "doi": str(work.get("doi") or "").strip(),
+        "openalex_url": work_id,
+    }
+
+
+@app.get("/api/citation-profile/publications/{publication_id}/cited-by")
+def citation_profile_cited_by(publication_id: int, page: int = 1) -> dict[str, Any]:
+    """Fetch a current, paginated citing-work list from OpenAlex on demand."""
+    page = max(1, min(int(page), 100))
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT id, title, raw_citation, openalex_work_id, openalex_cited_by_count
+            FROM publications
+            WHERE id=? AND COALESCE(suppress_display, 0) = 0
+            """,
+            (publication_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Publication not found")
+    openalex_work_id = str(row["openalex_work_id"] or "").strip()
+    if not openalex_work_id:
+        raise HTTPException(status_code=409, detail="This publication has no OpenAlex work identifier yet.")
+    short_id = openalex_work_id.rstrip("/").rsplit("/", 1)[-1]
+    params = urllib.parse.urlencode(
+        {
+            "filter": f"cites:{short_id}",
+            "sort": "cited_by_count:desc",
+            "per-page": 50,
+            "page": page,
+        }
+    )
+    try:
+        payload = fetch_json_url(f"https://api.openalex.org/works?{params}", timeout=15)
+    except HTTPException as exc:
+        raise HTTPException(status_code=502, detail="OpenAlex could not load the citing works right now. Please try again.") from exc
+    meta = payload.get("meta") or {}
+    total = max(0, int(meta.get("count") or 0))
+    return {
+        "publication": {
+            "id": row["id"],
+            "title": str(row["title"] or row["raw_citation"] or "Publication").strip(),
+            "citations": int(row["openalex_cited_by_count"] or total),
+        },
+        "works": [openalex_citing_work_payload(work) for work in payload.get("results") or []],
+        "total": total,
+        "page": page,
+        "next_page": page + 1 if page * 50 < total else None,
+        "source": "OpenAlex",
+    }
+
+
 @app.get("/api/collaboration-map")
 def collaboration_map(mode: str = "collaborations") -> dict[str, Any]:
     require_hosted_vitamine_plus()

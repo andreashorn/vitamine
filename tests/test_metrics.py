@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from vitamine.app import collaboration_map, metrics
+from vitamine.app import citation_profile_cited_by, citation_profile_publications, collaboration_map, metrics
 from vitamine.paths import create_blank_database
 
 
@@ -108,6 +108,82 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(first_last_recent["h_index"], 1)
             self.assertEqual(first_last_recent["i10_index"], 0)
 
+    def test_citation_explorer_uses_visible_openalex_rows_and_historical_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "citation-explorer.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                con.execute("UPDATE person SET full_name='Ada Lovelace', display_name='Ada Lovelace' WHERE id=1")
+                con.executemany(
+                    """
+                    INSERT INTO publications (
+                      category, raw_citation, title, authors, year, openalex_work_id,
+                      openalex_cited_by_count, openalex_counts_by_year_json, suppress_display
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            "peer_reviewed", "First paper", "First paper", "Ada Lovelace, Charles Babbage", "2020", "https://openalex.org/W1",
+                            8, '[{"year": 2023, "cited_by_count": 3}, {"year": 2024, "cited_by_count": 5}]', 0,
+                        ),
+                        (
+                            "peer_reviewed", "Last paper", "Last paper", "Charles Babbage, Ada Lovelace", "2021", "https://openalex.org/W2",
+                            5, '[{"year": 2023, "cited_by_count": 2}, {"year": 2024, "cited_by_count": 3}]', 0,
+                        ),
+                        (
+                            "peer_reviewed", "Coauthored paper", "Coauthored paper", "Charles Babbage, Grace Hopper", "2022", "https://openalex.org/W3",
+                            1, '[{"year": 2024, "cited_by_count": 1}]', 0,
+                        ),
+                        (
+                            "peer_reviewed", "Hidden paper", "Hidden paper", "Ada Lovelace", "2022", "https://openalex.org/W4",
+                            99, '[{"year": 2024, "cited_by_count": 99}]', 1,
+                        ),
+                    ],
+                )
+                con.commit()
+            with patch("vitamine.app.active_db_path", return_value=path):
+                payload = citation_profile_publications()
+
+            self.assertEqual([row["title"] for row in payload["publications"]], ["First paper", "Last paper", "Coauthored paper"])
+            self.assertEqual([row["authorship"] for row in payload["publications"]], ["first", "last", "other"])
+            self.assertEqual(payload["h_index_history"], [
+                {"year": 2023, "all": 2, "first_last": 2},
+                {"year": 2024, "all": 2, "first_last": 2},
+            ])
+
+    def test_citing_works_are_loaded_on_demand_from_openalex(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "citation-cited-by.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                publication_id = con.execute(
+                    """INSERT INTO publications (category, raw_citation, title, openalex_work_id, openalex_cited_by_count)
+                       VALUES ('peer_reviewed', 'Target work', 'Target work', 'https://openalex.org/W123', 71)"""
+                ).lastrowid
+                con.commit()
+            openalex_payload = {
+                "meta": {"count": 71},
+                "results": [{
+                    "id": "https://openalex.org/W456",
+                    "display_name": "A citing study",
+                    "publication_year": 2025,
+                    "cited_by_count": 8,
+                    "doi": "https://doi.org/10.1000/example",
+                    "primary_location": {"source": {"display_name": "Example Journal"}},
+                    "authorships": [{"author": {"display_name": "Grace Hopper"}}],
+                }],
+            }
+            with patch("vitamine.app.active_db_path", return_value=path), patch(
+                "vitamine.app.fetch_json_url", return_value=openalex_payload
+            ) as fetch:
+                payload = citation_profile_cited_by(publication_id)
+
+            self.assertIn("cites%3AW123", fetch.call_args.args[0])
+            self.assertEqual(payload["total"], 71)
+            self.assertEqual(payload["next_page"], 2)
+            self.assertEqual(payload["works"][0]["title"], "A citing study")
+            self.assertEqual(payload["works"][0]["authors"], "Grace Hopper")
+
     def test_dashboard_uses_public_facing_metric_labels(self):
         script = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "app.js"
@@ -134,7 +210,8 @@ class MetricsTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "index.html"
         ).read_text(encoding="utf-8")
         self.assertNotIn("citation data refreshes automatically", document)
-        self.assertIn("20260804-cleanup-crossref-verification", document)
+        self.assertIn("exploreCitations", document)
+        self.assertIn("citationExplorerDialog", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")

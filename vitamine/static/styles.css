@@ -3361,6 +3361,18 @@ label.invalid input {
   font-size: 12px;
 }
 
+.citationProfileActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.citationProfileActions button {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
 .citationProfileBody {
   display: grid;
   grid-template-columns: minmax(280px, 350px) minmax(300px, 1fr);
@@ -3384,6 +3396,27 @@ label.invalid input {
 
 .citationProfileTable strong {
   text-align: right;
+}
+
+.citationMetricButton {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  text-align: right;
+  text-decoration: underline;
+  text-decoration-color: #a9d7d1;
+  text-underline-offset: 3px;
+}
+
+.citationMetricButton:hover,
+.citationMetricButton:focus-visible {
+  color: var(--accent);
+  background: transparent;
 }
 
 .citationProfileTable span {
@@ -3581,6 +3614,235 @@ label.invalid input {
   line-height: 1.35;
 }
 
+.citationExplorerDialog {
+  width: min(940px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--line);
+  padding: 0;
+  background: var(--panel);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
+}
+
+.citationExplorerDialog::backdrop {
+  background: rgba(15, 23, 42, 0.28);
+}
+
+.citationExplorerPanel {
+  padding: 20px;
+  background: #fff;
+}
+
+.citationExplorerPanel .dialogHeader {
+  align-items: flex-start;
+  margin-bottom: 16px;
+}
+
+.citationExplorerPanel .dialogHeader p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.citationExplorerControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 22px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-block: 1px solid var(--line);
+}
+
+.citationSortControl {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.citationSortControl > span {
+  margin-right: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.citationSortControl button {
+  min-height: 30px;
+  padding: 4px 9px;
+  border-color: #b9c8d8;
+  background: #fff;
+  color: var(--accent-2);
+  font-size: 12px;
+}
+
+.citationSortControl button[aria-pressed="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.citationExplorerHint {
+  margin: 11px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.citationExplorerList {
+  border-top: 1px solid var(--line);
+}
+
+.citationPublicationRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  padding: 13px 4px;
+  border-bottom: 1px solid #e5e9ef;
+}
+
+.citationPublicationMain {
+  min-width: 0;
+}
+
+.citationPublicationMain h3 {
+  margin: 0;
+  color: #1e3a8a;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.citationPublicationMain p {
+  margin: 4px 0 0;
+  color: #3f5361;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.citationCountButton,
+.citingWorkCount {
+  display: grid;
+  min-width: 78px;
+  gap: 2px;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  text-align: center;
+}
+
+.citationCountButton:hover,
+.citationCountButton:focus-visible {
+  border-color: #8dcac2;
+  background: #f1fbfa;
+}
+
+.citationCountButton strong,
+.citingWorkCount strong {
+  font-size: 16px;
+}
+
+.citationCountButton span,
+.citingWorkCount span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.citationHIndexMarker {
+  position: relative;
+  height: 24px;
+  border-top: 3px solid var(--accent);
+}
+
+.citationHIndexMarker span {
+  position: absolute;
+  top: -11px;
+  right: 0;
+  padding: 0 6px;
+  background: #fff;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.paperCitationHistory {
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  background: #f8fafc;
+}
+
+.paperCitationHistory h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.paperCitationBars,
+.hIndexBars {
+  display: grid;
+  grid-auto-columns: minmax(42px, 1fr);
+  grid-auto-flow: column;
+  gap: 8px;
+  min-height: 148px;
+  overflow-x: auto;
+  align-items: end;
+}
+
+.paperCitationBarItem,
+.hIndexBarItem {
+  display: grid;
+  grid-template-rows: 16px 105px 16px;
+  gap: 4px;
+  min-width: 42px;
+  align-items: end;
+  text-align: center;
+}
+
+.paperCitationBarItem > span,
+.hIndexBarItem > span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.paperCitationBarItem i,
+.hIndexBarItem i {
+  position: relative;
+  display: block;
+  width: 50%;
+  justify-self: center;
+  min-height: 5px;
+  align-self: end;
+  background: #64748b;
+}
+
+.paperCitationBarItem,
+.hIndexBarItem {
+  background: linear-gradient(to top, transparent 0 24%, #e2e8f0 25%, transparent 26%, transparent 0 49%, #e2e8f0 50%, transparent 51%, transparent 0 74%, #e2e8f0 75%, transparent 76%);
+  background-size: 100% 105px;
+  background-repeat: no-repeat;
+  background-position: 0 20px;
+}
+
+.paperCitationBarItem strong,
+.hIndexBarItem strong {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.hIndexHistoryChart {
+  min-height: 150px;
+}
+
+.compactCitationPanel {
+  min-width: min(700px, calc(100vw - 32px));
+}
+
 .inlineCheck {
   display: inline-flex;
   align-items: center;
@@ -3705,6 +3967,14 @@ label.invalid input {
     grid-template-columns: repeat(2, minmax(110px, 1fr));
   }
 
+  .citationExplorerPanel {
+    padding: 15px;
+  }
+
+  .citationPublicationRow {
+    gap: 8px;
+  }
+
   .publicationSidebar {
     position: static;
   }
@@ -3729,6 +3999,16 @@ label.invalid input {
 
   .linkedInput {
     flex-direction: column;
+  }
+
+  .citationProfileActions,
+  .citationExplorerControls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .compactCitationPanel {
+    min-width: 0;
   }
 }
 
