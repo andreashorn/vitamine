@@ -291,7 +291,12 @@ app.mount("/logo", StaticFiles(directory=LOGO), name="logo")
 @app.middleware("http")
 async def no_cache_for_app_shell(request: Request, call_next):
     response = await call_next(request)
-    if request.url.path == "/" or request.url.path.startswith("/static/") or request.url.path.startswith("/logo/"):
+    if (
+        request.url.path == "/"
+        or request.url.path.startswith("/static/")
+        or request.url.path.startswith("/logo/")
+        or request.url.path.startswith("/api/")
+    ):
         response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
 

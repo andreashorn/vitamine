@@ -358,6 +358,7 @@ class CloudAppTests(unittest.TestCase):
 
         llm_settings = self.client.get("/api/cv-import/settings")
         self.assertEqual(llm_settings.status_code, 200, llm_settings.text)
+        self.assertEqual(llm_settings.headers.get("cache-control"), "no-store, max-age=0")
         self.assertEqual(llm_settings.json()["provider"], "openai")
         self.assertTrue(llm_settings.json()["managed"])
         self.assertFalse(llm_settings.json()["configuration_allowed"])
@@ -389,6 +390,7 @@ class CloudAppTests(unittest.TestCase):
 
         onboarding = self.client.get("/api/onboarding")
         self.assertEqual(onboarding.status_code, 200, onboarding.text)
+        self.assertEqual(onboarding.headers.get("cache-control"), "no-store, max-age=0")
         self.assertTrue(onboarding.json()["llm_configured"])
         self.assertTrue(onboarding.json()["llm_managed"])
         self.assertTrue(onboarding.json()["skip_llm_configuration"])
@@ -730,6 +732,10 @@ class CloudAppTests(unittest.TestCase):
         self.assertIn("async function submitCloudJob(path, options = {})", script.text)
         self.assertIn('"Idempotency-Key": idempotencyKey', script.text)
         self.assertIn("return api(path, request);", script.text)
+        self.assertIn('cache: "no-store"', script.text)
+        self.assertIn("async function refreshLlmImportPolicy()", script.text)
+        self.assertIn("managedLlm = await refreshLlmImportPolicy()", script.text)
+        self.assertIn("if (usesManagedLlm())", script.text)
         self.assertIn('id="addIdentifier"', page.text)
         self.assertIn('id="identifierDialog"', page.text)
         self.assertNotIn('id="newIdentifier"', page.text)

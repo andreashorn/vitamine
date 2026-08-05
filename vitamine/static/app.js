@@ -166,6 +166,7 @@ async function api(path, options = {}) {
   const defaultHeaders = options.body instanceof FormData ? {} : { "Content-Type": "application/json" };
   const response = await fetch(path, {
     ...options,
+    cache: "no-store",
     headers: {
       ...defaultHeaders,
       ...(options.headers || {}),
@@ -1120,11 +1121,33 @@ function renderOnboardingCoach() {
 }
 
 function showLlmOnboardingDialog() {
+  if (usesManagedLlm()) {
+    closeManagedLlmOnboarding();
+    return;
+  }
   const dialog = $("#llmOnboardingDialog");
   if (dialog && !dialog.open) {
     dialog.showModal();
     updateSimpleOnboardingActions();
   }
+}
+
+function usesManagedLlm() {
+  return state.cvImport?.managed === true
+    || state.cvImport?.configuration_allowed === false
+    || state.onboarding?.llm_managed === true
+    || state.onboarding?.skip_llm_configuration === true;
+}
+
+function closeManagedLlmOnboarding() {
+  $("#llmOnboardingDialog")?.close();
+  $("#llmAdvancedDialog")?.close();
+  const error = $("#llmOnboardingError");
+  if (error) {
+    error.textContent = "";
+    error.hidden = true;
+  }
+  setStatus("VitaMine cloud uses its managed AI service. No personal OpenAI API key or local model is needed.");
 }
 
 function updateSimpleOnboardingActions() {
@@ -1138,6 +1161,10 @@ function updateSimpleOnboardingActions() {
 }
 
 function showAdvancedLlmDialog() {
+  if (usesManagedLlm()) {
+    closeManagedLlmOnboarding();
+    return;
+  }
   $("#llmOnboardingDialog")?.close();
   $("#onboardingCoach").hidden = true;
   clearOnboardingTarget();
@@ -1207,7 +1234,22 @@ async function configureOnboardingLlm(provider, apiKey = "", overrides = {}) {
     api_key: apiKey,
     ...overrides,
   };
-  await api("/api/cv-import/settings", { method: "PUT", body: JSON.stringify(payload) });
+  try {
+    await api("/api/cv-import/settings", { method: "PUT", body: JSON.stringify(payload) });
+  } catch (error) {
+    if (error.status !== 403) throw error;
+    try {
+      await refreshLlmImportPolicy();
+    } catch {
+      throw error;
+    }
+    if (!usesManagedLlm()) throw error;
+    closeManagedLlmOnboarding();
+    const pendingFiles = state.pendingCvImportFiles;
+    state.pendingCvImportFiles = [];
+    if (pendingFiles.length) await importCvFiles(pendingFiles);
+    return;
+  }
   $("#llmOnboardingDialog")?.close();
   $("#llmAdvancedDialog")?.close();
   await loadCvImportSettings();
@@ -1236,7 +1278,19 @@ async function saveOnboardingApiKey(event) {
 }
 
 async function useLocalOnboardingModel() {
-  await configureOnboardingLlm("bundled_llama");
+  if (usesManagedLlm()) {
+    closeManagedLlmOnboarding();
+    return;
+  }
+  const error = $("#llmOnboardingError");
+  try {
+    await configureOnboardingLlm("bundled_llama");
+  } catch (caught) {
+    if (error) {
+      error.textContent = caught.message;
+      error.hidden = false;
+    }
+  }
 }
 
 function updateOnboardingProviderVisibility() {
@@ -1581,6 +1635,11 @@ async function loadCvImportSettings() {
   updateCvImportProviderVisibility();
 }
 
+async function refreshLlmImportPolicy() {
+  await Promise.all([loadCvImportSettings(), loadOnboarding()]);
+  return usesManagedLlm();
+}
+
 function updateCvImportProviderVisibility() {
   const providerSelect = $("#cvImportProvider");
   if (!providerSelect) return;
@@ -1643,7 +1702,16 @@ async function importCvFiles(files) {
   files = Array.from(files || []);
   if (!files.length) return;
   if (!requirePlusUi()) return;
-  if (state.onboarding?.enabled && !state.onboarding.llm_configured) {
+  let managedLlm = false;
+  try {
+    managedLlm = await refreshLlmImportPolicy();
+  } catch (error) {
+    setStatus(`Could not confirm the CV-import service: ${error.message}`, { error: true });
+    return;
+  }
+  if (managedLlm) {
+    closeManagedLlmOnboarding();
+  } else if (state.onboarding?.enabled && !state.onboarding.llm_configured) {
     state.pendingCvImportFiles = files;
     const coach = $("#onboardingCoach");
     if (coach) coach.hidden = true;
