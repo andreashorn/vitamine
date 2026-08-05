@@ -225,6 +225,36 @@ LONG_CV_PUBLICATION_CATEGORIES = {
     "poster_presentations": "Poster presentations",
 }
 
+NON_JOURNAL_VENUE_TERMS = (
+    "arxiv",
+    "biorxiv",
+    "chemrxiv",
+    "medrxiv",
+    "osf",
+    "preprints.org",
+    "psyarxiv",
+    "research square",
+    "researchsquare",
+    "ssrn",
+)
+
+
+def is_non_journal_venue(venue: str | None, category: str | None = None) -> bool:
+    """Preprint servers are dissemination platforms, not journal-impact venues."""
+    if str(category or "").strip().casefold() == "preprints":
+        return True
+    normalized_venue = str(venue or "").casefold()
+    return any(term in normalized_venue for term in NON_JOURNAL_VENUE_TERMS)
+
+
+def journal_metric_publication_predicate() -> tuple[str, list[str]]:
+    """SQL predicate/parameters for publications eligible for journal metrics."""
+    venue_checks = " OR ".join("lower(venue) LIKE ?" for _ in NON_JOURNAL_VENUE_TERMS)
+    return (
+        f"lower(COALESCE(category, '')) != 'preprints' AND NOT ({venue_checks})",
+        [f"%{term}%" for term in NON_JOURNAL_VENUE_TERMS],
+    )
+
 DEFAULT_LONG_CV_PUBLICATION_CATEGORIES = {"peer_reviewed", "patents"}
 EXPORT_FORMAT_CATALOG = STATIC / "export-formats.json"
 BUNDLED_EXPORT_TEMPLATES = STATIC / "export-templates"
@@ -2279,16 +2309,18 @@ def summary() -> dict[str, Any]:
 @app.get("/api/metrics")
 def metrics() -> dict[str, Any]:
     with connect() as con:
+        journal_metric_predicate, journal_metric_params = journal_metric_publication_predicate()
         publication_metrics = row_dict(
             con.execute(
-                """
+                f"""
                 SELECT
                   COUNT(*) AS total,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 THEN 1 ELSE 0 END) AS visible,
                   SUM(CASE WHEN category = 'peer_reviewed' AND COALESCE(suppress_display, 0) = 0 THEN 1 ELSE 0 END) AS peer_reviewed,
                   SUM(CASE WHEN include_short = 1 THEN 1 ELSE 0 END) AS selected_short,
                   SUM(CASE WHEN include_ultrashort = 1 THEN 1 ELSE 0 END) AS selected_ultrashort,
-                  SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND impact_factor IS NOT NULL THEN 1 ELSE 0 END) AS impact_factor_count,
+                  SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND impact_factor IS NOT NULL
+                           AND {journal_metric_predicate} THEN 1 ELSE 0 END) AS impact_factor_count,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND openalex_cited_by_count IS NOT NULL THEN 1 ELSE 0 END) AS citation_metric_count,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 THEN COALESCE(openalex_cited_by_count, 0) ELSE 0 END) AS openalex_cited_by_total,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND orcid_put_code IS NOT NULL AND orcid_put_code != '' THEN 1 ELSE 0 END) AS orcid_matched,
@@ -2297,7 +2329,8 @@ def metrics() -> dict[str, Any]:
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND (venue IS NULL OR venue = '') THEN 1 ELSE 0 END) AS missing_venue,
                   SUM(CASE WHEN COALESCE(suppress_display, 0) = 0 AND (doi IS NULL OR doi = '') THEN 1 ELSE 0 END) AS missing_doi
                 FROM publications
-                """
+                """,
+                journal_metric_params,
             ).fetchone()
         )
         by_year = rows_dict(
@@ -2316,7 +2349,7 @@ def metrics() -> dict[str, Any]:
         )
         top_venues = rows_dict(
             con.execute(
-                """
+                f"""
                 SELECT lower(venue) AS venue_key,
                        MIN(venue) AS venue,
                        COUNT(*) AS count,
@@ -2325,17 +2358,19 @@ def metrics() -> dict[str, Any]:
                 WHERE COALESCE(suppress_display, 0) = 0
                   AND venue IS NOT NULL
                   AND venue != ''
+                  AND {journal_metric_predicate}
                 GROUP BY lower(venue)
                 ORDER BY count DESC, lower(venue)
                 LIMIT 12
-                """
+                """,
+                journal_metric_params,
             ).fetchall()
         )
         for row in top_venues:
             row["venue"] = display_venue_name(row["venue"])
         impact_factors = rows_dict(
             con.execute(
-                """
+                f"""
                 SELECT lower(venue) AS venue_key,
                        MIN(venue) AS venue,
                        COUNT(*) AS count,
@@ -2347,9 +2382,11 @@ def metrics() -> dict[str, Any]:
                   AND impact_factor IS NOT NULL
                   AND venue IS NOT NULL
                   AND venue != ''
+                  AND {journal_metric_predicate}
                 GROUP BY lower(venue)
                 ORDER BY lower(venue)
-                """
+                """,
+                journal_metric_params,
             ).fetchall()
         )
         for row in impact_factors:
@@ -2362,6 +2399,8 @@ def metrics() -> dict[str, Any]:
                   openalex_counts_by_year_json,
                   authors,
                   year,
+                  venue,
+                  category,
                   impact_factor
                 FROM publications
                 WHERE COALESCE(suppress_display, 0) = 0
@@ -2386,7 +2425,9 @@ def metrics() -> dict[str, Any]:
             publication_year = str(row.get("year") or "").strip()[:4]
             if publication_year.isdigit():
                 publications_by_year[publication_year] = publications_by_year.get(publication_year, 0) + 1
-                if row.get("impact_factor") is not None:
+                if row.get("impact_factor") is not None and not is_non_journal_venue(
+                    row.get("venue"), row.get("category")
+                ):
                     impact_factor_sum_by_year[publication_year] = (
                         impact_factor_sum_by_year.get(publication_year, 0.0)
                         + float(row["impact_factor"])

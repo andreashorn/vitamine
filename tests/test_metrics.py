@@ -54,23 +54,23 @@ class MetricsTests(unittest.TestCase):
                     INSERT INTO publications (
                       category, raw_citation, suppress_display, impact_factor,
                       openalex_cited_by_count, orcid_put_code, authors, year,
-                      openalex_counts_by_year_json
+                      venue, openalex_counts_by_year_json
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
                             "peer_reviewed", "Visible article", 0, 5.2, 10, "1",
-                            "Ada Lovelace, Charles Babbage", "2024",
+                            "Ada Lovelace, Charles Babbage", "2024", "Brain",
                             '[{"year": 2024, "cited_by_count": 4}]',
                         ),
                         (
-                            "preprints", "Visible preprint", 0, None, None, None,
-                            "Charles Babbage, Ada Lovelace", "2024", "[]",
+                            "preprints", "Visible preprint", 0, 99.0, None, None,
+                            "Charles Babbage, Ada Lovelace", "2024", "bioRxiv", "[]",
                         ),
                         (
                             "peer_reviewed", "Hidden duplicate", 1, 30.0, 999, "2",
-                            "Ada Lovelace, Charles Babbage", "2024",
+                            "Ada Lovelace, Charles Babbage", "2024", "Nature",
                             '[{"year": 2024, "cited_by_count": 999}]',
                         ),
                     ],
@@ -97,6 +97,8 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(year_2024["publications_published"], 2)
             self.assertEqual(year_2024["impact_factor_sum"], 5.2)
             self.assertEqual(year_2024["impact_factor_count"], 1)
+            self.assertNotIn("bioRxiv", [row["venue"] for row in payload["top_venues"]])
+            self.assertNotIn("bioRxiv", [row["venue"] for row in payload["impact_factors"]])
             first_last = payload["citation_profile"]["first_last_author"]
             self.assertEqual(first_last["citations"], 10)
             self.assertEqual(first_last["h_index"], 1)
