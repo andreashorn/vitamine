@@ -223,6 +223,8 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("height: 82px;", styles)
         self.assertIn("citationPaperLoader", styles)
         self.assertIn("citationCitedByDialog", styles)
+        self.assertIn('citationCountButton[aria-busy="true"]', styles)
+        self.assertIn("background: #fff;", styles)
         self.assertIn("min-height: 82px;", styles)
 
 

@@ -3618,9 +3618,9 @@ label.invalid input {
   width: min(940px, calc(100vw - 32px));
   max-height: min(820px, calc(100vh - 32px));
   overflow: auto;
-  border: 1px solid #d7d0c2;
+  border: 1px solid #d8e0e8;
   padding: 0;
-  background: #fffdf7;
+  background: #fff;
   box-shadow: 0 24px 80px rgba(15, 23, 42, 0.24);
 }
 
@@ -3631,15 +3631,12 @@ label.invalid input {
 .citationExplorerPanel {
   position: relative;
   padding: 20px;
-  background:
-    radial-gradient(circle at 18% 12%, rgba(184, 146, 82, 0.07), transparent 28%),
-    repeating-linear-gradient(0deg, rgba(99, 82, 51, 0.015) 0 1px, transparent 1px 5px),
-    #fffdf7;
+  background: #fff;
 }
 
 .citationCitedByDialog {
   transform: translate(18px, 18px);
-  box-shadow: -7px 7px 0 rgba(104, 84, 48, 0.14), 0 24px 80px rgba(15, 23, 42, 0.27);
+  box-shadow: -7px 7px 0 rgba(148, 163, 184, 0.16), 0 24px 80px rgba(15, 23, 42, 0.27);
 }
 
 .citationCitedByDialog::backdrop {
@@ -3656,7 +3653,7 @@ label.invalid input {
   gap: 9px;
   min-height: 240px;
   padding: 28px;
-  background: rgba(255, 253, 247, 0.9);
+  background: rgba(255, 255, 255, 0.92);
   color: #294b49;
   text-align: center;
   backdrop-filter: blur(2px);
@@ -3762,7 +3759,15 @@ label.invalid input {
 }
 
 .citationTitleLink {
+  display: inline;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: transparent;
   color: inherit;
+  font: inherit;
+  font-size: inherit;
   text-decoration: none;
 }
 
@@ -3801,6 +3806,29 @@ label.invalid input {
   background: #f1fbfa;
 }
 
+.citationCountButton[aria-busy="true"] {
+  position: relative;
+  cursor: wait;
+}
+
+.citationCountButton[aria-busy="true"] strong,
+.citationCountButton[aria-busy="true"] span {
+  visibility: hidden;
+}
+
+.citationCountButton[aria-busy="true"]::after {
+  position: absolute;
+  inset: 0;
+  width: 18px;
+  height: 18px;
+  margin: auto;
+  border: 2px solid #b7d7d2;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  content: "";
+  animation: citationPaperSpin 0.65s linear infinite;
+}
+
 .citationCountButton strong,
 .citingWorkCount strong {
   font-size: 16px;
@@ -3825,7 +3853,7 @@ label.invalid input {
   top: -11px;
   right: 0;
   padding: 0 6px;
-  background: #fffdf7;
+  background: #fff;
   color: var(--accent);
   font-size: 11px;
   font-weight: 700;
