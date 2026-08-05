@@ -80,7 +80,7 @@ const state = {
     citingWorks: [],
     nextCitingPage: null,
   },
-  citationNetwork: { data: null, positions: {}, animation: null, dragging: null, refreshing: false },
+  citationNetwork: { data: null, graph: null, refreshing: false },
   activity: {
     timer: null,
     startedAt: null,
@@ -2457,53 +2457,39 @@ function networkNodeTooltip(node) {
     .filter(Boolean).join("\n");
 }
 
-function positionCitationNetwork() {
-  const nodes = state.citationNetwork.data?.nodes || [];
-  const width = 960; const height = 540;
-  const positions = state.citationNetwork.positions;
-  nodes.forEach((node, index) => {
-    if (!positions[node.id]) {
-      const angle = index * 2.399963;
-      const radius = 60 + Math.sqrt(index) * 29;
-      positions[node.id] = { x: width / 2 + Math.cos(angle) * radius, y: height / 2 + Math.sin(angle) * radius, vx: 0, vy: 0 };
-    }
-  });
-  for (let step = 0; step < 90; step += 1) {
-    const links = state.citationNetwork.data.links || [];
-    links.forEach((link) => {
-      const source = positions[link.source]; const target = positions[link.target];
-      if (!source || !target) return;
-      const dx = target.x - source.x; const dy = target.y - source.y;
-      const distance = Math.max(1, Math.hypot(dx, dy)); const force = (distance - 130) * 0.004;
-      source.vx += dx / distance * force; source.vy += dy / distance * force;
-      target.vx -= dx / distance * force; target.vy -= dy / distance * force;
-    });
-    nodes.forEach((node, index) => nodes.slice(index + 1).forEach((other) => {
-      const a = positions[node.id]; const b = positions[other.id]; const dx = b.x - a.x; const dy = b.y - a.y;
-      const d2 = Math.max(1600, dx * dx + dy * dy); const force = 210 / d2;
-      a.vx -= dx * force; a.vy -= dy * force; b.vx += dx * force; b.vy += dy * force;
-    }));
-    nodes.forEach((node) => { const p = positions[node.id]; p.vx += (width / 2 - p.x) * 0.0008; p.vy += (height / 2 - p.y) * 0.0008; p.x = Math.max(24, Math.min(width - 24, p.x + p.vx)); p.y = Math.max(24, Math.min(height - 24, p.y + p.vy)); p.vx *= 0.82; p.vy *= 0.82; });
-  }
-}
-
 function renderCitationNetwork() {
   const chart = $("#citationNetworkGraph");
   const data = state.citationNetwork.data;
   if (!chart || !data) return;
+  state.citationNetwork.graph?.destroy();
+  state.citationNetwork.graph = null;
   if (!data.cached) { chart.innerHTML = `<div class="citationNetworkPending"><span class="citationPaperSpinner" aria-hidden="true"></span><strong>Preparing your citation network</strong><span>VitaMine is collecting citing papers in the background. You can close this window and check back shortly.</span></div>`; return; }
-  positionCitationNetwork();
-  const positions = state.citationNetwork.positions; const byId = Object.fromEntries(data.nodes.map((node) => [node.id, node]));
-  const links = data.links.map((link) => ({ ...link, source: positions[link.source], target: positions[link.target] })).filter((link) => link.source && link.target);
-  chart.innerHTML = `<svg class="citationNetworkSvg" viewBox="0 0 960 540" role="img" aria-label="Citation network graph">${links.map((link) => `<line class="citationNetworkEdge" x1="${link.source.x.toFixed(1)}" y1="${link.source.y.toFixed(1)}" x2="${link.target.x.toFixed(1)}" y2="${link.target.y.toFixed(1)}"></line>`).join("")}${data.nodes.map((node) => { const p = positions[node.id]; const radius = node.kind === "own" ? 10 + Math.min(10, Math.sqrt(node.citations || 0) / 4) : 4 + Math.min(5, Math.sqrt(node.citations || 0) / 13); const href = citationNetworkDoi(node); const inner = `<circle class="citationNetworkNode ${node.kind}" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${radius.toFixed(1)}"></circle><title>${escapeHtml(networkNodeTooltip(node))}</title>`; return href ? `<a data-network-node="${escapeHtml(node.id)}" href="${href}" target="_blank" rel="noopener noreferrer">${inner}</a>` : `<g data-network-node="${escapeHtml(node.id)}">${inner}</g>`; }).join("")}</svg>`;
+  if (!window.cytoscape) { chart.innerHTML = `<p class="emptyState">The interactive graph renderer could not load. Please check your connection and reopen this view.</p>`; return; }
+  chart.innerHTML = `<div id="citationNetworkCanvas" class="citationNetworkCanvas"></div><aside id="citationNetworkTooltip" class="citationNetworkTooltip" hidden></aside>`;
+  const tooltip = $("#citationNetworkTooltip");
+  const graph = window.cytoscape({
+    container: $("#citationNetworkCanvas"),
+    elements: [
+      ...data.nodes.map((node) => ({ data: { ...node } })),
+      ...data.links.map((link, index) => ({ data: { id: `edge-${index}`, source: link.source, target: link.target } })),
+    ],
+    style: [
+      { selector: "node", style: { "background-color": "#7392a8", "border-width": 2, "border-color": "#4c6476", width: "mapData(citations, 0, 1000, 9, 20)", height: "mapData(citations, 0, 1000, 9, 20)", "overlay-opacity": 0, "transition-property": "background-color, border-width, border-color", "transition-duration": "160ms" } },
+      { selector: 'node[kind = "own"]', style: { "background-color": "#168675", "border-color": "#075e55", width: "mapData(citations, 0, 1000, 24, 46)", height: "mapData(citations, 0, 1000, 24, 46)" } },
+      { selector: "node:active", style: { "border-width": 4, "border-color": "#172554" } },
+      { selector: "edge", style: { width: 1.5, "line-color": "#90aaa9", opacity: 0.72, "curve-style": "bezier" } },
+    ],
+    wheelSensitivity: 0.18,
+    minZoom: 0.2,
+    maxZoom: 3,
+    layout: { name: "cose", animate: true, animationDuration: 900, padding: 74, nodeRepulsion: 8500, idealEdgeLength: 145, gravity: 0.32, numIter: 1200, randomize: true },
+  });
+  state.citationNetwork.graph = graph;
+  graph.on("mouseover", "node", (event) => { const node = event.target.data(); tooltip.innerHTML = `<strong>${escapeHtml(node.title)}</strong><span>${escapeHtml(node.authors || "Authors unavailable")}</span><span>${escapeHtml([node.venue, node.year].filter(Boolean).join(" · "))}</span><span>${formatMetricNumber(node.citations)} citations</span>`; tooltip.hidden = false; });
+  graph.on("mousemove", "node", (event) => { const position = event.renderedPosition; tooltip.style.left = `${Math.min(chart.clientWidth - 270, position.x + 16)}px`; tooltip.style.top = `${Math.min(chart.clientHeight - 130, position.y + 16)}px`; });
+  graph.on("mouseout", "node", () => { tooltip.hidden = true; });
+  graph.on("tap", "node", (event) => { const href = citationNetworkDoi(event.target.data()); if (href) window.open(href, "_blank", "noopener,noreferrer"); });
   $("#citationNetworkSummary").textContent = `${data.nodes.filter((node) => node.kind === "own").length} own papers · ${data.nodes.filter((node) => node.kind === "citing").length} citing papers · drag a dot to arrange the graph${state.citationNetwork.refreshing ? " · updating in background" : ""}`;
-  bindCitationNetworkDrag(chart, byId);
-}
-
-function bindCitationNetworkDrag(chart) {
-  chart.onpointerdown = (event) => { const element = event.target.closest("[data-network-node]"); if (!element) return; const id = element.dataset.networkNode; if (element.tagName.toLowerCase() === "a") event.preventDefault(); chart.setPointerCapture(event.pointerId); state.citationNetwork.dragging = { id, pointerId: event.pointerId }; };
-  chart.onpointermove = (event) => { const drag = state.citationNetwork.dragging; if (!drag || drag.pointerId !== event.pointerId) return; const rect = chart.getBoundingClientRect(); const p = state.citationNetwork.positions[drag.id]; p.x = (event.clientX - rect.left) / rect.width * 960; p.y = (event.clientY - rect.top) / rect.height * 540; p.vx = 0; p.vy = 0; renderCitationNetwork(); };
-  chart.onpointerup = () => { state.citationNetwork.dragging = null; };
 }
 
 async function openCitationNetwork() {
@@ -5300,6 +5286,9 @@ async function init() {
   $("#refreshCitationNetwork")?.addEventListener("click", () => {
     if (requirePlusUi()) queueCitationNetworkRefresh();
   });
+  $("#citationNetworkZoomIn")?.addEventListener("click", () => state.citationNetwork.graph?.zoom({ level: state.citationNetwork.graph.zoom() * 1.25, renderedPosition: { x: 480, y: 300 } }));
+  $("#citationNetworkZoomOut")?.addEventListener("click", () => state.citationNetwork.graph?.zoom({ level: state.citationNetwork.graph.zoom() / 1.25, renderedPosition: { x: 480, y: 300 } }));
+  $("#citationNetworkFit")?.addEventListener("click", () => state.citationNetwork.graph?.fit(undefined, 72));
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });

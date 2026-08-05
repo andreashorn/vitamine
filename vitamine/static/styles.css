@@ -3932,9 +3932,20 @@ label.invalid input {
   min-height: 150px;
 }
 
-.citationNetworkDialog { width: min(1020px, calc(100vw - 32px)); }
+.citationNetworkDialog {
+  width: min(1540px, calc(100vw - 20px));
+  max-height: calc(100vh - 20px);
+  height: calc(100vh - 20px);
+}
+
+.citationNetworkPanel { display: flex; flex-direction: column; min-height: calc(100vh - 20px); box-sizing: border-box; }
+
+.citationNetworkControls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.citationNetworkControls button { min-width: 34px; }
 
 .citationNetworkGraph {
+  position: relative;
+  flex: 1;
   min-height: 420px;
   border: 1px solid var(--line);
   background: radial-gradient(circle at 50% 45%, #f8fffe, #edf5f7);
@@ -3953,13 +3964,33 @@ label.invalid input {
 
 .citationNetworkPending > span:last-child { max-width: 440px; color: var(--muted); font-size: 13px; line-height: 1.45; }
 
-.citationNetworkSvg { display: block; width: 100%; height: auto; min-height: 420px; }
-.citationNetworkSvg a { min-height: 0; border: 0; border-radius: 0; padding: 0; background: transparent; }
-.citationNetworkEdge { stroke: #91aaa9; stroke-width: 1.5; stroke-linecap: round; opacity: .7; }
-.citationNetworkNode { cursor: grab; stroke-width: 2; }
-.citationNetworkNode.own { fill: var(--accent); stroke: #075e55; }
-.citationNetworkNode.citing { fill: #7392a8; stroke: #4c6476; }
-.citationNetworkNode:hover { stroke: #172554; stroke-width: 3; }
+.citationNetworkCanvas { position: absolute; inset: 0; }
+
+.citationNetworkTooltip {
+  position: absolute;
+  z-index: 3;
+  width: min(255px, calc(100% - 28px));
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px;
+  border: 1px solid #b7c7d3;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, .97);
+  box-shadow: 0 8px 25px rgba(15, 23, 42, .18);
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
+.citationNetworkTooltip strong { color: #172554; font-size: 13px; }
+
+@media (max-width: 560px) {
+  .citationNetworkDialog { width: calc(100vw - 12px); height: calc(100vh - 12px); max-height: calc(100vh - 12px); }
+  .citationNetworkPanel { min-height: calc(100vh - 12px); }
+  .citationNetworkPanel .dialogHeader { gap: 10px; }
+  .citationNetworkControls { justify-content: flex-start; }
+}
 
 .compactCitationPanel {
   min-width: min(700px, calc(100vw - 32px));

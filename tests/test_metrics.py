@@ -239,6 +239,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationAuthorsMarkup", script)
         self.assertIn("citationNetworkGraph", script)
         self.assertIn("queueCitationNetworkRefresh", script)
+        self.assertIn("window.cytoscape", script)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
@@ -246,7 +247,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationPaperLoader", styles)
         self.assertIn("citationCitedByDialog", styles)
         self.assertIn("citationResearcherAuthor", styles)
-        self.assertIn("citationNetworkNode", styles)
+        self.assertIn("citationNetworkTooltip", styles)
         self.assertIn("citationNetworkPending", styles)
         self.assertIn('citationCountButton[aria-busy="true"]', styles)
         self.assertIn("background: #fff;", styles)
