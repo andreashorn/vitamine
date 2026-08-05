@@ -13,6 +13,7 @@ from vitamine.scripts.build_ultrashort_tabular_cv import (
     clear_paragraph,
     remove_numbering,
 )
+from vitamine.scripts.export_utils import configure_researcher_name
 
 
 class TabularExportFormattingTests(unittest.TestCase):
@@ -27,7 +28,7 @@ class TabularExportFormattingTests(unittest.TestCase):
         )
         con.execute(
             """INSERT INTO publications VALUES
-               (1, 'First Author, Andreas Horn, Third Author, Fourth Author',
+               (1, 'First Author, Jane Example, Third Author, Fourth Author',
                 'A useful result', 'NATURE COMMUNICATIONS', '2026',
                 '10.1234/example', '', '', 12.0, '2025')"""
         )
@@ -48,6 +49,7 @@ class TabularExportFormattingTests(unittest.TestCase):
         self.addCleanup(con.close)
         doc = Document()
         paragraph = doc.add_paragraph()
+        configure_researcher_name({"display_name": "Jane Example", "full_name": "Jane Example"})
         with patch("vitamine.scripts.build_ultrashort_tabular_cv.configured_citation_style", return_value="vitamine-long"):
             add_publication_docx_text(paragraph, 1, publication)
         self.assertTrue(paragraph.text.startswith("1.\t"))
@@ -58,8 +60,8 @@ class TabularExportFormattingTests(unittest.TestCase):
         self.assertEqual(len(venue_runs), 1)
         self.assertTrue(venue_runs[0].italic)
         self.assertTrue(venue_runs[0].underline)
-        horn_runs = [run for run in paragraph.runs if "Horn" in run.text]
-        self.assertTrue(horn_runs and horn_runs[0].bold)
+        researcher_runs = [run for run in paragraph.runs if "Example" in run.text]
+        self.assertTrue(researcher_runs and researcher_runs[0].bold)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "citation.docx"
             doc.save(path)

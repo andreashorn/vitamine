@@ -22,7 +22,12 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from vitamine.scripts.export_utils import markdown_to_html_body, sanitize_docx_compatibility_markup
+from vitamine.scripts.export_utils import (
+    configure_researcher_name,
+    markdown_to_html_body,
+    researcher_name_pattern,
+    sanitize_docx_compatibility_markup,
+)
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
 
@@ -342,6 +347,7 @@ def connect() -> sqlite3.Connection:
 
 def person_block(con: sqlite3.Connection) -> list[str]:
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+    configure_researcher_name(person)
     today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
     if not person:
         return [f"# {tr('cv')}"]
@@ -501,7 +507,7 @@ def markdown_publication_citation(row: sqlite3.Row) -> str:
     title = citation_cell(title)
     venue = citation_cell(venue)
     year = citation_cell(year)
-    authors = re.sub(r"\b(Andreas\s+Horn|Horn\s+A\.?)\b", r"**\1**", authors)
+    authors = researcher_name_pattern().sub(r"**\g<0>**", authors)
     parts = []
     if authors:
         parts.append(authors)
@@ -623,7 +629,7 @@ def typ_rich_text(value: str | None, *, bold_names: bool = False, underline: boo
     if bold_names:
         pieces = []
         pos = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?)\b", text):
+        for match in researcher_name_pattern().finditer(text):
             if match.start() > pos:
                 before = text[pos : match.start()]
                 stripped = before.rstrip()
@@ -880,6 +886,7 @@ def grouped_rows(rows: list[sqlite3.Row]) -> list[tuple[str | None, list[sqlite3
 def build_typst() -> str:
     con = connect()
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+    configure_researcher_name(person)
     today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
     achievements_by_entry = trainee_achievement_map(con)
 
@@ -1128,7 +1135,7 @@ def add_publication_docx(doc: Document, index: int, row: sqlite3.Row) -> None:
             set_run_font(sep, size=10.5)
         first = False
         pos = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?)\b", text_value):
+        for match in researcher_name_pattern().finditer(text_value):
             if match.start() > pos:
                 run = paragraph.add_run(text_value[pos:match.start()])
                 set_run_font(run, size=10.5, italic=italic, underline=underline)
@@ -1486,7 +1493,7 @@ def _formal_authors(value: str | None) -> str:
 
 def _add_text_with_own_name_bold(paragraph: Paragraph, value: str, run_properties) -> None:
     position = 0
-    pattern = re.compile(r"\b(?:Horn,\s*A(?:\.\s*[A-Z]\.)?|Andreas\s+Horn|Horn\s+A\.?)\b")
+    pattern = researcher_name_pattern()
     for match in pattern.finditer(value):
         if match.start() > position:
             _styled_run(paragraph, value[position:match.start()], run_properties, bold=False)
@@ -1673,6 +1680,7 @@ def build_docx(path: Path, lang: str = "en") -> Path:
         raise FileNotFoundError(f"Formal Academic CV template is missing: {FORMAL_ACADEMIC_TEMPLATE}")
     con = connect()
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+    configure_researcher_name(person)
     now = dt.datetime.now()
     if LANG == "de":
         today = now.strftime("%d.%m.%Y")

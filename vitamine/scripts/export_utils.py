@@ -8,11 +8,54 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from vitamine.paths import tool_path
 
 
 MC_IGNORABLE_ATTRIBUTE = re.compile(rb"\s+[A-Za-z_][\w.-]*:Ignorable=\"[^\"]*\"")
+_NO_RESEARCHER_NAME = re.compile(r"(?!x)x")
+_RESEARCHER_NAME_PATTERN = _NO_RESEARCHER_NAME
+
+
+def configure_researcher_name(person: Any | None) -> None:
+    """Configure name matching for one CV export process.
+
+    Publication renderers receive author strings in several common forms.  The
+    name to emphasize must always come from the CV being exported, never from
+    a developer's sample data.
+    """
+    global _RESEARCHER_NAME_PATTERN
+    values: list[str] = []
+    if person is not None:
+        for field in ("display_name", "full_name"):
+            try:
+                value = str(person[field] or "").strip()
+            except (KeyError, TypeError, IndexError):
+                value = ""
+            if value and value not in values:
+                values.append(value)
+    variants = [re.escape(value) for value in values]
+    for value in values:
+        parts = value.replace(",", " ").split()
+        if len(parts) < 2:
+            continue
+        surname = re.escape(parts[-1])
+        initial = re.escape(parts[0][0])
+        # Matches both "Surname A." and "Surname, A. B." citation forms.
+        variants.append(rf"{surname},?\s+{initial}\.?(?:\s*[A-Z]\.?)*")
+    if not variants:
+        _RESEARCHER_NAME_PATTERN = _NO_RESEARCHER_NAME
+        return
+    _RESEARCHER_NAME_PATTERN = re.compile(
+        r"(?<!\w)(?:" + "|".join(sorted(set(variants), key=len, reverse=True)) + r")(?!\w)",
+        flags=re.IGNORECASE,
+    )
+
+
+def researcher_name_pattern() -> re.Pattern[str]:
+    """Return the current CV owner's name pattern for export typography."""
+    return _RESEARCHER_NAME_PATTERN
 
 
 def sanitize_docx_compatibility_markup(path: Path) -> Path:

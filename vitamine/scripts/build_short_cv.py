@@ -21,7 +21,11 @@ from docx.shared import Inches, Pt, RGBColor
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
 from vitamine.scripts.export_publication_selection import selected_or_fallback_publications
-from vitamine.scripts.export_utils import sanitize_docx_compatibility_markup
+from vitamine.scripts.export_utils import (
+    configure_researcher_name,
+    researcher_name_pattern,
+    sanitize_docx_compatibility_markup,
+)
 
 DB = active_db_path()
 LANG = "en"
@@ -163,7 +167,7 @@ def typst_rich_text(value: str | None, *, bold_names: bool = False, underline: b
     if bold_names:
         pieces = []
         cursor = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+        for match in researcher_name_pattern().finditer(value):
             if match.start() > cursor:
                 before = value[cursor : match.start()]
                 stripped = before.rstrip()
@@ -286,6 +290,7 @@ def load_data() -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row
             """
         ).fetchall()
         pubs = selected_or_fallback_publications(con, profile="short", limit=publication_limit)
+    configure_researcher_name(person)
     return person, entries, pubs
 
 
@@ -312,7 +317,7 @@ def grouped_sections(entries: list[sqlite3.Row]) -> list[tuple[str, list[sqlite3
 
 def build_html() -> str:
     person, entries, pubs = load_data()
-    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "VitaMine CV"
     title = clean(person["position_title"] if person else "")
     body = [f"<h1>{html.escape(name)}</h1>"]
     if title:
@@ -352,7 +357,7 @@ def build_html() -> str:
 
 def build_typst() -> str:
     person, entries, pubs = load_data()
-    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "VitaMine CV"
     title = clean(person["position_title"] if person else "")
     lines = [
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.65in, right: 0.65in, top: 0.65in, bottom: 0.58in))',
@@ -448,7 +453,7 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
         set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
         return
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn,\s*A(?:\.\s*[A-Z]\.)?|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
         set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
@@ -613,7 +618,7 @@ def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
 
 def build_docx(path: Path) -> Path:
     person, entries, pubs = load_data()
-    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "VitaMine CV"
     title = clean(person["position_title"] if person else "")
     doc = Document()
     section = doc.sections[0]

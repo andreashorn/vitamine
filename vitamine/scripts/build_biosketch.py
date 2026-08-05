@@ -17,6 +17,7 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
+from vitamine.scripts.export_utils import configure_researcher_name, researcher_name_pattern
 
 DB = active_db_path()
 LANG = "en"
@@ -170,7 +171,7 @@ def typst_citation(value: str | None, *, size: str = "9pt") -> str:
     value = citation_text(value)
     pieces = []
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             before = value[cursor : match.start()]
             stripped = before.rstrip()
@@ -195,7 +196,7 @@ def add_docx_citation(doc: Document, value: str, *, size: float = 9.2, after: fl
     set_paragraph_spacing(paragraph, after=after)
     value = citation_text(value)
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             run = paragraph.add_run(value[cursor : match.start()])
             set_run_font(run, size=size)
@@ -245,15 +246,23 @@ def contribution_rows(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def biosketch_name(person: sqlite3.Row | None) -> str:
+    if not person:
+        return "VitaMine CV"
+    name = clean(person["display_name"]) or clean(person["full_name"])
+    degrees = clean(person["degrees"])
+    return f"{name}, {degrees}" if name and degrees else name or "VitaMine CV"
+
+
 def build_html() -> str:
     with connect() as con:
         person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
         contributions = contribution_rows(con)
-    name = "Horn, Andreas Georg, MD, PhD"
+    configure_researcher_name(person)
+    name = biosketch_name(person)
     position = "Associate Professor of Neurology"
     era = "ANHORN"
     if person:
-        name = f"Horn, Andreas Georg, {clean(person['degrees']) or 'MD, PhD'}"
         position = clean(person["position_title"]) or position
         era = clean(person["era_commons"]) or era
     lines = [
@@ -290,11 +299,11 @@ def build_typst() -> str:
     with connect() as con:
         person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
         contributions = contribution_rows(con)
-    name = "Horn, Andreas Georg, MD, PhD"
+    configure_researcher_name(person)
+    name = biosketch_name(person)
     position = "Associate Professor of Neurology"
     era = "ANHORN"
     if person:
-        name = f"Horn, Andreas Georg, {clean(person['degrees']) or 'MD, PhD'}"
         position = clean(person["position_title"]) or position
         era = clean(person["era_commons"]) or era
     lines = [
@@ -355,11 +364,11 @@ def build_docx(path: Path) -> Path:
     with connect() as con:
         person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
         contributions = contribution_rows(con)
-    name = "Horn, Andreas Georg, MD, PhD"
+    configure_researcher_name(person)
+    name = biosketch_name(person)
     position = "Associate Professor of Neurology"
     era = "ANHORN"
     if person:
-        name = f"Horn, Andreas Georg, {clean(person['degrees']) or 'MD, PhD'}"
         position = clean(person["position_title"]) or position
         era = clean(person["era_commons"]) or era
 

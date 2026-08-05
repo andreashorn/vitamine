@@ -20,7 +20,11 @@ from docx.shared import Inches, Pt, RGBColor
 from vitamine.paths import OUTPUT, PACKAGE, ROOT, active_db_path, output_ref
 from vitamine.citation_styles import configured_citation_style, format_publication
 from vitamine.scripts.export_publication_selection import selected_or_fallback_publications
-from vitamine.scripts.export_utils import sanitize_docx_compatibility_markup
+from vitamine.scripts.export_utils import (
+    configure_researcher_name,
+    researcher_name_pattern,
+    sanitize_docx_compatibility_markup,
+)
 
 DB = active_db_path()
 DEFAULT_TEMPLATE = PACKAGE / "onepage_tabular" / "ultrashort_tabular_template.docx"
@@ -147,7 +151,7 @@ def typst_rich_text(value: str | None, *, bold_names: bool = False, underline: b
     if bold_names:
         pieces = []
         cursor = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+        for match in researcher_name_pattern().finditer(value):
             if match.start() > cursor:
                 before = value[cursor : match.start()]
                 stripped = before.rstrip()
@@ -345,7 +349,7 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
         set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
         return
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn,\s*A(?:\.\s*[A-Z]\.)?|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
         set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
@@ -567,6 +571,7 @@ def load_tabular_data(publication_limit_value: int) -> tuple[sqlite3.Row | None,
         positions = position_rows(con)
         awards = award_rows(con)
         publications = selected_publications(con, publication_limit_value)
+    configure_researcher_name(person)
     return person, edu, positions, awards, publications
 
 
@@ -666,6 +671,7 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
         positions = position_rows(con)
         awards = award_rows(con)
         publications = selected_publications(con, publication_limit)
+    configure_researcher_name(person)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(template, output)
