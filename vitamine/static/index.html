@@ -922,6 +922,11 @@
       </div>
       <p id="citationExplorerHint" class="citationExplorerHint"></p>
       <div id="citationExplorerList" class="citationExplorerList" aria-live="polite"></div>
+      <div id="citationCitedByLoading" class="citationPaperLoader" hidden role="status" aria-live="polite">
+        <span class="citationPaperSpinner" aria-hidden="true"></span>
+        <strong>Finding citing papers…</strong>
+        <span>Loading current results from OpenAlex</span>
+      </div>
     </section>
   </dialog>
 
@@ -951,6 +956,6 @@
     </section>
   </dialog>
 
-  <script src="/static/app.js?v=20260805-one-way-profile-sync"></script>
+  <script src="/static/app.js?v=20260805-citation-paper-stack"></script>
 </body>
 </html>

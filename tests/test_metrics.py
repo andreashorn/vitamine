@@ -214,10 +214,15 @@ class MetricsTests(unittest.TestCase):
         self.assertNotIn("citation data refreshes automatically", document)
         self.assertIn("exploreCitations", document)
         self.assertIn("citationExplorerDialog", document)
+        self.assertIn("citationCitedByLoading", document)
+        self.assertIn("citationTitleLink", script)
+        self.assertIn("citationDoiHref", script)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
         self.assertIn("height: 82px;", styles)
+        self.assertIn("citationPaperLoader", styles)
+        self.assertIn("citationCitedByDialog", styles)
         self.assertIn("min-height: 82px;", styles)
 
 

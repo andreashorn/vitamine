@@ -3618,10 +3618,10 @@ label.invalid input {
   width: min(940px, calc(100vw - 32px));
   max-height: min(820px, calc(100vh - 32px));
   overflow: auto;
-  border: 1px solid var(--line);
+  border: 1px solid #d7d0c2;
   padding: 0;
-  background: var(--panel);
-  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.22);
+  background: #fffdf7;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.24);
 }
 
 .citationExplorerDialog::backdrop {
@@ -3629,8 +3629,55 @@ label.invalid input {
 }
 
 .citationExplorerPanel {
+  position: relative;
   padding: 20px;
-  background: #fff;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(184, 146, 82, 0.07), transparent 28%),
+    repeating-linear-gradient(0deg, rgba(99, 82, 51, 0.015) 0 1px, transparent 1px 5px),
+    #fffdf7;
+}
+
+.citationCitedByDialog {
+  transform: translate(18px, 18px);
+  box-shadow: -7px 7px 0 rgba(104, 84, 48, 0.14), 0 24px 80px rgba(15, 23, 42, 0.27);
+}
+
+.citationCitedByDialog::backdrop {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+.citationPaperLoader {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 9px;
+  min-height: 240px;
+  padding: 28px;
+  background: rgba(255, 253, 247, 0.9);
+  color: #294b49;
+  text-align: center;
+  backdrop-filter: blur(2px);
+}
+
+.citationPaperLoader > span:last-child {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.citationPaperSpinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #c9ddd7;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: citationPaperSpin 0.75s linear infinite;
+}
+
+@keyframes citationPaperSpin {
+  to { transform: rotate(360deg); }
 }
 
 .citationExplorerPanel .dialogHeader {
@@ -3714,6 +3761,19 @@ label.invalid input {
   line-height: 1.3;
 }
 
+.citationTitleLink {
+  color: inherit;
+  text-decoration: none;
+}
+
+.citationTitleLink:hover,
+.citationTitleLink:focus-visible {
+  color: #0f766e;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
 .citationPublicationMain p {
   margin: 4px 0 0;
   color: #3f5361;
@@ -3765,7 +3825,7 @@ label.invalid input {
   top: -11px;
   right: 0;
   padding: 0 6px;
-  background: #fff;
+  background: #fffdf7;
   color: var(--accent);
   font-size: 11px;
   font-weight: 700;
@@ -3775,7 +3835,7 @@ label.invalid input {
   margin: 0 0 16px;
   padding: 12px;
   border: 1px solid var(--line);
-  background: #f8fafc;
+  background: rgba(248, 250, 252, 0.72);
 }
 
 .paperCitationHistory h3 {
@@ -4009,6 +4069,10 @@ label.invalid input {
 
   .compactCitationPanel {
     min-width: 0;
+  }
+
+  .citationCitedByDialog {
+    transform: none;
   }
 }
 

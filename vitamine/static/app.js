@@ -2287,6 +2287,23 @@ function citationExplorerPublications() {
   });
 }
 
+function citationDoiHref(value) {
+  const doi = String(value || "")
+    .trim()
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "")
+    .replace(/^doi:\s*/i, "");
+  if (!/^10\.\d{4,9}\/\S+$/i.test(doi)) return "";
+  return `https://doi.org/${encodeURIComponent(doi)}`;
+}
+
+function citationTitleMarkup(title, doi) {
+  const text = escapeHtml(title || "Untitled publication");
+  const href = citationDoiHref(doi);
+  return href
+    ? `<a class="citationTitleLink" href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`
+    : text;
+}
+
 function renderCitationExplorer() {
   const container = $("#citationExplorerList");
   if (!container) return;
@@ -2318,7 +2335,7 @@ function renderCitationExplorer() {
       : "";
     return `<article class="citationPublicationRow">
       <div class="citationPublicationMain">
-        <h3>${escapeHtml(title)}</h3>
+        <h3>${citationTitleMarkup(title, row.doi)}</h3>
         <p>${authors}${venueParts.length ? ` · ${venueParts.join(" · ")}` : ""}</p>
       </div>
       <button type="button" class="citationCountButton" data-cited-publication-id="${Number(row.id)}" aria-label="Show works citing ${escapeHtml(title)}">
@@ -2328,7 +2345,7 @@ function renderCitationExplorer() {
   });
   container.innerHTML = ordered.join("");
   container.querySelectorAll("[data-cited-publication-id]").forEach((button) => {
-    button.addEventListener("click", () => openCitingWorks(Number(button.dataset.citedPublicationId)));
+    button.addEventListener("click", () => openCitingWorks(Number(button.dataset.citedPublicationId), 1, button));
   });
 }
 
@@ -2349,28 +2366,57 @@ function renderPaperCitationHistory(publication) {
   }).join("")}</div>`;
 }
 
-async function openCitingWorks(publicationId, page = 1) {
+function setCitationCitedByLoading(loading, trigger = null) {
+  const loader = $("#citationCitedByLoading");
+  if (loader) loader.hidden = !loading;
+  const explorer = $("#citationExplorerDialog");
+  if (explorer) explorer.setAttribute("aria-busy", String(loading));
+  if (trigger) {
+    trigger.disabled = loading;
+    trigger.setAttribute("aria-busy", String(loading));
+  }
+}
+
+async function openCitingWorks(publicationId, page = 1, trigger = null) {
   const publication = (state.citationExplorer.data?.publications || []).find((row) => Number(row.id) === Number(publicationId));
   if (!publication) return;
   const dialog = $("#citationCitedByDialog");
   if (!dialog) return;
-  if (page === 1) {
+  const initialLoad = page === 1;
+  const loadMore = $("#loadMoreCitingWorks");
+  const loadMoreLabel = loadMore?.textContent;
+  if (initialLoad) {
     state.citationExplorer.selectedPublication = publication;
     state.citationExplorer.citingWorks = [];
-    $("#citationCitedByTitle").textContent = publication.title || publication.raw_citation || "Publication";
-    renderPaperCitationHistory(publication);
-    $("#citationCitedBySummary").textContent = "Loading current citing works from OpenAlex…";
-    $("#citationCitedByList").innerHTML = `<p class="emptyState">Loading citing works…</p>`;
-    if (!dialog.open) dialog.showModal();
+    setCitationCitedByLoading(true, trigger);
+  } else if (loadMore) {
+    loadMore.disabled = true;
+    loadMore.textContent = "Loading…";
   }
   try {
     const data = await api(`/api/citation-profile/publications/${encodeURIComponent(publicationId)}/cited-by?page=${encodeURIComponent(page)}`);
-    state.citationExplorer.citingWorks = page === 1 ? (data.works || []) : [...state.citationExplorer.citingWorks, ...(data.works || [])];
+    state.citationExplorer.citingWorks = initialLoad ? (data.works || []) : [...state.citationExplorer.citingWorks, ...(data.works || [])];
     state.citationExplorer.nextCitingPage = data.next_page;
+    if (initialLoad) {
+      $("#citationCitedByTitle").textContent = publication.title || publication.raw_citation || "Publication";
+      renderPaperCitationHistory(publication);
+    }
     renderCitingWorks(data.total, data.source);
+    if (initialLoad && !dialog.open) dialog.showModal();
   } catch (error) {
-    $("#citationCitedBySummary").textContent = error.message || "Citing works could not load.";
-    if (page === 1) $("#citationCitedByList").innerHTML = `<p class="emptyState">Try again in a moment.</p>`;
+    if (initialLoad) {
+      const hint = $("#citationExplorerHint");
+      if (hint) hint.textContent = error.message || "Citing works could not load. Please try again.";
+      setStatus(error.message || "Citing works could not load.", { error: true });
+    } else {
+      $("#citationCitedBySummary").textContent = error.message || "More citing works could not load.";
+    }
+  } finally {
+    if (initialLoad) setCitationCitedByLoading(false, trigger);
+    if (!initialLoad && loadMore) {
+      loadMore.disabled = false;
+      loadMore.textContent = loadMoreLabel || "Load more";
+    }
   }
 }
 
@@ -2383,7 +2429,7 @@ function renderCitingWorks(total, source) {
   if (list) list.innerHTML = works.length ? works.map((work) => {
     const metadata = [work.venue, work.year].filter(Boolean).map(escapeHtml).join(" · ");
     return `<article class="citationPublicationRow citingWorkRow">
-      <div class="citationPublicationMain"><h3>${escapeHtml(work.title || "Untitled work")}</h3>
+      <div class="citationPublicationMain"><h3>${citationTitleMarkup(work.title, work.doi)}</h3>
         <p>${escapeHtml(work.authors || "Authors unavailable")}${metadata ? ` · ${metadata}` : ""}</p></div>
       <span class="citingWorkCount"><strong>${formatMetricNumber(work.citations)}</strong><span>Citations</span></span>
     </article>`;
