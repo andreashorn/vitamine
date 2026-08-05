@@ -205,6 +205,21 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual({row["kind"] for row in payload["nodes"]}, {"own", "citing"})
             self.assertIn("last_refreshed_at", payload)
 
+    def test_citation_network_refresh_skips_a_failed_openalex_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "citation-network-refresh.vitamine"
+            create_blank_database(path)
+            with sqlite3.connect(path) as con:
+                con.execute("INSERT INTO publications(category, raw_citation, title, openalex_work_id, openalex_cited_by_count) VALUES ('peer_reviewed', 'Own work', 'Own work', 'https://openalex.org/W1', 8)")
+                con.commit()
+            with patch("vitamine.app.active_db_path", return_value=path), patch(
+                "vitamine.app.fetch_json_url", side_effect=OSError("temporary connection failure")
+            ):
+                from vitamine.app import refresh_citation_network
+                payload = refresh_citation_network()
+            self.assertEqual(payload["works"], 0)
+            self.assertEqual(payload["warnings"], ["Own work"])
+
     def test_dashboard_uses_public_facing_metric_labels(self):
         script = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "app.js"

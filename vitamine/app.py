@@ -2732,14 +2732,20 @@ def refresh_citation_network(
         })
         try:
             payload = fetch_json_url(f"https://api.openalex.org/works?{params}", timeout=15)
-        except HTTPException:
+            works = payload.get("results") if isinstance(payload, dict) else []
+        except Exception:
             warnings.append(str(publication.get("title") or publication.get("raw_citation") or "a publication"))
             continue
-        for work in payload.get("results") or []:
+        for work in works or []:
+            if not isinstance(work, dict):
+                continue
             source_work_id = openalex_work_short_id(work.get("id"))
             if not source_work_id:
                 continue
-            cached[source_work_id] = openalex_citing_work_payload(work) | {"openalex_work_id": source_work_id}
+            try:
+                cached[source_work_id] = openalex_citing_work_payload(work) | {"openalex_work_id": source_work_id}
+            except (TypeError, ValueError, KeyError):
+                continue
             links.add((source_work_id, int(publication["id"]), target_work_id))
     with connect() as con:
         con.execute("DELETE FROM citation_network_links")

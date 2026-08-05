@@ -2551,7 +2551,7 @@ async function queueCitationNetworkRefresh() {
         await openCitationNetwork();
       }).catch((error) => {
         $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message)}</p>`;
-      }).finally(() => { state.citationNetwork.refreshing = false; if (button) { button.disabled = false; button.textContent = "Refresh network from OpenAlex"; } });
+      }).finally(() => { state.citationNetwork.refreshing = false; if (button) { button.disabled = false; button.textContent = "Refresh network from OpenAlex"; } renderCitationNetwork(); });
     } else {
       state.citationNetwork.refreshing = false;
       await openCitationNetwork();
