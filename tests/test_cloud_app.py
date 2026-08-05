@@ -5,7 +5,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
@@ -20,6 +20,7 @@ from vitamine.cloud_app import (
     hash_password,
     fail_background_job,
     register_workspace,
+    startup,
     workspace_worker_is_running,
 )
 from vitamine.cloud_crypto import is_encrypted_private_data
@@ -96,6 +97,26 @@ class CloudAppTests(unittest.TestCase):
         _, token = self.redeem()
         self.register(email=email, token=token)
         return token
+
+    def test_gateway_startup_never_recovers_or_runs_background_jobs(self):
+        with (
+            patch("vitamine.cloud_app.initialize_database") as initialize,
+            patch("vitamine.cloud_app.cleanup_expired_workspaces") as cleanup,
+            patch("vitamine.cloud_app.recover_background_jobs") as recover,
+            patch("vitamine.cloud_app.background_job_loop") as job_loop,
+            patch("vitamine.cloud_app.threading.Thread") as thread,
+        ):
+            startup()
+
+        initialize.assert_called_once_with()
+        cleanup.assert_called_once_with()
+        recover.assert_not_called()
+        job_loop.assert_not_called()
+        thread.assert_called_once_with(
+            target=ANY,
+            name="vitamine-workspace-cleanup",
+            daemon=True,
+        )
 
     def test_new_account_starts_with_plus_trial_and_zero_usage_cost(self):
         self.create_account()

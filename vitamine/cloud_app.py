@@ -3891,6 +3891,19 @@ def recover_background_jobs() -> None:
         )
 
 
+def run_background_job_runner() -> None:
+    """Run the durable background-job worker in its dedicated process.
+
+    Recovery belongs here rather than in the HTTP gateway: restarting Uvicorn
+    must never reset a job that this process is currently executing.
+    """
+    JOB_STOP.clear()
+    initialize_database()
+    job_root().mkdir(parents=True, exist_ok=True, mode=0o700)
+    recover_background_jobs()
+    background_job_loop()
+
+
 def database_download_response(content: bytes | memoryview, filename: str) -> Response:
     safe_filename = Path(filename).name
     return Response(
@@ -4245,22 +4258,13 @@ async def unexpected_request_failure(request: Request, error: Exception) -> JSON
 @app.on_event("startup")
 def startup() -> None:
     initialize_database()
-    recover_background_jobs()
     cleanup_expired_workspaces()
     CLEANUP_STOP.clear()
-    JOB_STOP.clear()
     threading.Thread(
         target=workspace_cleanup_loop,
         name="vitamine-workspace-cleanup",
         daemon=True,
     ).start()
-    if os.environ.get("VITAMINE_DISABLE_JOB_RUNNER") != "1":
-        job_root().mkdir(parents=True, exist_ok=True, mode=0o700)
-        threading.Thread(
-            target=background_job_loop,
-            name="vitamine-background-jobs",
-            daemon=True,
-        ).start()
 
 
 @app.on_event("shutdown")

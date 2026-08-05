@@ -1,6 +1,6 @@
 # VitaMine hosted prototype on Strato
 
-Last updated: 2026-08-02.
+Last updated: 2026-08-05.
 
 This is the project handoff for future Codex sessions. It intentionally contains
 no API keys, invite codes, cookies, or other credentials.
@@ -32,11 +32,13 @@ no API keys, invite codes, cookies, or other credentials.
 - Gateway application: `vitamine.cloud_app:app`.
 - The gateway listens only on `127.0.0.1:8766`.
 - systemd unit: `vitamine-cloud.service`.
+- Dedicated background-job unit: `vitamine-cloud-jobs.service`, launched through
+  `vitamine.scripts.run_cloud_jobs`.
 - Installed source: `/srv/vitamine-cloud/current`.
 - Python environment: `/srv/vitamine-cloud/venv`.
 - Runtime-only temporary sessions: `/run/vitamine-cloud/sessions`.
 - Encrypted persistent background-job inputs: `/var/lib/vitamine-cloud/jobs`.
-- Runtime-only decrypted job workspaces: `/run/vitamine-cloud/jobs`.
+- Runtime-only decrypted job workspaces: `/run/vitamine-cloud-jobs/jobs`.
 - Authoritative hosted database: PostgreSQL database `vitamine`, owned by the
   login role `vitamine_app` and reachable only on the VPS loopback interface.
 - Legacy gateway database and cutover source:
@@ -73,12 +75,13 @@ allows the account library to render. The same logo is only a Dashboard
 shortcut in the desktop/local deployment.
 
 Hosted CV imports and full enrichment runs use the PostgreSQL
-`background_jobs` queue. A supervised runner creates an isolated job database,
-runs the shared VitaMine importer/enrichment code in a subprocess, and commits
-the completed snapshot back to PostgreSQL before refreshing any open
-workspace. Closing a tab, returning to My CVs, or signing out does not cancel
-these jobs. Queued/running jobs are requeued after a service restart; an
-interrupted LLM step may restart from the beginning. The browser polls
+`background_jobs` queue. The dedicated job-runner service creates an isolated
+job database, runs the shared VitaMine importer/enrichment code in a
+subprocess, and commits the completed snapshot back to PostgreSQL before
+refreshing any open workspace. Closing a tab, returning to My CVs, or signing
+out does not cancel these jobs. Gateway-only deploys and restarts do not touch
+the runner or active jobs. A job-runner restart requeues queued/running work;
+an interrupted LLM step may restart from the beginning. The browser polls
 authenticated job-status routes and restores progress after reopening.
 
 Import and enrichment submissions use a fresh browser-generated
@@ -264,8 +267,10 @@ Useful read-only checks:
 
 ```sh
 sudo systemctl status vitamine-cloud.service
+sudo systemctl status vitamine-cloud-jobs.service
 curl -fsS http://127.0.0.1:8766/health
 sudo journalctl -u vitamine-cloud.service -n 100 --no-pager
+sudo journalctl -u vitamine-cloud-jobs.service -n 100 --no-pager
 sudo ss -ltnp
 ```
 
@@ -282,8 +287,9 @@ Background-job files exist only while a job is queued or running:
 ```
 
 Queued CV uploads in that directory are authenticated ciphertext. Decrypted
-job inputs, databases, and logs exist below `/run/vitamine-cloud/jobs/<job-id>/`
-only while processing. Active editor workspaces are likewise under `/run`.
+job inputs, databases, and logs exist below
+`/run/vitamine-cloud-jobs/jobs/<job-id>/` only while processing. Active editor
+workspaces are likewise under `/run`.
 
 Uvicorn access-log entries appear only after a request completes. During a long
 CV import, also inspect the uploaded file, worker process, and outbound
@@ -303,7 +309,7 @@ included. Background-job identifiers are also stored in
 Find the corresponding gateway record without broad log disclosure:
 
 ```sh
-sudo journalctl -u vitamine-cloud.service --no-pager | grep -F 'VM-PASTE-ID-HERE'
+sudo journalctl -u vitamine-cloud-jobs.service --no-pager | grep -F 'VM-PASTE-ID-HERE'
 ```
 
 For a background job, correlate its safe structural state in PostgreSQL:
@@ -384,7 +390,9 @@ logs contain only the backend and numeric version.
 
 Before deploying code with a new cloud migration:
 
-1. Confirm there are no running background jobs.
+1. Confirm there are no running background jobs and stop
+   `vitamine-cloud-jobs.service` before deploying the migration. This prevents
+   the old runner from observing a partially updated application release.
 2. Run and verify a fresh PostgreSQL backup:
 
    ```sh
@@ -402,12 +410,14 @@ Before deploying code with a new cloud migration:
      'SELECT version, updated_at FROM cloud_schema_metadata WHERE singleton=1;'
    ```
 
-After restart, verify the service health, migration log, current version, and
-representative account/CV operations:
+After starting the updated runner and gateway, verify both service states, the
+gateway health, migration log, current version, and representative account/CV
+operations:
 
 ```sh
 curl -fsS http://127.0.0.1:8766/health
-sudo journalctl -u vitamine-cloud.service -n 100 --no-pager \
+sudo systemctl is-active vitamine-cloud.service vitamine-cloud-jobs.service
+sudo journalctl -u vitamine-cloud-jobs.service -n 100 --no-pager \
   | grep cloud_schema_migration
 sudo -u postgres psql -d vitamine -c \
   'SELECT version, updated_at FROM cloud_schema_metadata WHERE singleton=1;'
@@ -420,11 +430,11 @@ the commands below, redeploy the recorded application revision, and only then
 restart the service. Never attempt to lower the version number manually.
 
 ```sh
-sudo systemctl stop vitamine-cloud.service
+sudo systemctl stop vitamine-cloud.service vitamine-cloud-jobs.service
 sudo -u postgres pg_dump --format=custom --file=/tmp/vitamine-failed.dump vitamine
 sudo -u postgres pg_restore --clean --if-exists --exit-on-error \
   --dbname=vitamine /var/backups/vitamine-cloud/postgres/<verified-pre-migration.dump>
-sudo systemctl start vitamine-cloud.service
+sudo systemctl start vitamine-cloud-jobs.service vitamine-cloud.service
 curl -fsS http://127.0.0.1:8766/health
 ```
 
@@ -435,14 +445,30 @@ Static HTML/JS changes can be copied without restarting the service. Bump the
 asset query string in `index.html` when JavaScript changes so browsers do not
 reuse an old script.
 
-For Python or service changes:
+For Python or service changes, first identify whether the change affects the
+gateway, the job runner, or both. The units are intentionally independent:
+never add `PartOf=`, `Requires=`, or another lifecycle coupling that would
+stop jobs when the gateway restarts.
 
 1. Copy the intended files.
-2. If the unit changed, stage it in `/tmp`, install it to
-   `/etc/systemd/system/vitamine-cloud.service`, and run
-   `sudo systemctl daemon-reload`.
-3. Restart `vitamine-cloud.service`.
-4. Verify `systemctl is-active`, `/health`, recent logs, and the affected API.
+2. If either unit changed, stage its file in `/tmp`, install it to
+   `/etc/systemd/system/`, and run `sudo systemctl daemon-reload`.
+3. For a gateway-only change, restart only `vitamine-cloud.service`. This does
+   not interrupt queued or running CV jobs.
+4. For a runner/code change, restart `vitamine-cloud-jobs.service`. Its
+   SIGTERM handler terminates the active child worker and requeues that one
+   job; wait for an idle queue when practical because an interrupted LLM step
+   may be repeated.
+5. For a change shared by both, restart the runner only if the changed code is
+   used by jobs, then restart the gateway. Verify both units, `/health`, recent
+   logs, and the affected API.
+
+The initial split-service handover is the sole exception to the gateway-only
+rule: stop the old integrated gateway, start and enable
+`vitamine-cloud-jobs.service`, then start the gateway with
+`VITAMINE_DISABLE_JOB_RUNNER=1`. Any old in-process job is safely requeued once
+by the new runner. Thereafter, deploy gateway/UI changes without restarting the
+job unit.
 
 If gateway metadata must be recopied from the pre-account SQLite database,
 load `/etc/vitamine-cloud.env` without printing it and run:
@@ -460,9 +486,10 @@ were deliberately deleted on 2026-07-31 after the encrypted migration and its
 post-migration backup were verified. Do not expect
 `/var/backups/vitamine-cloud/2026-07-29-accounts-cutover` to exist.
 
-Avoid restarting during an active job when practical. Jobs recover
-automatically, but an interrupted LLM request may be repeated and incur a
-second API charge.
+Avoid restarting `vitamine-cloud-jobs.service` during an active job when
+practical. Jobs recover automatically, but an interrupted LLM request may be
+repeated and incur a second API charge. Restarting `vitamine-cloud.service`
+alone is safe while jobs run.
 
 ## Invite administration
 
@@ -479,6 +506,15 @@ Safe aggregate checks include:
 sudo -u postgres psql -d vitamine -c \
   "SELECT kind, status, count(*) FROM background_jobs GROUP BY kind, status ORDER BY kind, status"
 sudo find /var/lib/vitamine-cloud/jobs -mindepth 1 -maxdepth 1 -type d | wc -l
+```
+
+Verify the split worker without inspecting private job content:
+
+```sh
+sudo systemctl is-active vitamine-cloud.service vitamine-cloud-jobs.service
+sudo systemctl show vitamine-cloud.service -p Environment | grep -F 'VITAMINE_DISABLE_JOB_RUNNER=1'
+sudo systemctl show vitamine-cloud-jobs.service -p Environment | grep -F 'VITAMINE_JOB_WORK_ROOT=/run/vitamine-cloud-jobs/jobs'
+sudo journalctl -u vitamine-cloud-jobs.service -n 100 --no-pager
 ```
 
 CV imports can still spend several minutes waiting on OpenAI. Current progress

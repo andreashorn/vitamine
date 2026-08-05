@@ -1,5 +1,5 @@
 [Unit]
-Description=VitaMine invite-only publishing service
+Description=VitaMine background-job runner
 After=network-online.target
 Wants=network-online.target
 
@@ -10,22 +10,20 @@ Group=vitamine-deploy
 WorkingDirectory=/srv/vitamine-cloud/current
 EnvironmentFile=/etc/vitamine-cloud.env
 Environment=VITAMINE_DEPLOYMENT_CONFIG=/srv/vitamine-cloud/current/deploy/strato/vitamine-hosted.json
-Environment=VITAMINE_SESSION_ROOT=/run/vitamine-cloud/sessions
 Environment=VITAMINE_JOB_ROOT=/var/lib/vitamine-cloud/jobs
-Environment=VITAMINE_JOB_WORK_ROOT=/run/vitamine-cloud/jobs
-Environment=VITAMINE_DISABLE_JOB_RUNNER=1
-ExecStart=/srv/vitamine-cloud/venv/bin/uvicorn vitamine.cloud_app:app --host 127.0.0.1 --port 8766
+Environment=VITAMINE_JOB_WORK_ROOT=/run/vitamine-cloud-jobs/jobs
+ExecStart=/srv/vitamine-cloud/venv/bin/python -m vitamine.scripts.run_cloud_jobs
 Restart=on-failure
 RestartSec=5
 StateDirectory=vitamine-cloud
-RuntimeDirectory=vitamine-cloud
+RuntimeDirectory=vitamine-cloud-jobs
 UMask=0077
 
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/vitamine-cloud /run/vitamine-cloud
+ReadWritePaths=/var/lib/vitamine-cloud /run/vitamine-cloud-jobs
 RestrictSUIDSGID=true
 LockPersonality=true
 
