@@ -2304,6 +2304,16 @@ function citationTitleMarkup(title, doi) {
     : text;
 }
 
+function citationAuthorsMarkup(authors, researcherAuthorIndexes = []) {
+  const parts = String(authors || "").split(",").map((author) => author.trim()).filter(Boolean);
+  const highlighted = new Set((researcherAuthorIndexes || []).map(Number));
+  if (!parts.length) return "Authors unavailable";
+  return parts.map((author, index) => highlighted.has(index)
+    ? `<strong class="citationResearcherAuthor">${escapeHtml(author)}</strong>`
+    : escapeHtml(author)
+  ).join(", ");
+}
+
 function renderCitationExplorer() {
   const container = $("#citationExplorerList");
   if (!container) return;
@@ -2328,7 +2338,7 @@ function renderCitationExplorer() {
   }
   const ordered = rows.map((row, index) => {
     const title = row.title || row.raw_citation || "Untitled publication";
-    const authors = row.authors ? escapeHtml(row.authors) : "Authors unavailable";
+    const authors = citationAuthorsMarkup(row.authors, row.researcher_author_indexes);
     const venueParts = [row.venue, row.year].filter(Boolean).map(escapeHtml);
     const marker = state.citationExplorer.sort === "citations" && hIndex && index + 1 === hIndex
       ? `<div class="citationHIndexMarker"><span>h-index ${formatMetricNumber(hIndex)}</span></div>`

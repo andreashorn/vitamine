@@ -148,6 +148,9 @@ class MetricsTests(unittest.TestCase):
 
             self.assertEqual([row["title"] for row in payload["publications"]], ["First paper", "Last paper", "Coauthored paper"])
             self.assertEqual([row["authorship"] for row in payload["publications"]], ["first", "last", "other"])
+            self.assertEqual(payload["publications"][0]["researcher_author_indexes"], [0])
+            self.assertEqual(payload["publications"][1]["researcher_author_indexes"], [1])
+            self.assertEqual(payload["publications"][2]["researcher_author_indexes"], [])
             self.assertEqual(payload["h_index_history"], [
                 {"year": 2023, "all": 2, "first_last": 2},
                 {"year": 2024, "all": 2, "first_last": 2},
@@ -217,12 +220,14 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationCitedByLoading", document)
         self.assertIn("citationTitleLink", script)
         self.assertIn("citationDoiHref", script)
+        self.assertIn("citationAuthorsMarkup", script)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
         self.assertIn("height: 82px;", styles)
         self.assertIn("citationPaperLoader", styles)
         self.assertIn("citationCitedByDialog", styles)
+        self.assertIn("citationResearcherAuthor", styles)
         self.assertIn('citationCountButton[aria-busy="true"]', styles)
         self.assertIn("background: #fff;", styles)
         self.assertIn("min-height: 82px;", styles)

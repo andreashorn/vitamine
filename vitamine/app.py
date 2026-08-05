@@ -2576,6 +2576,11 @@ def citation_profile_publications() -> dict[str, Any]:
     name_terms = researcher_name_terms(person)
     for row in rows:
         row["authorship"] = researcher_authorship(row.get("authors"), name_terms)
+        row["researcher_author_indexes"] = [
+            index
+            for index, author in enumerate(str(row.get("authors") or "").split(","))
+            if author_matches_researcher(author.strip(), name_terms)
+        ]
     history = citation_h_index_history(rows)
     for row in rows:
         row["citation_years"] = [
