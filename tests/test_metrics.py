@@ -203,6 +203,7 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue(payload["cached"])
             self.assertEqual(len(payload["links"]), 1)
             self.assertEqual({row["kind"] for row in payload["nodes"]}, {"own", "citing"})
+            self.assertIn("last_refreshed_at", payload)
 
     def test_dashboard_uses_public_facing_metric_labels(self):
         script = (
@@ -237,6 +238,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationDoiHref", script)
         self.assertIn("citationAuthorsMarkup", script)
         self.assertIn("citationNetworkGraph", script)
+        self.assertIn("queueCitationNetworkRefresh", script)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
@@ -245,6 +247,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationCitedByDialog", styles)
         self.assertIn("citationResearcherAuthor", styles)
         self.assertIn("citationNetworkNode", styles)
+        self.assertIn("citationNetworkPending", styles)
         self.assertIn('citationCountButton[aria-busy="true"]', styles)
         self.assertIn("background: #fff;", styles)
         self.assertIn("min-height: 82px;", styles)

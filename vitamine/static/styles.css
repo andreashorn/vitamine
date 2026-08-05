@@ -3940,6 +3940,19 @@ label.invalid input {
   background: radial-gradient(circle at 50% 45%, #f8fffe, #edf5f7);
 }
 
+.citationNetworkPending {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  min-height: 420px;
+  padding: 28px;
+  color: var(--ink);
+  text-align: center;
+}
+
+.citationNetworkPending > span:last-child { max-width: 440px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
 .citationNetworkSvg { display: block; width: 100%; height: auto; min-height: 420px; }
 .citationNetworkSvg a { min-height: 0; border: 0; border-radius: 0; padding: 0; background: transparent; }
 .citationNetworkEdge { stroke: #91aaa9; stroke-width: 1.5; stroke-linecap: round; opacity: .7; }

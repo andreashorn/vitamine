@@ -80,7 +80,7 @@ const state = {
     citingWorks: [],
     nextCitingPage: null,
   },
-  citationNetwork: { data: null, positions: {}, animation: null, dragging: null },
+  citationNetwork: { data: null, positions: {}, animation: null, dragging: null, refreshing: false },
   activity: {
     timer: null,
     startedAt: null,
@@ -2491,12 +2491,12 @@ function renderCitationNetwork() {
   const chart = $("#citationNetworkGraph");
   const data = state.citationNetwork.data;
   if (!chart || !data) return;
-  if (!data.cached) { chart.innerHTML = `<p class="emptyState">Build the first cached citation network to explore connections.</p>`; return; }
+  if (!data.cached) { chart.innerHTML = `<div class="citationNetworkPending"><span class="citationPaperSpinner" aria-hidden="true"></span><strong>Preparing your citation network</strong><span>VitaMine is collecting citing papers in the background. You can close this window and check back shortly.</span></div>`; return; }
   positionCitationNetwork();
   const positions = state.citationNetwork.positions; const byId = Object.fromEntries(data.nodes.map((node) => [node.id, node]));
   const links = data.links.map((link) => ({ ...link, source: positions[link.source], target: positions[link.target] })).filter((link) => link.source && link.target);
   chart.innerHTML = `<svg class="citationNetworkSvg" viewBox="0 0 960 540" role="img" aria-label="Citation network graph">${links.map((link) => `<line class="citationNetworkEdge" x1="${link.source.x.toFixed(1)}" y1="${link.source.y.toFixed(1)}" x2="${link.target.x.toFixed(1)}" y2="${link.target.y.toFixed(1)}"></line>`).join("")}${data.nodes.map((node) => { const p = positions[node.id]; const radius = node.kind === "own" ? 10 + Math.min(10, Math.sqrt(node.citations || 0) / 4) : 4 + Math.min(5, Math.sqrt(node.citations || 0) / 13); const href = citationNetworkDoi(node); const inner = `<circle class="citationNetworkNode ${node.kind}" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${radius.toFixed(1)}"></circle><title>${escapeHtml(networkNodeTooltip(node))}</title>`; return href ? `<a data-network-node="${escapeHtml(node.id)}" href="${href}" target="_blank" rel="noopener noreferrer">${inner}</a>` : `<g data-network-node="${escapeHtml(node.id)}">${inner}</g>`; }).join("")}</svg>`;
-  $("#citationNetworkSummary").textContent = `${data.nodes.filter((node) => node.kind === "own").length} own papers · ${data.nodes.filter((node) => node.kind === "citing").length} citing papers · drag a dot to arrange the graph`;
+  $("#citationNetworkSummary").textContent = `${data.nodes.filter((node) => node.kind === "own").length} own papers · ${data.nodes.filter((node) => node.kind === "citing").length} citing papers · drag a dot to arrange the graph${state.citationNetwork.refreshing ? " · updating in background" : ""}`;
   bindCitationNetworkDrag(chart, byId);
 }
 
@@ -2510,13 +2510,38 @@ async function openCitationNetwork() {
   const dialog = $("#citationNetworkDialog"); if (!dialog) return;
   if (!dialog.open) dialog.showModal();
   $("#citationNetworkGraph").innerHTML = `<p class="emptyState">Loading citation network…</p>`;
-  try { state.citationNetwork.data = await api("/api/citation-network"); renderCitationNetwork(); } catch (error) { $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message)}</p>`; }
+  try {
+    state.citationNetwork.data = await api("/api/citation-network");
+    renderCitationNetwork();
+    if (!state.citationNetwork.data.cached || state.citationNetwork.data.stale) queueCitationNetworkRefresh();
+  } catch (error) { $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message)}</p>`; }
 }
 
-async function refreshCitationNetwork() {
+async function queueCitationNetworkRefresh() {
+  if (state.citationNetwork.refreshing) return;
+  state.citationNetwork.refreshing = true;
+  const button = $("#refreshCitationNetwork");
+  if (button) { button.disabled = true; button.textContent = "Refreshing in background…"; }
   const path = state.cloud.enabled ? "/api/cloud/jobs/citation-network" : "/api/actions/refresh-citation-network";
-  const result = await runAction(path, "Citation network ready", "Collecting citing papers from OpenAlex…", { idempotent: state.cloud.enabled });
-  state.citationNetwork.data = result; await openCitationNetwork();
+  try {
+    const submit = state.cloud.enabled ? submitCloudJob : api;
+    const result = await submit(path, { method: "POST" });
+    if (result.background && result.job?.id) {
+      state.cloud.activeJob = result.job;
+      setCloudJobControls(true);
+      setStatus("Collecting citing papers in the background…");
+      waitForCloudJob(result.job.id).then(() => openCitationNetwork()).catch((error) => {
+        $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message)}</p>`;
+      }).finally(() => { state.citationNetwork.refreshing = false; if (button) { button.disabled = false; button.textContent = "Refresh network from OpenAlex"; } });
+    } else {
+      state.citationNetwork.refreshing = false;
+      await openCitationNetwork();
+    }
+  } catch (error) {
+    state.citationNetwork.refreshing = false;
+    if (button) { button.disabled = false; button.textContent = "Refresh network from OpenAlex"; }
+    $("#citationNetworkGraph").innerHTML = `<p class="emptyState">${escapeHtml(error.message || "Citation-network refresh could not start.")}</p>`;
+  }
 }
 
 async function openHIndexHistory(scope = "all") {
@@ -5268,7 +5293,7 @@ async function init() {
     if (event.target === $("#citationNetworkDialog")) $("#citationNetworkDialog")?.close();
   });
   $("#refreshCitationNetwork")?.addEventListener("click", () => {
-    if (requirePlusUi()) refreshCitationNetwork();
+    if (requirePlusUi()) queueCitationNetworkRefresh();
   });
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));

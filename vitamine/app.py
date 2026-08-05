@@ -2767,7 +2767,7 @@ def refresh_citation_network(
         con.commit()
     if progress_callback:
         progress_callback("citation-network", "Saved the citation network", 92)
-    return {"ok": True, "job_kind": "citation_network", "publications": len(publications), "works": len(cached), "links": len(links), "warnings": warnings}
+    return {"ok": True, "job_kind": "citation_network", "publications": len(publications), "works": len(cached), "links": len(links), "warnings": warnings, "database_size_bytes": active_db_path().stat().st_size}
 
 
 @app.post("/api/actions/refresh-citation-network")
@@ -2790,6 +2790,15 @@ def citation_network() -> dict[str, Any]:
             """, (CITATION_NETWORK_MAX_OWN_WORKS,)).fetchall())
         citing = rows_dict(con.execute("SELECT * FROM citation_network_works ORDER BY cited_by_count DESC LIMIT 480").fetchall())
         links = rows_dict(con.execute("SELECT * FROM citation_network_links").fetchall())
+        freshness = con.execute(
+            """
+            SELECT MAX(updated_at) AS last_refreshed_at, COUNT(*) AS cached_works,
+                   CASE WHEN MAX(updated_at) IS NOT NULL
+                         AND julianday('now') - julianday(MAX(updated_at)) > 30
+                        THEN 1 ELSE 0 END AS stale
+            FROM citation_network_works
+            """
+        ).fetchone()
     own_ids = {int(row["id"]) for row in own}
     nodes = [
         {"id": f"own-{row['id']}", "kind": "own", "title": str(row["title"] or row["raw_citation"] or "Untitled publication"),
@@ -2806,7 +2815,7 @@ def citation_network() -> dict[str, Any]:
         {"source": f"work-{row['source_openalex_work_id']}", "target": f"own-{row['target_publication_id']}"}
         for row in links if int(row["target_publication_id"]) in own_ids
     ]
-    return {"nodes": nodes, "links": graph_links, "cached": bool(citing), "limits": {"own": CITATION_NETWORK_MAX_OWN_WORKS, "per_work": CITATION_NETWORK_PER_WORK}}
+    return {"nodes": nodes, "links": graph_links, "cached": bool(citing), "last_refreshed_at": str(freshness["last_refreshed_at"] or ""), "stale": bool(freshness["stale"]), "limits": {"own": CITATION_NETWORK_MAX_OWN_WORKS, "per_work": CITATION_NETWORK_PER_WORK}}
 
 
 @app.get("/api/collaboration-map")
