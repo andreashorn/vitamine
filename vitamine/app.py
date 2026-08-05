@@ -6296,7 +6296,10 @@ def onboarding_payload(con: sqlite3.Connection) -> dict[str, Any]:
     skipped = {item for item in get_setting(con, "onboarding_skipped_steps").split(",") if item}
     completed = get_setting(con, "onboarding_completed") == "1"
     orcid_id = saved_orcid_id(con)
-    zotero_connected = bool(get_setting(con, "zotero_api_key"))
+    # Hosted workspaces receive the account-level OAuth credential only at
+    # runtime. It must count as a connected source even though it is never
+    # written into the portable VitaMine database.
+    zotero_connected = bool(zotero_runtime_api_key(con))
     enriched = bool(get_setting(con, "enrichment_last_run") or get_setting(con, "background_enrichment_last_run"))
     step = ""
     if enabled and not completed:

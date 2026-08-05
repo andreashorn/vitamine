@@ -2,6 +2,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from vitamine.app import onboarding_payload
 from vitamine.paths import create_blank_database
@@ -59,6 +60,32 @@ class OnboardingTests(unittest.TestCase):
                 payload = onboarding_payload(con)
                 self.assertFalse(payload["enabled"])
                 self.assertEqual(payload["step"], "")
+            finally:
+                con.close()
+
+    def test_hosted_zotero_oauth_credential_completes_zotero_onboarding_step(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "default.vitamine"
+            create_blank_database(path)
+            con = sqlite3.connect(path)
+            con.row_factory = sqlite3.Row
+            try:
+                con.execute("UPDATE person SET full_name='Test Researcher' WHERE id=1")
+                con.executemany(
+                    "INSERT OR REPLACE INTO app_settings(key, value) VALUES (?, ?)",
+                    [
+                        ("onboarding_enabled", "1"),
+                        ("orcid_id", "0000-0000-0000-0000"),
+                    ],
+                )
+                con.commit()
+                with patch.dict(
+                    "os.environ",
+                    {"VITAMINE_CLOUD_WORKER": "1", "ZOTERO_API_KEY": "test-oauth-credential"},
+                ):
+                    payload = onboarding_payload(con)
+                self.assertTrue(payload["zotero_connected"])
+                self.assertEqual(payload["step"], "enrich")
             finally:
                 con.close()
 
