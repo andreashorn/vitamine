@@ -2688,8 +2688,8 @@ def citation_profile_cited_by(publication_id: int, page: int = 1) -> dict[str, A
     }
 
 
-CITATION_NETWORK_MAX_OWN_WORKS = 24
-CITATION_NETWORK_PER_WORK = 20
+CITATION_NETWORK_MAX_OWN_WORKS = 60
+CITATION_NETWORK_PER_WORK = 10
 
 
 def openalex_work_short_id(value: Any) -> str:
@@ -2815,7 +2815,9 @@ def citation_network() -> dict[str, Any]:
         {"source": f"work-{row['source_openalex_work_id']}", "target": f"own-{row['target_publication_id']}"}
         for row in links if int(row["target_publication_id"]) in own_ids
     ]
-    return {"nodes": nodes, "links": graph_links, "cached": bool(citing), "last_refreshed_at": str(freshness["last_refreshed_at"] or ""), "stale": bool(freshness["stale"]), "limits": {"own": CITATION_NETWORK_MAX_OWN_WORKS, "per_work": CITATION_NETWORK_PER_WORK}}
+    covered_publications = len({int(row["target_publication_id"]) for row in links})
+    undercovered = bool(citing) and covered_publications < min(30, len(own))
+    return {"nodes": nodes, "links": graph_links, "cached": bool(citing), "last_refreshed_at": str(freshness["last_refreshed_at"] or ""), "stale": bool(freshness["stale"]) or undercovered, "limits": {"own": CITATION_NETWORK_MAX_OWN_WORKS, "per_work": CITATION_NETWORK_PER_WORK}}
 
 
 @app.get("/api/collaboration-map")

@@ -80,7 +80,7 @@ const state = {
     citingWorks: [],
     nextCitingPage: null,
   },
-  citationNetwork: { data: null, graph: null, refreshing: false },
+  citationNetwork: { data: null, graph: null, refreshing: false, settleTimer: null },
   activity: {
     timer: null,
     startedAt: null,
@@ -2457,6 +2457,29 @@ function networkNodeTooltip(node) {
     .filter(Boolean).join("\n");
 }
 
+function runCitationNetworkLayout(graph, { reset = false, fit = false } = {}) {
+  if (!graph) return;
+  graph.layout({
+    name: "cose",
+    animate: true,
+    animationDuration: reset ? 900 : 560,
+    padding: 96,
+    nodeRepulsion: 18000,
+    idealEdgeLength: 195,
+    edgeElasticity: 0.22,
+    gravity: 0.14,
+    numIter: 1400,
+    initialTemp: 220,
+    coolingFactor: 0.97,
+    minTemp: 1,
+    nodeDimensionsIncludeLabels: true,
+    nodeOverlap: 34,
+    componentSpacing: 100,
+    randomize: reset,
+    fit,
+  }).run();
+}
+
 function renderCitationNetwork() {
   const chart = $("#citationNetworkGraph");
   const data = state.citationNetwork.data;
@@ -2474,21 +2497,26 @@ function renderCitationNetwork() {
       ...data.links.map((link, index) => ({ data: { id: `edge-${index}`, source: link.source, target: link.target } })),
     ],
     style: [
-      { selector: "node", style: { "background-color": "#7392a8", "border-width": 2, "border-color": "#4c6476", width: "mapData(citations, 0, 1000, 9, 20)", height: "mapData(citations, 0, 1000, 9, 20)", "overlay-opacity": 0, "transition-property": "background-color, border-width, border-color", "transition-duration": "160ms" } },
-      { selector: 'node[kind = "own"]', style: { "background-color": "#168675", "border-color": "#075e55", width: "mapData(citations, 0, 1000, 24, 46)", height: "mapData(citations, 0, 1000, 24, 46)" } },
+      { selector: "node", style: { "background-fill": "radial-gradient", "background-gradient-stop-colors": "#a8c6d9 #6689a2", "background-gradient-stop-positions": "0% 100%", "border-width": 2, "border-color": "#4c6476", "shadow-blur": 7, "shadow-color": "#405c70", "shadow-opacity": 0.23, "shadow-offset-y": 2, width: "mapData(citations, 0, 1000, 9, 20)", height: "mapData(citations, 0, 1000, 9, 20)", "overlay-opacity": 0, "transition-property": "background-color, border-width, border-color", "transition-duration": "160ms" } },
+      { selector: 'node[kind = "own"]', style: { "background-fill": "radial-gradient", "background-gradient-stop-colors": "#48c6b0 #0b7669", "background-gradient-stop-positions": "0% 100%", "border-width": 4, "border-color": "#075e55", "shadow-blur": 12, "shadow-color": "#0c766b", "shadow-opacity": 0.3, width: "mapData(citations, 0, 1000, 24, 46)", height: "mapData(citations, 0, 1000, 24, 46)" } },
       { selector: "node:active", style: { "border-width": 4, "border-color": "#172554" } },
-      { selector: "edge", style: { width: 1.5, "line-color": "#90aaa9", opacity: 0.72, "curve-style": "bezier" } },
+      { selector: "edge", style: { width: 1.8, "line-gradient-stop-colors": "#b4cecd #6f9e9b", "line-gradient-stop-positions": "0% 100%", opacity: 0.68, "curve-style": "bezier" } },
     ],
     wheelSensitivity: 0.18,
     minZoom: 0.2,
     maxZoom: 3,
-    layout: { name: "cose", animate: true, animationDuration: 900, padding: 74, nodeRepulsion: 8500, idealEdgeLength: 145, gravity: 0.32, numIter: 1200, randomize: true },
+    layout: { name: "preset" },
   });
   state.citationNetwork.graph = graph;
+  runCitationNetworkLayout(graph, { reset: true, fit: true });
   graph.on("mouseover", "node", (event) => { const node = event.target.data(); tooltip.innerHTML = `<strong>${escapeHtml(node.title)}</strong><span>${escapeHtml(node.authors || "Authors unavailable")}</span><span>${escapeHtml([node.venue, node.year].filter(Boolean).join(" · "))}</span><span>${formatMetricNumber(node.citations)} citations</span>`; tooltip.hidden = false; });
   graph.on("mousemove", "node", (event) => { const position = event.renderedPosition; tooltip.style.left = `${Math.min(chart.clientWidth - 270, position.x + 16)}px`; tooltip.style.top = `${Math.min(chart.clientHeight - 130, position.y + 16)}px`; });
   graph.on("mouseout", "node", () => { tooltip.hidden = true; });
   graph.on("tap", "node", (event) => { const href = citationNetworkDoi(event.target.data()); if (href) window.open(href, "_blank", "noopener,noreferrer"); });
+  graph.on("free", "node", () => {
+    window.clearTimeout(state.citationNetwork.settleTimer);
+    state.citationNetwork.settleTimer = window.setTimeout(() => runCitationNetworkLayout(graph), 90);
+  });
   $("#citationNetworkSummary").textContent = `${data.nodes.filter((node) => node.kind === "own").length} own papers · ${data.nodes.filter((node) => node.kind === "citing").length} citing papers · drag a dot to arrange the graph${state.citationNetwork.refreshing ? " · updating in background" : ""}`;
 }
 
@@ -5289,6 +5317,7 @@ async function init() {
   $("#citationNetworkZoomIn")?.addEventListener("click", () => state.citationNetwork.graph?.zoom({ level: state.citationNetwork.graph.zoom() * 1.25, renderedPosition: { x: 480, y: 300 } }));
   $("#citationNetworkZoomOut")?.addEventListener("click", () => state.citationNetwork.graph?.zoom({ level: state.citationNetwork.graph.zoom() / 1.25, renderedPosition: { x: 480, y: 300 } }));
   $("#citationNetworkFit")?.addEventListener("click", () => state.citationNetwork.graph?.fit(undefined, 72));
+  $("#citationNetworkReset")?.addEventListener("click", () => runCitationNetworkLayout(state.citationNetwork.graph, { reset: true, fit: true }));
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });

@@ -241,6 +241,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationNetworkGraph", script)
         self.assertIn("queueCitationNetworkRefresh", script)
         self.assertIn("window.cytoscape", script)
+        self.assertIn("runCitationNetworkLayout", script)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
         ).read_text(encoding="utf-8")
@@ -250,6 +251,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationResearcherAuthor", styles)
         self.assertIn("citationNetworkTooltip", styles)
         self.assertIn("citationNetworkPending", styles)
+        self.assertIn("citationNetworkCanvas", styles)
         self.assertIn('citationCountButton[aria-busy="true"]', styles)
         self.assertIn("background: #fff;", styles)
         self.assertIn("min-height: 82px;", styles)

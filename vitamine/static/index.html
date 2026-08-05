@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260805-cytoscape-network">
+  <link rel="stylesheet" href="/static/styles.css?v=20260805-cytoscape-jelly-network">
 </head>
 <body>
   <header class="topbar">
@@ -959,13 +959,13 @@
 
   <dialog id="citationNetworkDialog" class="citationExplorerDialog citationNetworkDialog">
     <section class="citationExplorerPanel citationNetworkPanel">
-      <div class="dialogHeader"><div><h2>Citation network</h2><p id="citationNetworkSummary">A bounded, cached view of papers that cite your most-cited work.</p></div><div class="citationNetworkControls"><button id="citationNetworkZoomOut" type="button" aria-label="Zoom out">−</button><button id="citationNetworkZoomIn" type="button" aria-label="Zoom in">+</button><button id="citationNetworkFit" type="button">Fit graph</button><button id="closeCitationNetwork" type="button">Close</button></div></div>
+      <div class="dialogHeader"><div><h2>Citation network</h2><p id="citationNetworkSummary">A bounded, cached view of papers that cite your most-cited work.</p></div><div class="citationNetworkControls"><button id="citationNetworkZoomOut" type="button" aria-label="Zoom out">−</button><button id="citationNetworkZoomIn" type="button" aria-label="Zoom in">+</button><button id="citationNetworkFit" type="button">Fit graph</button><button id="citationNetworkReset" type="button">Reset layout</button><button id="closeCitationNetwork" type="button">Close</button></div></div>
       <div id="citationNetworkGraph" class="citationNetworkGraph"></div>
       <div class="formActions"><button id="refreshCitationNetwork" type="button">Refresh network from OpenAlex</button></div>
     </section>
   </dialog>
 
   <script src="/static/vendor/cytoscape-3.30.4.min.js?v=20260805"></script>
-  <script src="/static/app.js?v=20260805-cytoscape-network-local"></script>
+  <script src="/static/app.js?v=20260805-cytoscape-jelly-network"></script>
 </body>
 </html>
