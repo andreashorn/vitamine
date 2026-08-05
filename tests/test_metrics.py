@@ -233,6 +233,7 @@ class MetricsTests(unittest.TestCase):
         self.assertNotIn("citation data refreshes automatically", document)
         self.assertIn("exploreCitations", document)
         self.assertIn("citationExplorerDialog", document)
+        self.assertIn("/static/vendor/cytoscape-3.30.4.min.js", document)
         self.assertIn("citationCitedByLoading", document)
         self.assertIn("citationTitleLink", script)
         self.assertIn("citationDoiHref", script)
