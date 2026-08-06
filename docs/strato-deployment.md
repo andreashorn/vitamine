@@ -551,6 +551,15 @@ the current production setting is the code default `200000`. An unpriced recent
 OpenAI response also pauses further managed-AI work so an unknown model cannot
 bypass the safety boundary.
 
+The operator dashboard at `/admin` shows a privacy-preserving managed-AI status
+for each dashboard pseudonym and an alerts table for unpriced responses,
+unusually expensive jobs (at least $0.05), repeated job starts (at least three
+within 24 hours), failures, and queued/running jobs without a heartbeat for 15
+minutes. It exposes neither real member or job IDs, email addresses, CV data,
+filenames, prompts, model output, nor job error text. A successful OpenAI
+response that omits provider usage is recorded as unpriced and pauses that
+account's managed-AI work instead of being silently excluded from the ledger.
+
 ## Operator usage dashboard
 
 The separate operator dashboard lives at `https://vitamine.cloud/admin`. It is

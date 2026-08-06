@@ -4,6 +4,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import ANY, AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
@@ -1456,6 +1457,42 @@ class CloudAppTests(unittest.TestCase):
 
     def test_operator_dashboard_uses_separate_login_and_anonymized_usage(self):
         self.create_account(email="private-member@example.org")
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat()
+        stale_text = (now - timedelta(minutes=20)).isoformat()
+        with sqlite3.connect(self.db_path) as con:
+            member_id = con.execute("SELECT id FROM members WHERE email='private-member@example.org'").fetchone()[0]
+            database_id = opened.json()["database_id"]
+            con.executemany(
+                """
+                INSERT INTO background_jobs
+                  (id, member_id, database_id, kind, status, base_revision, payload_json, progress_json,
+                   created_at, started_at, heartbeat_at, updated_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, 1, '{}', '{}', ?, ?, ?, ?, ?)
+                """,
+                [
+                    ("failed-alert", member_id, database_id, "enrich_cv", "failed", now_text, now_text, now_text, now_text, now_text),
+                    ("stuck-alert", member_id, database_id, "cv_import", "running", stale_text, stale_text, stale_text, stale_text, None),
+                    ("repeat-alert-1", member_id, database_id, "cleanup_cv", "queued", now_text, None, None, now_text, None),
+                    ("repeat-alert-2", member_id, database_id, "cleanup_cv", "queued", now_text, None, None, now_text, None),
+                    ("repeat-alert-3", member_id, database_id, "cleanup_cv", "queued", now_text, None, None, now_text, None),
+                ],
+            )
+            con.executemany(
+                """
+                INSERT INTO llm_usage_events
+                  (id, event_key, member_id, database_id, job_id, operation, provider, model,
+                   wholesale_cost_microusd, charged_cost_microusd, created_at)
+                VALUES (?, ?, ?, ?, ?, 'enrich_cv', 'openai', 'gpt-5.4-nano', ?, ?, ?)
+                """,
+                [
+                    ("expensive-alert", "openai:expensive-alert", member_id, database_id, "failed-alert", 50_000, 50_000, now_text),
+                    ("unpriced-alert", "openai:unpriced-alert", member_id, database_id, "failed-alert", None, None, now_text),
+                ],
+            )
+            con.commit()
         password_login = self.client.post(
             "/api/account/login",
             json={"email": "private-member@example.org", "password": "correct-horse-battery-staple"},
@@ -1490,6 +1527,14 @@ class CloudAppTests(unittest.TestCase):
             member = dashboard.json()["members"][0]
             self.assertTrue(member["reference"].startswith("Member "))
             self.assertEqual(member["logins_since_dashboard_enabled"], 1)
+            self.assertTrue(member["managed_ai_paused"])
+            self.assertEqual(member["unpriced_24h"], 1)
+            self.assertEqual(dashboard.json()["overview"]["unpriced_responses_30_days"], 1)
+            self.assertEqual(dashboard.json()["overview"]["managed_ai_paused_accounts"], 1)
+            self.assertEqual(
+                {row["signal"] for row in dashboard.json()["job_alerts"]},
+                {"expensive", "unpriced", "stuck", "failed", "repeated"},
+            )
             self.assertNotIn("id", member)
             self.assertNotIn("email", member)
             self.assertEqual(self.client.post("/api/admin/logout").status_code, 200)

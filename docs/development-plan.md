@@ -435,8 +435,8 @@ Evidence: pending
 - [x] Add abuse-oriented per-account and per-job spending limits independently
   of VitaMine+ access. The current pilot uses a per-account $0.20 rolling
   24-hour managed-AI guard; it deliberately has no separate per-job cap.
-- [ ] An operator view for unusually expensive, repeated, failed, or stuck
-  jobs.
+- [x] An operator view for unusually expensive, repeated, failed, or stuck
+  jobs, using dashboard-only account pseudonyms and no job payloads or IDs.
 - [ ] Robust job idempotency and cancellation so retries cannot silently repeat
   expensive work.
 - [ ] A defined behavior for provider outages, rate limits, and malformed model

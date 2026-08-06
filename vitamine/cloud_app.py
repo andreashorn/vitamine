@@ -105,6 +105,10 @@ INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000  # Legacy migrations only.
 PAYPAL_BETA_TOPUP_MICROUSD = 5_000_000
 OPENAI_ACCOUNT_SPEND_LIMIT_MICROUSD = 200_000
 OPENAI_ACCOUNT_SPEND_WINDOW_HOURS = 24
+ADMIN_EXPENSIVE_JOB_MICROUSD = 50_000
+ADMIN_REPEATED_JOB_WINDOW_HOURS = 24
+ADMIN_REPEATED_JOB_COUNT = 3
+ADMIN_STUCK_JOB_MINUTES = 15
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -1687,6 +1691,7 @@ def admin_dashboard_payload() -> dict[str, Any]:
     """Return operational aggregates without emails, names, CV data, or raw IDs."""
     now = datetime.now(timezone.utc)
     cutoff_30 = (now - timedelta(days=30)).isoformat()
+    cutoff_24 = (now - timedelta(hours=ADMIN_REPEATED_JOB_WINDOW_HOURS)).isoformat()
     with connect() as con:
         members = con.execute(
             """
@@ -1707,17 +1712,23 @@ def admin_dashboard_payload() -> dict[str, Any]:
                    (SELECT COALESCE(SUM(u.output_tokens), 0) FROM llm_usage_events u
                     WHERE u.member_id=m.id) AS output_tokens,
                    (SELECT COALESCE(SUM(u.wholesale_cost_microusd), 0) FROM llm_usage_events u
-                    WHERE u.member_id=m.id) AS cost_microusd
+                    WHERE u.member_id=m.id) AS cost_microusd,
+                   (SELECT COALESCE(SUM(u.wholesale_cost_microusd), 0) FROM llm_usage_events u
+                    WHERE u.member_id=m.id AND u.created_at>=?) AS cost_24h_microusd,
+                   (SELECT COUNT(*) FROM llm_usage_events u
+                    WHERE u.member_id=m.id AND u.created_at>=? AND u.wholesale_cost_microusd IS NULL) AS unpriced_24h
             FROM members m
             WHERE m.email IS NOT NULL AND m.password_hash IS NOT NULL AND m.revoked_at IS NULL
             ORDER BY m.last_seen_at DESC
-            """
+            """,
+            (cutoff_24, cutoff_24),
         ).fetchall()
         usage_30 = con.execute(
             """
             SELECT COUNT(*) AS llm_calls, COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                   COALESCE(SUM(wholesale_cost_microusd), 0) AS cost_microusd
+                   COALESCE(SUM(wholesale_cost_microusd), 0) AS cost_microusd,
+                   COUNT(*) FILTER (WHERE wholesale_cost_microusd IS NULL) AS unpriced_responses
             FROM llm_usage_events WHERE created_at>=?
             """,
             (cutoff_30,),
@@ -1754,11 +1765,45 @@ def admin_dashboard_payload() -> dict[str, Any]:
             """,
             (cutoff_30,),
         ).fetchall()
+        job_usage = con.execute(
+            """
+            SELECT j.member_id, j.kind, j.status, j.created_at, j.started_at, j.heartbeat_at,
+                   j.finished_at, COALESCE(SUM(u.wholesale_cost_microusd), 0) AS cost_microusd,
+                   COUNT(u.id) AS llm_calls,
+                   COUNT(*) FILTER (WHERE u.id IS NOT NULL AND u.wholesale_cost_microusd IS NULL) AS unpriced_responses
+            FROM background_jobs j
+            LEFT JOIN llm_usage_events u ON u.job_id=j.id
+            WHERE j.created_at>=? OR j.status IN ('queued', 'running')
+            GROUP BY j.id, j.member_id, j.kind, j.status, j.created_at, j.started_at,
+                     j.heartbeat_at, j.finished_at
+            """,
+            (cutoff_30,),
+        ).fetchall()
+        failed_jobs = con.execute(
+            """
+            SELECT member_id, kind, COUNT(*) AS count, MAX(COALESCE(finished_at, updated_at, created_at)) AS latest_at
+            FROM background_jobs
+            WHERE status='failed' AND created_at>=?
+            GROUP BY member_id, kind
+            """,
+            (cutoff_30,),
+        ).fetchall()
+        repeated_jobs = con.execute(
+            """
+            SELECT member_id, kind, COUNT(*) AS count, MAX(created_at) AS latest_at
+            FROM background_jobs
+            WHERE created_at>=?
+            GROUP BY member_id, kind
+            HAVING COUNT(*)>=?
+            """,
+            (cutoff_24, ADMIN_REPEATED_JOB_COUNT),
+        ).fetchall()
 
     def days_since(value: Any) -> int | None:
         parsed = parsed_utc(value)
         return max(0, int((now - parsed).total_seconds() // 86_400)) if parsed else None
 
+    spend_limit = openai_account_spend_limit_microusd()
     member_rows = [
         {
             "reference": admin_member_reference(str(row["id"])),
@@ -1773,9 +1818,48 @@ def admin_dashboard_payload() -> dict[str, Any]:
             "input_tokens": int(row["input_tokens"] or 0),
             "output_tokens": int(row["output_tokens"] or 0),
             "cost_microusd": int(row["cost_microusd"] or 0),
+            "cost_24h_microusd": int(row["cost_24h_microusd"] or 0),
+            "unpriced_24h": int(row["unpriced_24h"] or 0),
+            "managed_ai_paused": (
+                int(row["cost_24h_microusd"] or 0) >= spend_limit
+                or int(row["unpriced_24h"] or 0) > 0
+            ),
         }
         for row in members
     ]
+    alerts: list[dict[str, Any]] = []
+    for row in job_usage:
+        cost = int(row["cost_microusd"] or 0)
+        unpriced = int(row["unpriced_responses"] or 0)
+        heartbeat = parsed_utc(row["heartbeat_at"] or row["started_at"] or row["created_at"])
+        age_minutes = max(0, int((now - heartbeat).total_seconds() // 60)) if heartbeat else None
+        base = {
+            "reference": admin_member_reference(str(row["member_id"])),
+            "kind": str(row["kind"]),
+            "cost_microusd": cost,
+            "llm_calls": int(row["llm_calls"] or 0),
+            "latest_at": str(row["finished_at"] or row["heartbeat_at"] or row["created_at"] or ""),
+        }
+        if cost >= ADMIN_EXPENSIVE_JOB_MICROUSD:
+            alerts.append({**base, "signal": "expensive", "count": 1, "age_minutes": None})
+        if unpriced:
+            alerts.append({**base, "signal": "unpriced", "count": unpriced, "age_minutes": None})
+        if str(row["status"]) in {"queued", "running"} and age_minutes is not None and age_minutes >= ADMIN_STUCK_JOB_MINUTES:
+            alerts.append({**base, "signal": "stuck", "count": 1, "age_minutes": age_minutes})
+    for row in failed_jobs:
+        alerts.append({
+            "reference": admin_member_reference(str(row["member_id"])), "kind": str(row["kind"]),
+            "signal": "failed", "count": int(row["count"] or 0), "age_minutes": None,
+            "cost_microusd": 0, "llm_calls": 0, "latest_at": str(row["latest_at"] or ""),
+        })
+    for row in repeated_jobs:
+        alerts.append({
+            "reference": admin_member_reference(str(row["member_id"])), "kind": str(row["kind"]),
+            "signal": "repeated", "count": int(row["count"] or 0), "age_minutes": None,
+            "cost_microusd": 0, "llm_calls": 0, "latest_at": str(row["latest_at"] or ""),
+        })
+    alert_order = {"stuck": 0, "unpriced": 1, "expensive": 2, "failed": 3, "repeated": 4}
+    alerts.sort(key=lambda row: (alert_order.get(str(row["signal"]), 99), str(row["latest_at"])), reverse=False)
     daily: dict[str, dict[str, Any]] = {}
     for offset in range(29, -1, -1):
         day = (now - timedelta(days=offset)).date().isoformat()
@@ -1803,9 +1887,12 @@ def admin_dashboard_payload() -> dict[str, Any]:
             "input_tokens_30_days": int(usage_30["input_tokens"] or 0),
             "output_tokens_30_days": int(usage_30["output_tokens"] or 0),
             "cost_microusd_30_days": int(usage_30["cost_microusd"] or 0),
+            "unpriced_responses_30_days": int(usage_30["unpriced_responses"] or 0),
+            "managed_ai_paused_accounts": sum(row["managed_ai_paused"] for row in member_rows),
         },
         "jobs_30_days": jobs,
         "daily_30_days": list(daily.values()),
+        "job_alerts": alerts,
         "members": member_rows,
     }
 
@@ -3757,9 +3844,18 @@ def ingest_llm_usage_events(job: Any, path: Path) -> int:
             for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"):
                 value = event.get(key)
                 counts.append(int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None)
-            costs = usage_costs({**event, **dict(zip(
-                ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"), counts
-            ))})
+            if event.get("usage_available") is False:
+                costs = {
+                    "priced_model": None,
+                    "pricing_version": "usage-unavailable",
+                    "wholesale_cost_microusd": None,
+                    "charged_cost_microusd": None,
+                    "markup_basis_points": None,
+                }
+            else:
+                costs = usage_costs({**event, **dict(zip(
+                    ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"), counts
+                ))})
             cursor = con.execute(
                 """
                 INSERT INTO llm_usage_events

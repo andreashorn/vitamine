@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vitamine.cloud_app import connect, ingest_llm_usage_events, initialize_database
-from vitamine.llm_usage import usage_costs, usage_event
+from vitamine.llm_usage import record_usage, usage_costs, usage_event
 from vitamine.scripts.import_uploaded_cv import parse_json_response
 from vitamine.scripts.manage_cloud import llm_usage_totals, premium_account_totals
 
@@ -69,7 +69,9 @@ class LlmUsageTests(unittest.TestCase):
         self.assertEqual(complete["cached_input_tokens"], 30)
         self.assertEqual(complete["reasoning_tokens"], 4)
         self.assertNotIn("PRIVATE-CV-CONTENT", json.dumps(complete))
-        self.assertIsNone(usage_event({"id": "response-2"}))
+        missing = usage_event({"id": "response-2", "model": "gpt-4.1-mini"})
+        self.assertFalse(missing["usage_available"])
+        self.assertIsNone(missing["input_tokens"])
         partial = usage_event({"id": "response-3", "model": "model", "usage": {"input_tokens": 7}})
         self.assertEqual(partial["input_tokens"], 7)
         self.assertIsNone(partial["output_tokens"])
@@ -114,6 +116,17 @@ class LlmUsageTests(unittest.TestCase):
         accounts = premium_account_totals()
         self.assertEqual(accounts[0]["charged_microusd"], 10)
         self.assertEqual(accounts[0]["balance_microusd"], -10)
+
+    def test_missing_provider_usage_is_recorded_as_unpriced(self):
+        usage_path = self.root / "missing-usage.jsonl"
+        with patch.dict(os.environ, {"VITAMINE_LLM_USAGE_PATH": str(usage_path)}):
+            record_usage({"id": "response-without-usage", "model": "gpt-4.1-mini"})
+        job = {"id": "job-1", "member_id": "member-1", "database_id": "cv-1", "kind": "cv_import"}
+        self.assertEqual(ingest_llm_usage_events(job, usage_path), 1)
+        with connect() as con:
+            row = con.execute("SELECT pricing_version, wholesale_cost_microusd FROM llm_usage_events").fetchone()
+        self.assertEqual(row["pricing_version"], "usage-unavailable")
+        self.assertIsNone(row["wholesale_cost_microusd"])
 
 
 if __name__ == "__main__":

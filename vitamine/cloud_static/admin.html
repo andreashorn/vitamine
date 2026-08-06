@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robots" content="noindex, nofollow">
     <title>VitaMine — Operator dashboard</title>
-    <link rel="stylesheet" href="/assets/admin.css?v=20260805-usage-dashboard">
-    <script src="/assets/admin.js?v=20260805-usage-dashboard" defer></script>
+    <link rel="stylesheet" href="/assets/admin.css?v=20260806-spend-job-alerts">
+    <script src="/assets/admin.js?v=20260806-spend-job-alerts" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -52,6 +52,11 @@
           <div id="jobs" class="job-list"></div>
         </section>
 
+        <section class="panel">
+          <div class="section-heading"><div><p class="eyebrow">Operator review</p><h2>Job alerts</h2></div><p>Flags unusual cost, repeated starts, failures, stale queued/running jobs, and unavailable OpenAI usage data. Account pseudonyms only.</p></div>
+          <div class="table-wrap"><table><thead><tr><th>Member</th><th>Signal</th><th>Job</th><th>Count</th><th>Cost</th><th>Age</th></tr></thead><tbody id="jobAlerts"></tbody></table></div>
+        </section>
+
         <section class="panel member-panel">
           <div class="section-heading">
             <div><p class="eyebrow">Anonymized accounts</p><h2>Member usage</h2></div>
@@ -59,7 +64,7 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Member</th><th>Inactive</th><th>Account age</th><th>Logins*</th><th>Enrich</th><th>LLM calls</th><th>Tokens in / out</th><th>API cost</th></tr></thead>
+              <thead><tr><th>Member</th><th>AI status</th><th>Inactive</th><th>Account age</th><th>Logins*</th><th>Enrich</th><th>LLM calls</th><th>Tokens in / out</th><th>API cost</th></tr></thead>
               <tbody id="members"></tbody>
             </table>
           </div>

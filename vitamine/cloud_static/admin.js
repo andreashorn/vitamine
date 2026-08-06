@@ -23,6 +23,8 @@
       ["Active in 7 days", number.format(data.active_7_days)],
       ["LLM calls · 30 days", number.format(data.llm_calls_30_days)],
       ["Underlying API cost · 30 days", money(data.cost_microusd_30_days)],
+      ["Unpriced responses · 30 days", number.format(data.unpriced_responses_30_days)],
+      ["Managed AI paused", number.format(data.managed_ai_paused_accounts)],
     ];
     $("#overview").innerHTML = metrics.map(([label, value]) => `<article class="metric"><p>${label}</p><strong>${value}</strong></article>`).join("");
   }
@@ -39,10 +41,21 @@
     $("#jobs").innerHTML = rows.length ? rows.map((row) => `<div class="job"><b>${text(row.kind.replace("_", " "))}</b> · ${text(row.status)}: ${number.format(row.count)}</div>`).join("") : "<p>No background jobs in the last 30 days.</p>";
   }
 
+  function status(member) {
+    if (member.unpriced_24h) return `<span class="status-badge critical">Paused · unpriced</span>`;
+    if (member.managed_ai_paused) return `<span class="status-badge warning">Paused · $0.20</span>`;
+    return `<span class="status-badge">Available</span>`;
+  }
+
+  function drawJobAlerts(rows) {
+    const labels = { expensive: "High cost", repeated: "Repeated", failed: "Failed", stuck: "Stuck", unpriced: "Unpriced" };
+    $("#jobAlerts").innerHTML = rows.map((row) => `<tr><td>${text(row.reference)}</td><td><span class="status-badge ${text(row.signal)}">${text(labels[row.signal] || row.signal)}</span></td><td>${text(row.kind.replace("_", " "))}</td><td>${number.format(row.count)}</td><td>${row.cost_microusd ? money(row.cost_microusd) : "—"}</td><td>${row.age_minutes === null || row.age_minutes === undefined ? "—" : `${number.format(row.age_minutes)}m`}</td></tr>`).join("") || '<tr><td colspan="6">No jobs need operator review.</td></tr>';
+  }
+
   function drawMembers() {
     const query = $("#memberFilter").value.trim().toLowerCase();
     const rows = dashboard.members.filter((member) => `${member.reference} ${days(member.inactive_days)}`.toLowerCase().includes(query));
-    $("#members").innerHTML = rows.map((member) => `<tr><td>${text(member.reference)}</td><td>${days(member.inactive_days)}</td><td>${number.format(member.account_age_days || 0)}d</td><td>${number.format(member.logins_since_dashboard_enabled)}</td><td>${number.format(member.enrichment_calls)}</td><td>${number.format(member.llm_calls)}</td><td>${compact.format(member.input_tokens)} / ${compact.format(member.output_tokens)}</td><td>${money(member.cost_microusd)}</td></tr>`).join("") || '<tr><td colspan="8">No matching anonymized members.</td></tr>';
+    $("#members").innerHTML = rows.map((member) => `<tr><td>${text(member.reference)}</td><td>${status(member)}</td><td>${days(member.inactive_days)}</td><td>${number.format(member.account_age_days || 0)}d</td><td>${number.format(member.logins_since_dashboard_enabled)}</td><td>${number.format(member.enrichment_calls)}</td><td>${number.format(member.llm_calls)}</td><td>${compact.format(member.input_tokens)} / ${compact.format(member.output_tokens)}</td><td>${money(member.cost_microusd)}</td></tr>`).join("") || '<tr><td colspan="9">No matching anonymized members.</td></tr>';
   }
 
   function drawDashboard(data) {
@@ -52,6 +65,7 @@
     drawOverview(data.overview);
     drawTrend(data.daily_30_days);
     drawJobs(data.jobs_30_days);
+    drawJobAlerts(data.job_alerts);
     drawMembers();
   }
 

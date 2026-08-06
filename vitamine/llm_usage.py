@@ -76,8 +76,8 @@ def _count(value: Any) -> int | None:
 
 def usage_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        return None
+    usage_available = isinstance(usage, dict)
+    usage = usage if usage_available else {}
     input_details = usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
     output_details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
     response_id = str(payload.get("id") or "").strip()
@@ -91,6 +91,7 @@ def usage_event(payload: dict[str, Any]) -> dict[str, Any] | None:
         "event_key": event_key,
         "provider": "openai",
         "model": model,
+        "usage_available": usage_available,
         "input_tokens": _count(usage.get("prompt_tokens", usage.get("input_tokens"))),
         "cached_input_tokens": _count(input_details.get("cached_tokens")) if isinstance(input_details, dict) else None,
         "output_tokens": _count(usage.get("completion_tokens", usage.get("output_tokens"))),
