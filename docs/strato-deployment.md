@@ -97,6 +97,17 @@ for an identical owner/CV/request; conflicting reuse receives HTTP 409. Keys
 are scoped to both the authenticated account and CV. Legacy clients without a
 key retain the existing one-active-job-per-CV behavior.
 
+The workspace account menu offers cancellation while a hosted job is queued or
+running. A queued job becomes terminally `cancelled` immediately and its
+encrypted queued upload is removed. For running work, the runner stops the
+child process before it can save a snapshot; an OpenAI request already sent to
+the provider may still complete and be charged. Just before persisting a
+successful result, the runner atomically begins its completion boundary. A
+cancellation requested after that point receives HTTP 409 and the job finishes
+successfully, rather than falsely reporting a saved CV as cancelled. Retrying
+with the same idempotency key always returns the original terminal or active
+job; an intentional new attempt uses a fresh browser key.
+
 Institution geocoding is a separate lightweight worker task. It runs
 opportunistically after a saved institution, accepted imported person field,
 or ORCID link/refresh. Existing complete coordinates are treated as manual
@@ -414,6 +425,10 @@ Before deploying code with a new cloud migration:
    sudo -u postgres psql -d vitamine -c \
      'SELECT version, updated_at FROM cloud_schema_metadata WHERE singleton=1;'
    ```
+
+Cloud schema migration 16 adds the terminal `cancelled` job state and a
+completion fence. It follows this procedure: wait for an idle queue, stop the
+runner before the migration, and take a verified PostgreSQL backup first.
 
 After starting the updated runner and gateway, verify both service states, the
 gateway health, migration log, current version, and representative account/CV

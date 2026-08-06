@@ -93,7 +93,7 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 15
+CLOUD_SCHEMA_VERSION = 16
 OPENAI_CV_PROCESSING_CONSENT_VERSION = "2026-08-05"
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
@@ -270,7 +270,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
     database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv')),
-    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
     base_revision INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
     idempotency_key TEXT,
@@ -285,7 +285,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     finished_at TEXT,
     updated_at TEXT NOT NULL,
     acknowledged_at TEXT,
-    cancel_requested_at TEXT
+    cancel_requested_at TEXT,
+    completion_started_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_background_jobs_member
@@ -574,7 +575,7 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
     database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
     kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv')),
-    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+    status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
     base_revision INTEGER NOT NULL,
     payload_json TEXT NOT NULL DEFAULT '{}',
     idempotency_key TEXT,
@@ -589,7 +590,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     finished_at TEXT,
     updated_at TEXT NOT NULL,
     acknowledged_at TEXT,
-    cancel_requested_at TEXT
+    cancel_requested_at TEXT,
+    completion_started_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_background_jobs_member
@@ -2483,6 +2485,103 @@ def migration_015_openai_consent(con: GatewayConnection) -> None:
         con.execute("ALTER TABLE background_jobs ADD COLUMN cancel_requested_at TEXT")
 
 
+def migration_016_background_job_cancellation(con: GatewayConnection) -> None:
+    """Make cancellation terminal and fence it before a completed CV is saved."""
+    if not cloud_table_exists(con, "background_jobs"):
+        return
+    if con.backend == "postgres":
+        rows = con.execute(
+            """
+            SELECT conname FROM pg_constraint
+            WHERE conrelid='background_jobs'::regclass AND contype='c'
+              AND pg_get_constraintdef(oid) LIKE '%%status%%'
+            """
+        ).fetchall()
+        for row in rows:
+            name = str(row["conname"])
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                con.execute(f'ALTER TABLE background_jobs DROP CONSTRAINT "{name}"')
+        con.execute(
+            "ALTER TABLE background_jobs ADD CONSTRAINT background_jobs_status_check "
+            "CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled'))"
+        )
+        con.execute("ALTER TABLE background_jobs ADD COLUMN IF NOT EXISTS completion_started_at TEXT")
+        return
+
+    columns = sqlite_column_names(con, "background_jobs")
+    required_columns = {
+        "id", "member_id", "database_id", "kind", "status", "base_revision",
+        "payload_json", "idempotency_key", "request_fingerprint", "progress_json",
+        "result_json", "error_message", "support_id", "created_at", "started_at",
+        "heartbeat_at", "finished_at", "updated_at", "acknowledged_at", "cancel_requested_at",
+    }
+    # A handful of early pre-queue development fixtures use a minimal table
+    # that older migrations intentionally leave in place. They cannot contain
+    # an actionable hosted job, so do not turn this additive migration into a
+    # destructive table reconstruction.
+    if not required_columns.issubset(columns):
+        return
+    schema_row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='background_jobs'"
+    ).fetchone()
+    schema_sql = str(schema_row["sql"] or "") if schema_row else ""
+    if "cancelled" in schema_sql.casefold() and "completion_started_at" in columns:
+        return
+    con.execute("ALTER TABLE background_jobs RENAME TO background_jobs_before_cancellation")
+    con.execute(
+        """
+        CREATE TABLE background_jobs (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            database_id TEXT NOT NULL REFERENCES account_databases(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL CHECK (kind IN ('cv_import', 'enrich_cv', 'cleanup_cv')),
+            status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+            base_revision INTEGER NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT,
+            request_fingerprint TEXT,
+            progress_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT,
+            error_message TEXT,
+            support_id TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            heartbeat_at TEXT,
+            finished_at TEXT,
+            updated_at TEXT NOT NULL,
+            acknowledged_at TEXT,
+            cancel_requested_at TEXT,
+            completion_started_at TEXT
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO background_jobs
+          (id, member_id, database_id, kind, status, base_revision, payload_json,
+           idempotency_key, request_fingerprint, progress_json, result_json,
+           error_message, support_id, created_at, started_at, heartbeat_at,
+           finished_at, updated_at, acknowledged_at, cancel_requested_at)
+          SELECT id, member_id, database_id, kind, status, base_revision, payload_json,
+                 idempotency_key, request_fingerprint, progress_json, result_json,
+                 error_message, support_id, created_at, started_at, heartbeat_at,
+                 finished_at, updated_at, acknowledged_at, cancel_requested_at
+          FROM background_jobs_before_cancellation
+        """
+    )
+    con.execute("DROP TABLE background_jobs_before_cancellation")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_background_jobs_member ON background_jobs(member_id, status, created_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_background_jobs_database ON background_jobs(database_id, status, created_at)")
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_idempotency "
+        "ON background_jobs(member_id, database_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+    )
+    con.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_support_id "
+        "ON background_jobs(support_id) WHERE support_id IS NOT NULL"
+    )
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -2499,6 +2598,7 @@ CLOUD_MIGRATIONS = (
     (13, migration_013_cleanup_cv_jobs),
     (14, migration_014_admin_usage_dashboard),
     (15, migration_015_openai_consent),
+    (16, migration_016_background_job_cancellation),
 )
 
 
@@ -3492,6 +3592,7 @@ def parsed_json_object(raw: Any) -> dict[str, Any]:
 
 def background_job_payload(row: Any, *, include_result: bool = True) -> dict[str, Any]:
     result = parsed_json_object(row["result_json"]) if include_result and row["result_json"] else None
+    cancellation_requested = bool(row["cancel_requested_at"])
     return {
         "id": row["id"],
         "database_id": row["database_id"],
@@ -3506,6 +3607,12 @@ def background_job_payload(row: Any, *, include_result: bool = True) -> dict[str
         "finished_at": row["finished_at"],
         "updated_at": row["updated_at"],
         "acknowledged": bool(row["acknowledged_at"]),
+        "cancellation_requested": cancellation_requested,
+        "cancellable": (
+            row["status"] in {"queued", "running"}
+            and not cancellation_requested
+            and not row["completion_started_at"]
+        ),
     }
 
 
@@ -3525,6 +3632,71 @@ def active_background_job(database_id: str) -> Any | None:
 def workspace_has_active_job(row: Any) -> bool:
     database_id = str(row["database_id"] or "")
     return bool(database_id and active_background_job(database_id))
+
+
+class BackgroundJobCancelled(Exception):
+    """A job was stopped before it crossed its durable-save boundary."""
+
+
+def background_job_cancellation_requested(job_id: str) -> bool:
+    with connect() as con:
+        row = con.execute(
+            "SELECT status, cancel_requested_at, completion_started_at FROM background_jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+    return bool(
+        row
+        and row["status"] == "running"
+        and row["cancel_requested_at"]
+        and not row["completion_started_at"]
+    )
+
+
+def begin_background_job_completion(job_id: str) -> bool:
+    """Atomically make a completed snapshot non-cancellable before saving it."""
+    now = utc_now()
+    with connect() as con:
+        cursor = con.execute(
+            """
+            UPDATE background_jobs
+            SET completion_started_at=?, heartbeat_at=?, updated_at=?
+            WHERE id=? AND status='running' AND cancel_requested_at IS NULL
+              AND completion_started_at IS NULL
+            """,
+            (now, now, now, job_id),
+        )
+    return cursor.rowcount == 1
+
+
+def finish_cancelled_background_job(job_id: str) -> None:
+    """Record a requested cancellation without exposing job inputs or errors."""
+    now = utc_now()
+    with connect() as con:
+        con.execute(
+            """
+            UPDATE background_jobs
+            SET status='cancelled', error_message=NULL, support_id=NULL,
+                result_json=?, heartbeat_at=?, finished_at=?, updated_at=?,
+                progress_json=?
+            WHERE id=? AND status IN ('queued', 'running')
+            """,
+            (
+                json.dumps({"cancelled": True}),
+                now,
+                now,
+                now,
+                json.dumps(
+                    {
+                        "phase": "cancelled",
+                        "message": "Cancelled before the CV was changed",
+                        "percent": 100,
+                    }
+                ),
+                job_id,
+            ),
+        )
+    shutil.rmtree(job_root() / job_id, ignore_errors=True)
+    shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
 
 
 def normalize_idempotency_key(value: str | None) -> str | None:
@@ -3910,6 +4082,8 @@ def background_job_requires_openai_consent(job: Any) -> bool:
 
 
 def execute_background_job(job: Any) -> None:
+    if background_job_cancellation_requested(str(job["id"])):
+        raise BackgroundJobCancelled()
     directory = (job_root() / str(job["id"])).resolve()
     try:
         directory.relative_to(job_root())
@@ -4024,6 +4198,14 @@ def execute_background_job(job: Any) -> None:
                 except subprocess.TimeoutExpired:
                     process.kill()
                 raise RuntimeError("VitaMine restarted while the job was running; it will be retried.")
+            if background_job_cancellation_requested(str(job["id"])):
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                ingest_llm_usage_events(job, usage_path)
+                raise BackgroundJobCancelled()
             if background_job_requires_openai_consent(job):
                 try:
                     require_openai_processing_consent(str(job["member_id"]))
@@ -4049,6 +4231,8 @@ def execute_background_job(job: Any) -> None:
     if returncode != 0 or not result.get("ok"):
         message = str(result.get("error") or "The background process failed.")[-4000:]
         raise RuntimeError(message)
+    if not begin_background_job_completion(str(job["id"])):
+        raise BackgroundJobCancelled()
     persist_database_snapshot(
         member_id=str(job["member_id"]),
         database_id=str(job["database_id"]),
@@ -4079,7 +4263,7 @@ def execute_background_job(job: Any) -> None:
             UPDATE background_jobs
             SET status='succeeded', progress_json=?, result_json=?, error_message=NULL,
                 heartbeat_at=?, finished_at=?, updated_at=?
-            WHERE id=?
+            WHERE id=? AND status='running' AND completion_started_at IS NOT NULL
             """,
             (
                 json.dumps(
@@ -4110,7 +4294,7 @@ def fail_background_job(job_id: str, error: Exception) -> None:
             con.execute(
                 """
                 UPDATE background_jobs
-                SET status='queued', started_at=NULL, heartbeat_at=NULL, updated_at=?,
+                SET status='queued', started_at=NULL, heartbeat_at=NULL, completion_started_at=NULL, updated_at=?,
                     progress_json=?
                 WHERE id=? AND status='running'
                 """,
@@ -4178,6 +4362,8 @@ def background_job_loop() -> None:
             continue
         try:
             execute_background_job(job)
+        except BackgroundJobCancelled:
+            finish_cancelled_background_job(str(job["id"]))
         except Exception as exc:
             fail_background_job(str(job["id"]), exc)
 
@@ -4190,9 +4376,30 @@ def recover_background_jobs() -> None:
         con.execute(
             """
             UPDATE background_jobs
-            SET status='queued', started_at=NULL, heartbeat_at=NULL, updated_at=?,
+            SET status='cancelled', error_message=NULL, support_id=NULL,
+                result_json=?, heartbeat_at=?, finished_at=?, updated_at=?, progress_json=?
+            WHERE status IN ('queued', 'running') AND cancel_requested_at IS NOT NULL
+            """,
+            (
+                json.dumps({"cancelled": True}),
+                now,
+                now,
+                now,
+                json.dumps(
+                    {
+                        "phase": "cancelled",
+                        "message": "Cancelled before the CV was changed",
+                        "percent": 100,
+                    }
+                ),
+            ),
+        )
+        con.execute(
+            """
+            UPDATE background_jobs
+            SET status='queued', started_at=NULL, heartbeat_at=NULL, completion_started_at=NULL, updated_at=?,
                 progress_json=?
-            WHERE status='running'
+            WHERE status='running' AND cancel_requested_at IS NULL
             """,
             (
                 now,
@@ -4209,7 +4416,7 @@ def recover_background_jobs() -> None:
         con.execute(
             """
             DELETE FROM background_jobs
-            WHERE status IN ('succeeded', 'failed') AND finished_at<?
+            WHERE status IN ('succeeded', 'failed', 'cancelled') AND finished_at<?
             """,
             (cutoff,),
         )
@@ -5457,13 +5664,132 @@ def acknowledge_background_job(
             """
             UPDATE background_jobs
             SET acknowledged_at=?, updated_at=?
-            WHERE id=? AND member_id=? AND status IN ('succeeded', 'failed')
+            WHERE id=? AND member_id=? AND status IN ('succeeded', 'failed', 'cancelled')
             """,
             (utc_now(), utc_now(), job_id, member["id"]),
         )
     if cursor.rowcount != 1:
         raise HTTPException(status_code=404, detail="Completed background job not found.")
     return {"ok": True}
+
+
+@app.post("/api/cloud/jobs/{job_id}/cancel")
+def cancel_background_job(
+    job_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Cancel owned work before it crosses the authoritative snapshot boundary."""
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    now = utc_now()
+    cancelled_immediately = False
+    with connect() as con:
+        row = con.execute(
+            "SELECT * FROM background_jobs WHERE id=? AND member_id=?",
+            (job_id, member["id"]),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Background job not found.")
+        if row["status"] == "queued":
+            cursor = con.execute(
+                """
+                UPDATE background_jobs
+                SET status='cancelled', cancel_requested_at=COALESCE(cancel_requested_at, ?),
+                    error_message=NULL, support_id=NULL, result_json=?, heartbeat_at=?,
+                    finished_at=?, updated_at=?, progress_json=?
+                WHERE id=? AND member_id=? AND status='queued'
+                """,
+                (
+                    now,
+                    json.dumps({"cancelled": True}),
+                    now,
+                    now,
+                    now,
+                    json.dumps(
+                        {
+                            "phase": "cancelled",
+                            "message": "Cancelled before the CV was changed",
+                            "percent": 100,
+                        }
+                    ),
+                    job_id,
+                    member["id"],
+                ),
+            )
+            if cursor.rowcount == 1:
+                cancelled_immediately = True
+            else:
+                row = con.execute(
+                    "SELECT * FROM background_jobs WHERE id=? AND member_id=?",
+                    (job_id, member["id"]),
+                ).fetchone()
+                if row is None or row["status"] != "running" or row["completion_started_at"]:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This background process has already started saving its result and cannot be cancelled.",
+                    )
+                con.execute(
+                    """
+                    UPDATE background_jobs
+                    SET cancel_requested_at=COALESCE(cancel_requested_at, ?), updated_at=?, progress_json=?
+                    WHERE id=? AND member_id=? AND status='running' AND completion_started_at IS NULL
+                    """,
+                    (
+                        now,
+                        now,
+                        json.dumps(
+                            {
+                                "phase": "cancelling",
+                                "message": "Cancellation requested; stopping remaining work",
+                                "percent": 100,
+                            }
+                        ),
+                        job_id,
+                        member["id"],
+                    ),
+                )
+        elif row["status"] == "running":
+            if row["completion_started_at"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This background process has already started saving its result and cannot be cancelled.",
+                )
+            con.execute(
+                """
+                UPDATE background_jobs
+                SET cancel_requested_at=COALESCE(cancel_requested_at, ?), updated_at=?, progress_json=?
+                WHERE id=? AND member_id=? AND status='running' AND completion_started_at IS NULL
+                """,
+                (
+                    now,
+                    now,
+                    json.dumps(
+                        {
+                            "phase": "cancelling",
+                            "message": "Cancellation requested; stopping remaining work",
+                            "percent": 100,
+                        }
+                    ),
+                    job_id,
+                    member["id"],
+                ),
+            )
+        else:
+            raise HTTPException(status_code=409, detail="This background process has already finished.")
+        updated = con.execute(
+            "SELECT * FROM background_jobs WHERE id=? AND member_id=?",
+            (job_id, member["id"]),
+        ).fetchone()
+    if cancelled_immediately:
+        shutil.rmtree(job_root() / job_id, ignore_errors=True)
+        shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Background job not found.")
+    return {
+        "ok": True,
+        "cancellation_requested": bool(updated["cancel_requested_at"]),
+        "job": background_job_payload(updated),
+    }
 
 
 @app.get("/api/account/databases")

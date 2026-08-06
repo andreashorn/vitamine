@@ -263,6 +263,36 @@ function setCloudJobControls(running) {
     download.classList.toggle("disabledLink", running);
     download.setAttribute("aria-disabled", String(running));
   }
+  const cancel = $("#cloudCancelJob");
+  if (cancel) {
+    const job = state.cloud.activeJob;
+    cancel.hidden = !running;
+    cancel.disabled = !job?.cancellable;
+    cancel.textContent = job?.cancellation_requested
+      ? "Cancellation requested"
+      : job?.cancellable
+        ? "Cancel background process"
+        : "Finishing background process";
+  }
+}
+
+async function cancelCloudBackgroundJob() {
+  const job = state.cloud.activeJob;
+  if (!job?.cancellable) return;
+  if (!window.confirm("Cancel this background process? Work that OpenAI has already received may still finish and be billed.")) return;
+  const button = $("#cloudCancelJob");
+  if (button) button.disabled = true;
+  try {
+    const response = await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/cancel`, { method: "POST" });
+    state.cloud.activeJob = ["queued", "running"].includes(response.job?.status) ? response.job : null;
+    setCloudJobControls(Boolean(state.cloud.activeJob));
+    setStatus(response.job?.status === "cancelled"
+      ? "Background process cancelled before the CV was changed."
+      : "Cancellation requested; stopping remaining work.");
+  } catch (error) {
+    setStatus(error.message, { error: true });
+    if (button) button.disabled = false;
+  }
 }
 
 function configureCloudWorkspace(workspace) {
@@ -286,6 +316,7 @@ function configureCloudWorkspace(workspace) {
     $("#cloudAccountMenuButton").setAttribute("aria-expanded", String(opening));
   });
   $("#cloudMyCvs").addEventListener("click", returnToWorkspaceHome);
+  $("#cloudCancelJob").addEventListener("click", cancelCloudBackgroundJob);
   $("#cloudSignOut").addEventListener("click", async () => {
     closeCloudAccountMenu();
     try {
@@ -463,6 +494,12 @@ async function waitForCloudJob(jobId) {
       setCloudJobControls(false);
       throw new Error(job.error || "The background process failed.");
     }
+    if (job.status === "cancelled") {
+      await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" }).catch(() => {});
+      state.cloud.activeJob = null;
+      setCloudJobControls(false);
+      return { cancelled: true };
+    }
     await delay(2000);
   }
 }
@@ -482,11 +519,20 @@ async function resumeCloudBackgroundJob() {
     await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" }).catch(() => {});
     return;
   }
+  if (job.status === "cancelled") {
+    setStatus("Background process cancelled before the CV was changed.");
+    await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" }).catch(() => {});
+    return;
+  }
   state.cloud.resuming = true;
   const stopProcessing = startProcessing(cloudJobMessage(job));
   setActionButtons(true);
   try {
-    await waitForCloudJob(job.id);
+    const completed = await waitForCloudJob(job.id);
+    if (completed?.cancelled) {
+      setStatus("Background process cancelled before the CV was changed.");
+      return;
+    }
     setStatus(cloudJobCompletionMessage(job.kind));
     window.location.reload();
   } catch (error) {
@@ -1826,6 +1872,10 @@ async function importCvFiles(files) {
       setCloudJobControls(true);
       data = await waitForCloudJob(data.job.id);
     }
+    if (data.cancelled) {
+      setStatus("Background process cancelled before the CV was changed.");
+      return;
+    }
     const publicationPart = data.publications_inserted ? `, ${data.publications_inserted} publications` : "";
     const narrativePart = data.narratives_imported ? `, ${data.narratives_imported} narrative report${data.narratives_imported === 1 ? "" : "s"}` : "";
     const rememberedPart = data.staged?.remembered_rejections ? ` ${data.staged.remembered_rejections} previously rejected candidate${data.staged.remembered_rejections === 1 ? "" : "s"} skipped.` : "";
@@ -2668,6 +2718,10 @@ async function queueCitationNetworkRefresh() {
       setCloudJobControls(true);
       setStatus("Collecting citing papers in the background…");
       waitForCloudJob(result.job.id).then(async (completed) => {
+        if (completed?.cancelled) {
+          setStatus("Citation-network refresh cancelled before the CV was changed.");
+          return;
+        }
         const size = Number(completed?.database_size_bytes || 0);
         const footprint = size ? ` The CV database is now ${(size / 1024 / 1024).toFixed(1)} MB.` : "";
         setStatus(`Citation network ready.${footprint}`);
@@ -5076,6 +5130,10 @@ async function runAction(path, doneText, workingText = "Working...", options = {
       setCloudJobControls(true);
       data = await waitForCloudJob(data.job.id);
     }
+    if (data.cancelled) {
+      setStatus("Background process cancelled before the CV was changed.");
+      return data;
+    }
     setStatus(doneText);
     await loadSummary();
     await loadMetrics();
@@ -5369,6 +5427,7 @@ async function init() {
       "Enriching CV from databases and online sources...",
       { idempotent: enrichPath.startsWith("/api/cloud/jobs/") },
     );
+    if (data?.cancelled) return;
     setStatus(enrichmentSummaryText(data));
     actionLog("#syncOutput", data);
     await loadImportInbox();
@@ -5397,6 +5456,7 @@ async function init() {
       "Reviewing compact CV sections for corrections, duplicates, and junk entries...",
       { idempotent: cleanupPath.startsWith("/api/cloud/jobs/") },
     );
+    if (data?.cancelled) return;
     setStatus(`${data.suggestions_staged || 0} cleanup suggestions added to Inbox`);
     actionLog("#syncOutput", data);
     await loadImportInbox();

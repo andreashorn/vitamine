@@ -13,13 +13,17 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from vitamine.cloud_app import (
+    BackgroundJobCancelled,
     JOB_STOP,
     app,
+    begin_background_job_completion,
     claim_next_background_job,
     create_blank_workspace_database,
     execute_background_job,
+    finish_cancelled_background_job,
     hash_password,
     fail_background_job,
+    recover_background_jobs,
     register_workspace,
     startup,
     workspace_worker_is_running,
@@ -651,6 +655,90 @@ class CloudAppTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as con:
             count = con.execute("SELECT COUNT(*) FROM background_jobs").fetchone()[0]
         self.assertEqual(count, 1)
+
+    def test_queued_import_cancellation_removes_artifacts_and_frees_the_cv(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            headers={"Idempotency-Key": "cancel-import-0001"},
+            files={"files": ("cv.txt", b"Private CV", "text/plain")},
+        )
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job_id = queued.json()["job"]["id"]
+        self.assertTrue((Path(self.directory.name) / "jobs" / job_id).is_dir())
+
+        cancelled = self.client.post(f"/api/cloud/jobs/{job_id}/cancel")
+        self.assertEqual(cancelled.status_code, 200, cancelled.text)
+        self.assertEqual(cancelled.json()["job"]["status"], "cancelled")
+        self.assertTrue(cancelled.json()["cancellation_requested"])
+        self.assertFalse((Path(self.directory.name) / "jobs" / job_id).exists())
+        self.assertIsNone(claim_next_background_job())
+
+        replay = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            headers={"Idempotency-Key": "cancel-import-0001"},
+            files={"files": ("cv.txt", b"Private CV", "text/plain")},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json()["idempotent_replay"])
+        self.assertEqual(replay.json()["job"]["id"], job_id)
+        replacement = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(replacement.status_code, 202, replacement.text)
+
+    def test_running_job_cancellation_stops_before_any_worker_or_snapshot(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job_id = queued.json()["job"]["id"]
+        job = claim_next_background_job()
+        self.assertIsNotNone(job)
+
+        requested = self.client.post(f"/api/cloud/jobs/{job_id}/cancel")
+        self.assertEqual(requested.status_code, 200, requested.text)
+        self.assertEqual(requested.json()["job"]["status"], "running")
+        self.assertTrue(requested.json()["job"]["cancellation_requested"])
+        with self.assertRaises(BackgroundJobCancelled):
+            execute_background_job(job)
+        finish_cancelled_background_job(job_id)
+
+        finished = self.client.get(f"/api/cloud/jobs/{job_id}")
+        self.assertEqual(finished.status_code, 200, finished.text)
+        self.assertEqual(finished.json()["job"]["status"], "cancelled")
+        self.assertFalse(finished.json()["job"]["cancellable"])
+
+    def test_cancel_is_rejected_after_the_completion_fence(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job = claim_next_background_job()
+        self.assertIsNotNone(job)
+        self.assertTrue(begin_background_job_completion(queued.json()["job"]["id"]))
+
+        cancelled = self.client.post(f"/api/cloud/jobs/{queued.json()['job']['id']}/cancel")
+        self.assertEqual(cancelled.status_code, 409, cancelled.text)
+        self.assertIn("already started saving", cancelled.json()["detail"])
+
+    def test_recovery_finishes_cancel_requested_jobs_instead_of_leaving_them_queued(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job_id = queued.json()["job"]["id"]
+        with sqlite3.connect(self.db_path) as con:
+            con.execute(
+                "UPDATE background_jobs SET cancel_requested_at=? WHERE id=?",
+                ("2099-01-01T00:00:00+00:00", job_id),
+            )
+            con.commit()
+
+        recover_background_jobs()
+        recovered = self.client.get(f"/api/cloud/jobs/{job_id}")
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(recovered.json()["job"]["status"], "cancelled")
+        self.assertIsNone(claim_next_background_job())
 
     def test_cv_import_idempotency_rejects_changed_payload_or_operation(self):
         self.create_account()
