@@ -1,6 +1,6 @@
 # VitaMine hosted prototype on Strato
 
-Last updated: 2026-08-05.
+Last updated: 2026-08-06.
 
 This is the project handoff for future Codex sessions. It intentionally contains
 no API keys, invite codes, cookies, or other credentials.
@@ -584,6 +584,32 @@ from registration. After trial expiry, managed LLM operations, CV enrichment,
 custom Word templates, and detailed collaboration maps require VitaMine+.
 Annual access is currently €25 and can be granted with
 `-m vitamine.scripts.manage_cloud grant-plus MEMBER --days 365`.
+
+## Privacy, managed-AI consent, and account deletion
+
+Cloud schema migration 15 was deployed on 2026-08-06. It records the current,
+versioned permission to send selected CV/template content to VitaMine's managed
+OpenAI service and a minimal grant/withdraw event history. It stores no CV
+content, prompt, or model output. The gateway checks this permission before it
+accepts CV-import, enrichment, or cleanup jobs; the runner rechecks it while a
+job is active. Workspace LLM routing also fails closed when the short-lived
+worker environment does not carry the permission flag.
+
+The public legal pages are served by the gateway at `/privacy`, `/terms`, and
+`/imprint`. The privacy page names the current hosting, managed-AI, scholarly
+integration, email, and monitoring data flows. Update the page before adding a
+new external processor or monitoring provider.
+
+An authenticated account owner can withdraw managed-AI permission in Settings
+without deleting the account. They can also permanently delete the account by
+confirming their password and typing `DELETE`. The operation stops its private
+workspace, removes queued job files, and deletes the member row; PostgreSQL
+foreign-key cascades erase CV snapshots (including portraits and templates),
+device sessions, public-profile snapshots, OAuth credentials, consent records,
+and linked operational records. It refuses while a job is running, so no active
+worker can continue processing a deleted account. Same-server backup copies
+remain restricted and age out under the existing 14-day backup retention; do
+not restore deleted accounts during ordinary support work.
 
 Schema migration 11's former PayPal top-up tables remain only as historical
 schema. Migration 12 removes credit rows and the authenticated top-up endpoint
