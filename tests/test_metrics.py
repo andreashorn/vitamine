@@ -263,6 +263,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationNetworkView", script)
         self.assertIn("citationNetworkGraphData", script)
         self.assertIn("citationNetworkPlainText", script)
+        self.assertIn("citationNetworkCollisionForce", script)
         self.assertIn("ResizeObserver", script)
         self.assertIn("data-citation-network-scope", document)
         styles = (

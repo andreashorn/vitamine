@@ -2635,7 +2635,35 @@ function citationNetworkRadius(node) {
   const citations = Math.max(0, Number(node.citations || 0));
   const ceiling = Math.max(1, Number(state.citationNetwork.citationCeiling || 1));
   const scaled = Math.min(1, Math.log1p(citations) / Math.log1p(ceiling));
-  return node.kind === "own" ? 10 + scaled * 12 : 2.6 + scaled * 7;
+  return node.kind === "own" ? 5.7 + scaled * 7.3 : 2 + scaled * 4.4;
+}
+
+function citationNetworkCollisionForce() {
+  let nodes = [];
+  const force = (alpha) => {
+    for (let leftIndex = 0; leftIndex < nodes.length; leftIndex += 1) {
+      const left = nodes[leftIndex];
+      for (let rightIndex = leftIndex + 1; rightIndex < nodes.length; rightIndex += 1) {
+        const right = nodes[rightIndex];
+        let dx = (right.x || 0) - (left.x || 0);
+        let dy = (right.y || 0) - (left.y || 0);
+        let distance = Math.hypot(dx, dy);
+        if (!distance) { dx = 0.01; dy = 0.01; distance = Math.hypot(dx, dy); }
+        const padding = left.kind === "own" && right.kind === "own" ? 7 : left.kind === "own" || right.kind === "own" ? 4.5 : 2.3;
+        const minimumDistance = citationNetworkRadius(left) + citationNetworkRadius(right) + padding;
+        if (distance >= minimumDistance) continue;
+        const adjustment = (minimumDistance - distance) / distance * Math.min(1, alpha * 1.15) * 0.46;
+        const shiftX = dx * adjustment;
+        const shiftY = dy * adjustment;
+        left.vx = (left.vx || 0) - shiftX;
+        left.vy = (left.vy || 0) - shiftY;
+        right.vx = (right.vx || 0) + shiftX;
+        right.vy = (right.vy || 0) + shiftY;
+      }
+    }
+  };
+  force.initialize = (value) => { nodes = value || []; };
+  return force;
 }
 
 function paintCitationNetworkNode(node, context) {
@@ -2758,8 +2786,9 @@ function renderCitationNetwork({ reset = false } = {}) {
     });
     state.citationNetwork.resizeObserver.observe(chart);
   }
-  graph.d3Force("charge")?.strength(state.citationNetwork.scope === "all" ? -52 : -68);
-  graph.d3Force("link")?.distance((link) => link.target?.kind === "own" ? 62 : 48).strength(0.72);
+  graph.d3Force("charge")?.strength(state.citationNetwork.scope === "all" ? -82 : -96);
+  graph.d3Force("link")?.distance((link) => link.target?.kind === "own" ? 76 : 58).strength(0.7);
+  graph.d3Force("citationCollision", citationNetworkCollisionForce());
   graph.d3ReheatSimulation();
   window.setTimeout(() => graph.zoomToFit(650, 86), reset ? 80 : 180);
   const totalOwn = data.nodes.filter((node) => node.kind === "own").length;
