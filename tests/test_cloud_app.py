@@ -868,6 +868,54 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(inbox.status_code, 200, inbox.text)
         self.assertGreater(len(inbox.json()["items"]), 0)
 
+    def test_completed_import_stays_successful_when_workspace_refresh_fails(self):
+        self.create_account()
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        queued = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            files={
+                "files": (
+                    "cv.txt",
+                    b"Curriculum Vitae\nEducation\n2020-2024 Example University - Researcher\n",
+                    "text/plain",
+                )
+            },
+        )
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job = claim_next_background_job()
+        self.assertIsNotNone(job)
+
+        no_llm_profile = Path(self.directory.name) / "no-llm-hosted.json"
+        no_llm_profile.write_text(
+            json.dumps(
+                {
+                    "mode": "hosted",
+                    "llm": {"managed": True, "allow_user_configuration": False, "provider": "none"},
+                    "onboarding": {"skip_llm_configuration": True},
+                }
+            ),
+            encoding="utf-8",
+        )
+        JOB_STOP.clear()
+        with (
+            patch.dict(os.environ, {"VITAMINE_DEPLOYMENT_CONFIG": str(no_llm_profile)}),
+            patch("vitamine.cloud_app.shutil.copy2", side_effect=OSError("private workspace path")),
+            self.assertLogs("vitamine.cloud", level="WARNING") as captured,
+        ):
+            execute_background_job(job)
+
+        finished = self.client.get(f"/api/cloud/jobs/{queued.json()['job']['id']}")
+        self.assertEqual(finished.status_code, 200, finished.text)
+        self.assertEqual(finished.json()["job"]["status"], "succeeded")
+        self.assertTrue(finished.json()["job"]["result"]["workspace_reopen_required"])
+        with sqlite3.connect(self.db_path) as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM workspace_sessions").fetchone()[0], 0)
+        record = json.loads(captured.records[-1].getMessage())
+        self.assertEqual(record["event"], "background_job_workspace_refresh_deferred")
+        self.assertEqual(record["category"], "io_error")
+        self.assertNotIn("private workspace path", captured.records[-1].getMessage())
+
     def test_hosted_workspace_uses_account_menu_instead_of_close_session_button(self):
         self.create_account()
         opened = self.client.post("/gateway/workspace/new")

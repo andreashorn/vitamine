@@ -447,7 +447,15 @@ async function waitForCloudJob(jobId) {
       await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" });
       state.cloud.activeJob = null;
       setCloudJobControls(false);
-      return job.result || { ok: true };
+      const result = job.result || { ok: true };
+      if (result.workspace_reopen_required) {
+        setStatus("Your CV was saved. Reopening the updated CV…");
+        window.location.assign("/");
+        // Every caller would otherwise continue issuing requests against the
+        // deliberately retired workspace before navigation takes effect.
+        return new Promise(() => {});
+      }
+      return result;
     }
     if (job.status === "failed") {
       await api(`/api/cloud/jobs/${encodeURIComponent(job.id)}/acknowledge`, { method: "POST" }).catch(() => {});

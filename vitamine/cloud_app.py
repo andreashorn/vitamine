@@ -892,6 +892,14 @@ def log_support_event(event: str, support_id: str, **safe_fields: Any) -> None:
     )
 
 
+def log_operational_event(event: str, **safe_fields: Any) -> None:
+    """Log allowlisted operational metadata without a user-facing support ID."""
+    record = {"event": event, "timestamp": utc_now(), **safe_fields}
+    LOGGER.warning(
+        json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    )
+
+
 def request_endpoint_template(request: Request) -> str:
     route = request.scope.get("route")
     template = getattr(route, "path", None)
@@ -3792,22 +3800,33 @@ def refresh_open_workspace_from_job(job: Any, source_path: Path) -> None:
             ).fetchone()
         if workspace is None:
             return
-        stop_workspace(workspace, remove_files=False)
-        destination = Path(workspace["db_path"])
-        if not destination.parent.exists():
+        try:
+            stop_workspace(workspace, remove_files=False)
+            destination = Path(workspace["db_path"])
+            if not destination.parent.exists():
+                with connect() as con:
+                    con.execute("DELETE FROM workspace_sessions WHERE id=?", (workspace["id"],))
+                return
+            replacement = destination.with_name(".background-job-result.vitamine")
+            shutil.copy2(source_path, replacement)
+            replacement.chmod(0o600)
+            validate_workspace_database(replacement)
+            replacement.replace(destination)
             with connect() as con:
-                con.execute("DELETE FROM workspace_sessions WHERE id=?", (workspace["id"],))
-            return
-        replacement = destination.with_name(".background-job-result.vitamine")
-        shutil.copy2(source_path, replacement)
-        replacement.chmod(0o600)
-        validate_workspace_database(replacement)
-        replacement.replace(destination)
-        with connect() as con:
-            con.execute(
-                "UPDATE workspace_sessions SET pid=NULL, last_seen_at=? WHERE id=?",
-                (utc_now(), workspace["id"]),
-            )
+                con.execute(
+                    "UPDATE workspace_sessions SET pid=NULL, last_seen_at=? WHERE id=?",
+                    (utc_now(), workspace["id"]),
+                )
+        except Exception:
+            # The private snapshot is already durable. Do not leave an old
+            # workspace able to overwrite it if its replacement could not be
+            # completed; the owner will reopen a fresh workspace instead.
+            try:
+                stop_workspace(workspace)
+            finally:
+                with connect() as con:
+                    con.execute("DELETE FROM workspace_sessions WHERE id=?", (workspace["id"],))
+            raise
 
 
 def compact_job_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -4036,8 +4055,23 @@ def execute_background_job(job: Any) -> None:
         source_path=database_path,
         expected_revision=int(job["base_revision"]),
     )
-    refresh_open_workspace_from_job(job, database_path)
+    workspace_reopen_required = False
+    try:
+        refresh_open_workspace_from_job(job, database_path)
+    except Exception as exc:
+        # The authoritative snapshot was committed above. A transient runtime
+        # workspace issue must not label the completed, potentially billable
+        # operation as failed or encourage a user to repeat it.
+        workspace_reopen_required = True
+        log_operational_event(
+            "background_job_workspace_refresh_deferred",
+            category=failure_category(exc),
+            job_id=str(job["id"]),
+            job_kind=str(job["kind"]),
+        )
     result = compact_job_result(result)
+    if workspace_reopen_required:
+        result["workspace_reopen_required"] = True
     now = utc_now()
     with connect() as con:
         con.execute(
@@ -4049,9 +4083,13 @@ def execute_background_job(job: Any) -> None:
             """,
             (
                 json.dumps(
-                    {
-                        "phase": "completed",
-                        "message": "Finished and saved to your account",
+                        {
+                            "phase": "completed",
+                            "message": (
+                                "Finished and saved to your account. Reload to open the updated CV"
+                                if workspace_reopen_required
+                                else "Finished and saved to your account"
+                            ),
                         "percent": 100,
                     }
                 ),

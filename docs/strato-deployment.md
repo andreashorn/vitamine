@@ -83,6 +83,11 @@ out does not cancel these jobs. Gateway-only deploys and restarts do not touch
 the runner or active jobs. A job-runner restart requeues queued/running work;
 an interrupted LLM step may restart from the beginning. The browser polls
 authenticated job-status routes and restores progress after reopening.
+If the optional refresh of an already-open workspace fails after a job snapshot
+has been committed, VitaMine records the job as successful, safely drops that
+stale workspace, and sends the browser back to the account library to reopen
+the saved CV. The runner logs only the job kind, opaque ID, and high-level error
+category; it never logs the exception text or CV data.
 
 Import and enrichment submissions use a fresh browser-generated
 `Idempotency-Key` for each intentional operation. If the browser loses the
