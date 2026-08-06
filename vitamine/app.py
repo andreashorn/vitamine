@@ -2807,13 +2807,13 @@ def citation_network() -> dict[str, Any]:
         ).fetchone()
     own_ids = {int(row["id"]) for row in own}
     nodes = [
-        {"id": f"own-{row['id']}", "kind": "own", "title": str(row["title"] or row["raw_citation"] or "Untitled publication"),
+        {"id": f"own-{row['id']}", "kind": "own", "openalex_work_id": openalex_work_short_id(row["openalex_work_id"]), "title": str(row["title"] or row["raw_citation"] or "Untitled publication"),
          "authors": str(row["authors"] or ""), "venue": str(row["venue"] or ""), "year": str(row["year"] or ""),
          "doi": str(row["doi"] or ""), "citations": int(row["citations"] or 0)}
         for row in own
     ]
     nodes.extend(
-        {"id": f"work-{row['openalex_work_id']}", "kind": "citing", "title": row["title"], "authors": str(row["authors"] or ""),
+        {"id": f"work-{row['openalex_work_id']}", "kind": "citing", "openalex_work_id": str(row["openalex_work_id"] or ""), "title": row["title"], "authors": str(row["authors"] or ""),
          "venue": str(row["venue"] or ""), "year": str(row["year"] or ""), "doi": str(row["doi"] or ""), "citations": int(row["cited_by_count"] or 0)}
         for row in citing
     )

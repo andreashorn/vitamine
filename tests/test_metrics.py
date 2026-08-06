@@ -203,6 +203,9 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue(payload["cached"])
             self.assertEqual(len(payload["links"]), 1)
             self.assertEqual({row["kind"] for row in payload["nodes"]}, {"own", "citing"})
+            nodes_by_kind = {row["kind"]: row for row in payload["nodes"]}
+            self.assertEqual(nodes_by_kind["own"]["openalex_work_id"], "W1")
+            self.assertEqual(nodes_by_kind["citing"]["openalex_work_id"], "W2")
             self.assertIn("last_refreshed_at", payload)
 
     def test_citation_network_refresh_skips_a_failed_openalex_publication(self):
@@ -258,6 +261,9 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("window.ForceGraph", script)
         self.assertIn("nodeCanvasObject", script)
         self.assertIn("citationNetworkView", script)
+        self.assertIn("citationNetworkGraphData", script)
+        self.assertIn("citationNetworkPlainText", script)
+        self.assertIn("ResizeObserver", script)
         self.assertIn("data-citation-network-scope", document)
         styles = (
             Path(__file__).resolve().parents[1] / "vitamine" / "static" / "styles.css"
@@ -269,6 +275,7 @@ class MetricsTests(unittest.TestCase):
         self.assertIn("citationNetworkTooltip", styles)
         self.assertIn("citationNetworkPending", styles)
         self.assertIn("citationNetworkCanvas", styles)
+        self.assertIn("height: 100%; min-height: 0;", styles)
         self.assertIn('citationCountButton[aria-busy="true"]', styles)
         self.assertIn("background: #fff;", styles)
         self.assertIn("min-height: 82px;", styles)

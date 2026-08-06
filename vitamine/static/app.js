@@ -81,7 +81,7 @@ const state = {
     citingWorks: [],
     nextCitingPage: null,
   },
-  citationNetwork: { data: null, graph: null, refreshing: false, scope: "focused", pointer: null },
+  citationNetwork: { data: null, graph: null, refreshing: false, scope: "focused", pointer: null, resizeObserver: null },
   activity: {
     timer: null,
     startedAt: null,
@@ -2562,25 +2562,80 @@ function citationNetworkDoi(node) {
   return citationDoiHref(node.doi);
 }
 
+function citationNetworkPlainText(value) {
+  const element = document.createElement("span");
+  element.innerHTML = String(value || "");
+  return String(element.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function citationNetworkIdentity(node) {
+  const openalexId = String(node.openalex_work_id || "").trim().replace(/\/$/, "").split("/").pop();
+  if (openalexId) return `openalex:${openalexId.toUpperCase()}`;
+  const doi = citationDoiHref(node.doi);
+  if (doi) return `doi:${doi.toLowerCase()}`;
+  const title = citationNetworkPlainText(node.title).toLocaleLowerCase();
+  const year = String(node.year || "").trim();
+  if (title) return `title:${year}:${title}`;
+  return "";
+}
+
+function citationNetworkGraphData(data) {
+  const ownByIdentity = new Map();
+  const canonicalIds = new Map();
+  const nodes = [];
+  for (const rawNode of data.nodes) {
+    const node = { ...rawNode, title: citationNetworkPlainText(rawNode.title), authors: citationNetworkPlainText(rawNode.authors), venue: citationNetworkPlainText(rawNode.venue) };
+    const identity = citationNetworkIdentity(node);
+    if (node.kind === "own") {
+      if (identity) ownByIdentity.set(identity, node.id);
+      canonicalIds.set(node.id, node.id);
+      nodes.push(node);
+    }
+  }
+  for (const rawNode of data.nodes) {
+    if (rawNode.kind === "own") continue;
+    const node = { ...rawNode, title: citationNetworkPlainText(rawNode.title), authors: citationNetworkPlainText(rawNode.authors), venue: citationNetworkPlainText(rawNode.venue) };
+    const identity = citationNetworkIdentity(node);
+    const ownId = identity && ownByIdentity.get(identity);
+    canonicalIds.set(node.id, ownId || node.id);
+    if (!ownId) nodes.push(node);
+  }
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const linkKeys = new Set();
+  const links = data.links.flatMap((link) => {
+    const source = canonicalIds.get(link.source) || link.source;
+    const target = canonicalIds.get(link.target) || link.target;
+    const key = `${source}\u0000${target}`;
+    if (source === target || !nodeIds.has(source) || !nodeIds.has(target) || linkKeys.has(key)) return [];
+    linkKeys.add(key);
+    return [{ source, target }];
+  });
+  const connectedIds = new Set(links.flatMap((link) => [link.source, link.target]));
+  return { nodes: nodes.filter((node) => connectedIds.has(node.id)), links };
+}
+
 function citationNetworkView(data) {
-  const own = data.nodes.filter((node) => node.kind === "own");
-  if (state.citationNetwork.scope === "all") return { nodes: data.nodes, links: data.links, ownTotal: own.length };
-  const linkedOwnIds = new Set(data.links.map((link) => link.target));
+  const allOwn = data.nodes.filter((node) => node.kind === "own");
+  const graphData = citationNetworkGraphData(data);
+  const own = graphData.nodes.filter((node) => node.kind === "own");
+  if (state.citationNetwork.scope === "all") return { ...graphData, ownTotal: allOwn.length };
+  const linkedOwnIds = new Set(graphData.links.map((link) => link.target));
   const visibleOwn = own.filter((node) => linkedOwnIds.has(node.id)).slice(0, 14);
   const visibleOwnIds = new Set(visibleOwn.map((node) => node.id));
-  const links = data.links.filter((link) => visibleOwnIds.has(link.target));
+  const links = graphData.links.filter((link) => visibleOwnIds.has(link.target));
   const visibleCitingIds = new Set(links.map((link) => link.source));
   return {
-    nodes: data.nodes.filter((node) => visibleOwnIds.has(node.id) || visibleCitingIds.has(node.id)),
+    nodes: graphData.nodes.filter((node) => visibleOwnIds.has(node.id) || visibleCitingIds.has(node.id)),
     links,
-    ownTotal: own.length,
+    ownTotal: allOwn.length,
   };
 }
 
 function citationNetworkRadius(node) {
   const citations = Math.max(0, Number(node.citations || 0));
-  const scaled = Math.min(1, Math.log1p(citations) / Math.log(1001));
-  return node.kind === "own" ? 8 + scaled * 8 : 3.5 + scaled * 4.5;
+  const ceiling = Math.max(1, Number(state.citationNetwork.citationCeiling || 1));
+  const scaled = Math.min(1, Math.log1p(citations) / Math.log1p(ceiling));
+  return node.kind === "own" ? 10 + scaled * 12 : 2.6 + scaled * 7;
 }
 
 function paintCitationNetworkNode(node, context) {
@@ -2638,6 +2693,8 @@ function renderCitationNetwork({ reset = false } = {}) {
   const data = state.citationNetwork.data;
   if (!chart || !data) return;
   state.citationNetwork.graph?._destructor?.();
+  state.citationNetwork.resizeObserver?.disconnect();
+  state.citationNetwork.resizeObserver = null;
   state.citationNetwork.graph = null;
   if (!data.cached) { chart.innerHTML = `<div class="citationNetworkPending"><span class="citationPaperSpinner" aria-hidden="true"></span><strong>Preparing your citation network</strong><span>VitaMine is collecting citing papers in the background. You can close this window and check back shortly.</span></div>`; return; }
   if (!window.ForceGraph) { chart.innerHTML = `<p class="emptyState">The interactive graph renderer could not load. Please check your connection and reopen this view.</p>`; return; }
@@ -2649,7 +2706,15 @@ function renderCitationNetwork({ reset = false } = {}) {
   });
   const tooltip = $("#citationNetworkTooltip");
   const view = citationNetworkView(data);
+  if (!view.nodes.length) {
+    chart.innerHTML = `<p class="emptyState">No connected citation records are available in the cache yet. Refresh the network from OpenAlex to collect them.</p>`;
+    return;
+  }
+  state.citationNetwork.citationCeiling = Math.max(...view.nodes.map((node) => Number(node.citations || 0)), 1);
+  let initialFit = true;
   const graph = window.ForceGraph()($("#citationNetworkCanvas"))
+    .width(chart.clientWidth)
+    .height(chart.clientHeight)
     .graphData({ nodes: view.nodes.map((node) => ({ ...node })), links: view.links.map((link) => ({ ...link })) })
     .nodeId("id")
     .nodeLabel(() => "")
@@ -2678,17 +2743,30 @@ function renderCitationNetwork({ reset = false } = {}) {
     .onNodeClick((node) => {
       const href = citationNetworkDoi(node);
       if (href) window.open(href, "_blank", "noopener,noreferrer");
+    })
+    .onEngineStop(() => {
+      if (!initialFit) return;
+      initialFit = false;
+      graph.zoomToFit(320, 86);
     });
   state.citationNetwork.graph = graph;
-  graph.d3Force("charge")?.strength(-155);
-  graph.d3Force("link")?.distance((link) => link.target?.kind === "own" ? 92 : 72).strength(0.52);
+  if (window.ResizeObserver) {
+    state.citationNetwork.resizeObserver = new window.ResizeObserver(() => {
+      if (state.citationNetwork.graph !== graph) return;
+      graph.width(chart.clientWidth).height(chart.clientHeight);
+      graph.zoomToFit(180, 86);
+    });
+    state.citationNetwork.resizeObserver.observe(chart);
+  }
+  graph.d3Force("charge")?.strength(state.citationNetwork.scope === "all" ? -52 : -68);
+  graph.d3Force("link")?.distance((link) => link.target?.kind === "own" ? 62 : 48).strength(0.72);
   graph.d3ReheatSimulation();
   window.setTimeout(() => graph.zoomToFit(650, 86), reset ? 80 : 180);
   const totalOwn = data.nodes.filter((node) => node.kind === "own").length;
   const totalCiting = data.nodes.filter((node) => node.kind === "citing").length;
   const scopeNote = state.citationNetwork.scope === "focused" && totalOwn > view.nodes.filter((node) => node.kind === "own").length
     ? ` · focused on ${view.nodes.filter((node) => node.kind === "own").length} most-cited papers`
-    : " · complete cached network";
+    : " · all connected cached papers";
   $("#citationNetworkSummary").textContent = `${view.nodes.filter((node) => node.kind === "own").length} of ${totalOwn} own papers · ${view.nodes.filter((node) => node.kind === "citing").length} of ${totalCiting} citing papers${scopeNote} · drag a dot and the network will resettle${state.citationNetwork.refreshing ? " · updating in background" : ""}`;
   updateCitationNetworkScopeControls();
 }
