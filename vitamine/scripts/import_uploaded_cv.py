@@ -6,6 +6,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import random
 import re
 import shutil
 import socket
@@ -37,6 +38,131 @@ from vitamine.scripts.import_background_docs import (
 
 class LLMAuthenticationError(RuntimeError):
     pass
+
+
+class ProviderFailure(RuntimeError):
+    """A deliberately non-sensitive description of an AI-provider failure."""
+
+    def __init__(
+        self,
+        category: str,
+        *,
+        retryable: bool = False,
+        retry_after_seconds: float | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        self.category = category
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
+        self.status_code = status_code
+        super().__init__(provider_failure_message(category))
+
+
+def provider_failure_message(category: str) -> str:
+    messages = {
+        "provider_rate_limited": "The AI provider is temporarily busy after a short retry.",
+        "provider_unavailable": "The AI provider is temporarily unavailable after a short retry.",
+        "provider_malformed_output": "The AI provider returned an unusable structured response after one repair retry.",
+        "provider_configuration": "AI processing is unavailable because the provider configuration needs attention.",
+        "provider_request": "The AI provider could not accept this extraction request.",
+    }
+    return messages.get(category, "AI processing could not be completed safely.")
+
+
+def retry_after_seconds(headers: Any) -> float | None:
+    """Return a bounded Retry-After value without retaining provider headers."""
+    try:
+        raw = headers.get("Retry-After") if headers else None
+        value = float(str(raw).strip()) if raw is not None else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if value is None or value < 0:
+        return None
+    return min(value, 15.0)
+
+
+def provider_failure_from_http_error(exc: urllib.error.HTTPError) -> ProviderFailure:
+    """Classify a response while never returning its body to callers or logs."""
+    code = int(exc.code)
+    provider_code = ""
+    try:
+        raw = exc.read(16_384).decode("utf-8", errors="replace")
+        parsed = json.loads(raw)
+        error = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(error, dict):
+            provider_code = str(error.get("code") or "").lower()
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        pass
+    if code == 429:
+        if provider_code in {
+            "credit_balance_exhausted",
+            "organization_spend_limit_exceeded",
+            "project_spend_limit_exceeded",
+            "organization_usage_limit_exceeded",
+        }:
+            return ProviderFailure("provider_configuration", status_code=code)
+        return ProviderFailure(
+            "provider_rate_limited",
+            retryable=True,
+            retry_after_seconds=retry_after_seconds(exc.headers),
+            status_code=code,
+        )
+    if 500 <= code <= 599:
+        return ProviderFailure("provider_unavailable", retryable=True, status_code=code)
+    if code in {401, 403}:
+        return ProviderFailure("provider_configuration", status_code=code)
+    return ProviderFailure("provider_request", status_code=code)
+
+
+def provider_failure_from_transport_error(exc: BaseException) -> ProviderFailure:
+    # urllib's URLError can wrap a timeout, DNS failure, or refused connection.
+    # Its string representation can include private endpoint details, so do not
+    # carry it beyond this boundary.
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, socket.timeout, OSError)):
+        return ProviderFailure("provider_unavailable", retryable=True)
+    return ProviderFailure("provider_request")
+
+
+def provider_retry_delay(failure: ProviderFailure, attempt: int) -> float:
+    minimum = failure.retry_after_seconds
+    if minimum is None:
+        minimum = min(2.0 ** attempt, 8.0)
+    # A small jitter avoids a thundering herd while retaining a tight upper
+    # bound for a foreground/background CV operation.
+    return min(minimum + random.uniform(0.05, 0.5), 15.5)
+
+
+def open_json_response(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    allow_retry: bool = True,
+) -> dict[str, Any]:
+    """Make at most two requests for a structured provider response.
+
+    This intentionally sits below all OpenAI-compatible callers.  urllib does
+    not retry requests itself, so one bounded retry covers temporary 429/5xx,
+    network, and malformed-JSON failures without silently multiplying costs.
+    """
+    last_failure: ProviderFailure | None = None
+    attempts = 2 if allow_retry else 1
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return parse_json_response(response.read())
+        except urllib.error.HTTPError as exc:
+            failure = provider_failure_from_http_error(exc)
+        except (urllib.error.URLError, TimeoutError, socket.timeout, OSError) as exc:
+            failure = provider_failure_from_transport_error(exc)
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
+            # The response itself is untrusted model/provider output.  Do not
+            # preserve or display it; make one clean request, then fall back.
+            failure = ProviderFailure("provider_malformed_output", retryable=True)
+        last_failure = failure
+        if not failure.retryable or attempt == attempts - 1:
+            raise failure
+        time.sleep(provider_retry_delay(failure, attempt))
+    raise last_failure or ProviderFailure("provider_request")
 
 
 def normalize_api_key(value: str) -> str:
@@ -969,29 +1095,39 @@ CV text:
 
 def parse_json_response(data: bytes) -> dict[str, Any]:
     payload = json.loads(data.decode("utf-8"))
-    if isinstance(payload, dict):
-        record_usage(payload)
+    if not isinstance(payload, dict):
+        raise json.JSONDecodeError("Expected a JSON object", "", 0)
+    record_usage(payload)
     content = ""
     if "message" in payload:
         content = payload.get("message", {}).get("content", "")
     elif "choices" in payload:
-        content = payload["choices"][0].get("message", {}).get("content", "")
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise json.JSONDecodeError("Expected a completion choice", "", 0)
+        content = choices[0].get("message", {}).get("content", "")
     else:
         return payload
     if isinstance(content, dict):
         return content
+    if not isinstance(content, str):
+        raise json.JSONDecodeError("Expected structured response content", "", 0)
     content = content.strip()
     if content.startswith("```"):
         content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.I)
         content = re.sub(r"\s*```$", "", content).strip()
     try:
-        return json.loads(content)
+        result = json.loads(content)
     except json.JSONDecodeError:
         start = content.find("{")
         end = content.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(content[start : end + 1])
-        raise
+            result = json.loads(content[start : end + 1])
+        else:
+            raise
+    if not isinstance(result, dict):
+        raise json.JSONDecodeError("Expected a structured JSON object", content, 0)
+    return result
 
 
 def merge_llm_objects(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1130,11 +1266,16 @@ def call_ollama(text: str, settings: dict[str, str]) -> dict[str, Any]:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=180) as response:
-        return parse_json_response(response.read())
+    return open_json_response(request, timeout=180)
 
 
-def call_openai_compatible(text: str, settings: dict[str, str], strict_schema: bool = True) -> dict[str, Any]:
+def call_openai_compatible(
+    text: str,
+    settings: dict[str, str],
+    strict_schema: bool = True,
+    *,
+    allow_provider_retry: bool = True,
+) -> dict[str, Any]:
     base = (settings.get("api_base_url") or "https://api.openai.com/v1").rstrip("/")
     model = settings.get("api_model") or "gpt-4.1-mini"
     api_key = normalize_api_key(settings.get("api_key") or "")
@@ -1165,8 +1306,7 @@ def call_openai_compatible(text: str, settings: dict[str, str], strict_schema: b
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=180) as response:
-        return parse_json_response(response.read())
+    return open_json_response(request, timeout=180, allow_retry=allow_provider_retry)
 
 
 def apply_generation_controls(body: dict[str, Any], settings: dict[str, str], model: str) -> None:
@@ -1181,14 +1321,6 @@ def apply_generation_controls(body: dict[str, Any], settings: dict[str, str], mo
     body["max_tokens"] = max_tokens
 
 
-def http_error_detail(exc: urllib.error.HTTPError) -> str:
-    try:
-        detail = exc.read().decode("utf-8", errors="replace")
-    except OSError:
-        detail = ""
-    return re.sub(r"\s+", " ", detail).strip()[-1200:] or str(exc.reason)
-
-
 def call_chunked_openai_compatible(text: str, settings: dict[str, str], strict_schema: bool = True) -> dict[str, Any]:
     chunks = llm_text_chunks(
         text,
@@ -1197,28 +1329,31 @@ def call_chunked_openai_compatible(text: str, settings: dict[str, str], strict_s
     )
     results: list[dict[str, Any]] = []
     chunk_warnings: list[str] = []
+    failures: list[ProviderFailure] = []
     for index, chunk in enumerate(chunks, start=1):
         chunk_text = f"Document chunk {index} of {len(chunks)}. Extract only facts present in this chunk.\n\n{chunk}"
         try:
             results.append(call_openai_compatible(chunk_text, settings, strict_schema=strict_schema))
-        except (OSError, RuntimeError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as exc:
-            if isinstance(exc, urllib.error.HTTPError) and exc.code in {401, 403}:
-                raise LLMAuthenticationError(
-                    f"OpenAI API authentication failed ({exc.code}). Check that the saved API key is valid and has access to {settings.get('api_model') or 'the selected model'}. {http_error_detail(exc)}"
-                ) from exc
-            if strict_schema and isinstance(exc, urllib.error.HTTPError) and exc.code in {400, 422}:
+        except ProviderFailure as exc:
+            if strict_schema and exc.category == "provider_request" and exc.status_code in {400, 422}:
                 try:
-                    results.append(call_openai_compatible(chunk_text, settings, strict_schema=False))
+                    results.append(
+                        call_openai_compatible(
+                            chunk_text,
+                            settings,
+                            strict_schema=False,
+                            allow_provider_retry=False,
+                        )
+                    )
                     continue
-                except (OSError, RuntimeError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, KeyError) as retry_exc:
-                    if isinstance(retry_exc, urllib.error.HTTPError) and retry_exc.code in {401, 403}:
-                        raise LLMAuthenticationError(
-                            f"OpenAI API authentication failed ({retry_exc.code}). Check that the saved API key is valid and has access to {settings.get('api_model') or 'the selected model'}. {http_error_detail(retry_exc)}"
-                        ) from retry_exc
+                except ProviderFailure as retry_exc:
                     exc = retry_exc
-            chunk_warnings.append(f"LLM chunk {index}/{len(chunks)} failed: {exc}")
+            failures.append(exc)
+            chunk_warnings.append(f"AI extraction skipped chunk {index}/{len(chunks)}: {exc}")
     if not results:
-        raise RuntimeError("; ".join(chunk_warnings) or "LLM returned no usable chunks.")
+        if failures:
+            raise failures[-1]
+        raise ProviderFailure("provider_malformed_output")
     merged = merge_llm_objects(results)
     merged.setdefault("warnings", [])
     merged["warnings"].extend(chunk_warnings)
@@ -1395,15 +1530,10 @@ def llm_extract(text: str, settings: dict[str, str]) -> tuple[dict[str, Any] | N
             return call_chunked_openai_compatible(text, settings), None
     except LLMAuthenticationError:
         raise
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")[-1200:]
-        except OSError:
-            detail = ""
-        return None, f"HTTP Error {exc.code}: {detail or exc.reason}"
-    except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError, KeyError) as exc:
+    except ProviderFailure as exc:
         return None, str(exc)
+    except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError, KeyError):
+        return None, provider_failure_message("provider_request")
     return None, f"Unknown CV import provider: {provider}"
 
 
@@ -1437,8 +1567,7 @@ def call_openai_compatible_json(
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=240) as response:
-        return parse_json_response(response.read())
+    return open_json_response(request, timeout=240)
 
 
 def call_ollama_json(prompt: str, schema: dict[str, Any], settings: dict[str, str]) -> dict[str, Any]:
@@ -1456,8 +1585,7 @@ def call_ollama_json(prompt: str, schema: dict[str, Any], settings: dict[str, st
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=240) as response:
-        return parse_json_response(response.read())
+    return open_json_response(request, timeout=240)
 
 
 def call_bundled_llama_json(prompt: str, schema: dict[str, Any], settings: dict[str, str]) -> dict[str, Any]:
@@ -1537,10 +1665,10 @@ def llm_json(
             return call_openai_compatible_json(prompt, schema, settings), None
     except LLMAuthenticationError:
         raise
-    except urllib.error.HTTPError as exc:
-        return None, f"HTTP Error {exc.code}: {http_error_detail(exc)}"
-    except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError, KeyError) as exc:
+    except ProviderFailure as exc:
         return None, str(exc)
+    except (OSError, RuntimeError, urllib.error.URLError, json.JSONDecodeError, KeyError):
+        return None, provider_failure_message("provider_request")
     return None, f"Unknown CV import provider: {provider}"
 
 

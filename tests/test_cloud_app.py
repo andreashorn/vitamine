@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from vitamine.cloud_app import (
+    BackgroundJobFailure,
     BackgroundJobCancelled,
     JOB_STOP,
     app,
@@ -908,6 +909,37 @@ class CloudAppTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(stored[0], job["support_id"])
         self.assertNotIn("confidential-cv-text", stored[1])
+
+    def test_provider_job_failure_is_clear_and_does_not_store_provider_detail(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        job_id = queued.json()["job"]["id"]
+
+        fail_background_job(job_id, BackgroundJobFailure("provider_rate_limited"))
+
+        failed = self.client.get(f"/api/cloud/jobs/{job_id}")
+        self.assertEqual(failed.status_code, 200, failed.text)
+        error = failed.json()["job"]["error"]
+        self.assertIn("temporarily busy", error)
+        self.assertIn("start a new attempt", error)
+        self.assertRegex(failed.json()["job"]["support_id"], r"^VM-[A-F0-9]{32}$")
+
+    def test_running_job_is_failed_on_recovery_instead_of_being_replayed(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+        queued = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(queued.status_code, 202, queued.text)
+        self.assertIsNotNone(claim_next_background_job())
+
+        recover_background_jobs()
+
+        recovered = self.client.get(f"/api/cloud/jobs/{queued.json()['job']['id']}")
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(recovered.json()["job"]["status"], "failed")
+        self.assertIn("interrupted", recovered.json()["job"]["error"])
+        self.assertIsNone(claim_next_background_job())
 
     def test_queued_cv_import_executes_and_refreshes_the_open_workspace(self):
         self.create_account()

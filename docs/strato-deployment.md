@@ -80,9 +80,11 @@ job database, runs the shared VitaMine importer/enrichment code in a
 subprocess, and commits the completed snapshot back to PostgreSQL before
 refreshing any open workspace. Closing a tab, returning to My CVs, or signing
 out does not cancel these jobs. Gateway-only deploys and restarts do not touch
-the runner or active jobs. A job-runner restart requeues queued/running work;
-an interrupted LLM step may restart from the beginning. The browser polls
-authenticated job-status routes and restores progress after reopening.
+the runner or active jobs. A job-runner restart preserves work that was still
+queued, but marks a running job as failed rather than replaying a possibly sent
+LLM request. The owner receives a privacy-safe explanation and support ID, and
+must start an intentional new attempt with a fresh idempotency key. The browser
+polls authenticated job-status routes and restores progress after reopening.
 If the optional refresh of an already-open workspace fails after a job snapshot
 has been committed, VitaMine records the job as successful, safely drops that
 stale workspace, and sends the browser back to the account library to reopen
@@ -475,10 +477,10 @@ stop jobs when the gateway restarts.
    `/etc/systemd/system/`, and run `sudo systemctl daemon-reload`.
 3. For a gateway-only change, restart only `vitamine-cloud.service`. This does
    not interrupt queued or running CV jobs.
-4. For a runner/code change, restart `vitamine-cloud-jobs.service`. Its
-   SIGTERM handler terminates the active child worker and requeues that one
-   job; wait for an idle queue when practical because an interrupted LLM step
-   may be repeated.
+4. For a runner/code change, restart `vitamine-cloud-jobs.service` only when
+   the queue is idle when practical. Its SIGTERM handler terminates the active
+   child worker and marks that running job failed; it does not replay a request
+   that may already have reached an LLM provider.
 5. For a change shared by both, restart the runner only if the changed code is
    used by jobs, then restart the gateway. Verify both units, `/health`, recent
    logs, and the affected API.
@@ -507,9 +509,9 @@ post-migration backup were verified. Do not expect
 `/var/backups/vitamine-cloud/2026-07-29-accounts-cutover` to exist.
 
 Avoid restarting `vitamine-cloud-jobs.service` during an active job when
-practical. Jobs recover automatically, but an interrupted LLM request may be
-repeated and incur a second API charge. Restarting `vitamine-cloud.service`
-alone is safe while jobs run.
+practical. A running job is safely stopped and requires the owner to make an
+intentional retry, so it cannot incur a silent duplicate LLM charge.
+Restarting `vitamine-cloud.service` alone is safe while jobs run.
 
 ## Invite administration
 
@@ -579,6 +581,25 @@ minutes. It exposes neither real member or job IDs, email addresses, CV data,
 filenames, prompts, model output, nor job error text. A successful OpenAI
 response that omits provider usage is recorded as unpriced and pauses that
 account's managed-AI work instead of being silently excluded from the ledger.
+
+### Provider outage, rate-limit, and malformed-output behavior
+
+Hosted structured AI calls use at most two total requests for one provider
+step. For a temporary provider outage, network failure, malformed structured
+response, or a temporary HTTP 429, VitaMine makes one bounded retry. A valid
+`Retry-After` is treated as the minimum wait (capped at 15 seconds) and a small
+random jitter is added; otherwise the retry uses short exponential backoff.
+This follows OpenAI's guidance to honor `Retry-After`, use jitter, and bound
+attempts and retry time: <https://developers.openai.com/api/docs/guides/rate-limits#retrying-with-exponential-backoff>.
+
+Quota, billing/spend-limit, authentication, authorization, and malformed
+request failures are not retried. If CV extraction still cannot obtain usable
+structured data, the import completes with VitaMine's deterministic parser and
+a clear safe warning rather than storing or applying partial model output. A
+failed durable job instead reports only a category-specific safe explanation
+and support ID; raw provider bodies, headers, prompts, CV text, filenames,
+model output, exception messages, and tracebacks are never written to the
+database, browser response, or operational log.
 
 ## Operator usage dashboard
 

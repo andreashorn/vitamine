@@ -439,8 +439,13 @@ Evidence: pending
   jobs, using dashboard-only account pseudonyms and no job payloads or IDs.
 - [x] Robust job idempotency and cancellation so retries cannot silently repeat
   expensive work; cancellations stop before the durable-save boundary.
-- [ ] A defined behavior for provider outages, rate limits, and malformed model
+- [x] A defined behavior for provider outages, rate limits, and malformed model
   output.
+  Evidence: bounded provider retries and deterministic import fallback in
+  `vitamine/scripts/import_uploaded_cv.py`, privacy-safe durable-job failures
+  in `vitamine/cloud_app.py` and `vitamine/cloud_job_runner.py`, documented
+  operations in `docs/strato-deployment.md`, and mocked regression coverage in
+  `tests/test_provider_failures.py` and `tests/test_cloud_app.py`.
 - [ ] Upload abuse controls and, before a public launch, malware scanning.
 
 ## Research-service integrations

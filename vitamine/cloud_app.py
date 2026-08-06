@@ -870,7 +870,39 @@ def new_support_id() -> str:
     return f"VM-{secrets.token_hex(16).upper()}"
 
 
+PROVIDER_FAILURE_CATEGORIES = {
+    "provider_rate_limited",
+    "provider_unavailable",
+    "provider_malformed_output",
+    "provider_configuration",
+    "provider_request",
+}
+
+
+def background_failure_message(category: str, support_id: str) -> str:
+    messages = {
+        "provider_rate_limited": "The AI provider is temporarily busy. Your CV was not changed; please wait a few minutes and start a new attempt.",
+        "provider_unavailable": "The AI provider is temporarily unavailable. Your CV was not changed; please start a new attempt later.",
+        "provider_malformed_output": "The AI provider returned an unusable response. Your CV was not changed; please start a new attempt.",
+        "provider_configuration": "AI processing is unavailable while VitaMine's provider configuration is being checked. Your CV was not changed.",
+        "provider_request": "The AI provider could not complete this request. Your CV was not changed; please start a new attempt.",
+        "interrupted": "The background process was interrupted before it could finish. Your CV was not changed; please start a new attempt.",
+    }
+    prefix = messages.get(category, "The background process failed.")
+    return f"{prefix} Support ID: {support_id}"
+
+
+class BackgroundJobFailure(RuntimeError):
+    """Safe, structural child-worker failure passed to the durable job state."""
+
+    def __init__(self, category: str) -> None:
+        self.category = category if category in PROVIDER_FAILURE_CATEGORIES | {"interrupted"} else "internal_error"
+        super().__init__(self.category)
+
+
 def failure_category(error: Exception) -> str:
+    if isinstance(error, BackgroundJobFailure):
+        return error.category
     if isinstance(error, TimeoutError):
         return "timeout"
     if isinstance(error, OSError):
@@ -4229,8 +4261,10 @@ def execute_background_job(job: Any) -> None:
     ingest_llm_usage_events(job, usage_path)
     result = parsed_json_object(result_path.read_text(encoding="utf-8", errors="replace")) if result_path.exists() else {}
     if returncode != 0 or not result.get("ok"):
-        message = str(result.get("error") or "The background process failed.")[-4000:]
-        raise RuntimeError(message)
+        # Child error text can contain a provider body, source filename, or
+        # other private data.  Only its allowlisted category crosses the
+        # process boundary into PostgreSQL, logs, or the browser.
+        raise BackgroundJobFailure(str(result.get("failure_category") or "internal_error"))
     if not begin_background_job_completion(str(job["id"])):
         raise BackgroundJobCancelled()
     persist_database_snapshot(
@@ -4290,31 +4324,14 @@ def execute_background_job(job: Any) -> None:
 
 def fail_background_job(job_id: str, error: Exception) -> None:
     if JOB_STOP.is_set():
-        with connect() as con:
-            con.execute(
-                """
-                UPDATE background_jobs
-                SET status='queued', started_at=NULL, heartbeat_at=NULL, completion_started_at=NULL, updated_at=?,
-                    progress_json=?
-                WHERE id=? AND status='running'
-                """,
-                (
-                    utc_now(),
-                    json.dumps(
-                        {
-                            "phase": "queued",
-                            "message": "Waiting to resume after a service restart",
-                            "percent": 0,
-                        }
-                    ),
-                    job_id,
-                ),
-            )
-        shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
+        # A child may have sent an LLM request immediately before a shutdown.
+        # Never replay an already-started durable job and risk a duplicate
+        # charge; users make an intentional retry with a fresh idempotency key.
+        finish_interrupted_background_job(job_id)
         return
     support_id = new_support_id()
     category = failure_category(error)
-    message = f"The background process failed. Support ID: {support_id}"
+    message = background_failure_message(category, support_id)
     now = utc_now()
     with connect() as con:
         job = con.execute(
@@ -4347,6 +4364,41 @@ def fail_background_job(job_id: str, error: Exception) -> None:
         "background_job_failed",
         support_id,
         category=category,
+        job_id=job_id,
+        job_kind=job_kind,
+    )
+    shutil.rmtree(job_root() / job_id, ignore_errors=True)
+    shutil.rmtree(job_work_root() / job_id, ignore_errors=True)
+
+
+def finish_interrupted_background_job(job_id: str) -> None:
+    support_id = new_support_id()
+    now = utc_now()
+    with connect() as con:
+        job = con.execute("SELECT kind FROM background_jobs WHERE id=?", (job_id,)).fetchone()
+        job_kind = str(job["kind"]) if job and job["kind"] in {"cv_import", "enrich_cv", "cleanup_cv"} else "unknown"
+        message = background_failure_message("interrupted", support_id)
+        con.execute(
+            """
+            UPDATE background_jobs
+            SET status='failed', error_message=?, support_id=?, heartbeat_at=?, finished_at=?, updated_at=?,
+                progress_json=?
+            WHERE id=? AND status='running'
+            """,
+            (
+                message,
+                support_id,
+                now,
+                now,
+                now,
+                json.dumps({"phase": "failed", "message": message, "percent": 100}),
+                job_id,
+            ),
+        )
+    log_support_event(
+        "background_job_interrupted",
+        support_id,
+        category="interrupted",
         job_id=job_id,
         job_kind=job_kind,
     )
@@ -4394,24 +4446,9 @@ def recover_background_jobs() -> None:
                 ),
             ),
         )
-        con.execute(
-            """
-            UPDATE background_jobs
-            SET status='queued', started_at=NULL, heartbeat_at=NULL, completion_started_at=NULL, updated_at=?,
-                progress_json=?
-            WHERE status='running' AND cancel_requested_at IS NULL
-            """,
-            (
-                now,
-                json.dumps(
-                    {
-                        "phase": "queued",
-                        "message": "Waiting to resume after a service restart",
-                        "percent": 0,
-                    }
-                ),
-            ),
-        )
+        interrupted = con.execute(
+            "SELECT id FROM background_jobs WHERE status='running' AND cancel_requested_at IS NULL"
+        ).fetchall()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=JOB_RETENTION_DAYS)).isoformat()
         con.execute(
             """
@@ -4420,6 +4457,8 @@ def recover_background_jobs() -> None:
             """,
             (cutoff,),
         )
+    for row in interrupted:
+        finish_interrupted_background_job(str(row["id"]))
 
 
 def run_background_job_runner() -> None:

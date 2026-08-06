@@ -6,9 +6,22 @@ import argparse
 import json
 import os
 import sqlite3
-import traceback
 from pathlib import Path
 from typing import Any
+
+
+SAFE_FAILURE_CATEGORIES = {
+    "provider_rate_limited",
+    "provider_unavailable",
+    "provider_malformed_output",
+    "provider_configuration",
+    "provider_request",
+}
+
+
+def safe_failure_category(error: BaseException) -> str:
+    category = str(getattr(error, "category", ""))
+    return category if category in SAFE_FAILURE_CATEGORIES else "internal_error"
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -209,9 +222,12 @@ def main() -> int:
             progress_path=args.progress.resolve(),
         )
     except Exception as exc:
-        traceback.print_exc()
-        write_json(args.result.resolve(), {"ok": False, "error": str(exc)[-4000:]})
-        progress(args.progress.resolve(), "failed", str(exc)[-1000:] or "Background job failed", 100)
+        # Do not write exception text or a traceback: provider bodies and
+        # source-document details must not enter a durable job record or log.
+        category = safe_failure_category(exc)
+        print(json.dumps({"event": "background_job_failed", "category": category}, sort_keys=True))
+        write_json(args.result.resolve(), {"ok": False, "failure_category": category})
+        progress(args.progress.resolve(), "failed", "The background process could not complete safely", 100)
         return 1
 
 

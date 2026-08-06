@@ -7063,14 +7063,6 @@ def cv_import_upload_name(filename: str) -> str:
     return f"{stem}{suffix}"
 
 
-def api_http_error_detail(exc: urllib.error.HTTPError) -> str:
-    try:
-        detail = exc.read().decode("utf-8", errors="replace")
-    except OSError:
-        detail = ""
-    return re.sub(r"\s+", " ", detail).strip()[-1200:] or str(exc.reason)
-
-
 def normalize_api_key(value: str) -> str:
     text = re.sub(r"\s+", "", str(value or "").strip().strip("\"'"))
     if text.lower().startswith("bearer"):
@@ -7121,12 +7113,15 @@ def test_openai_api_connection(settings: dict[str, Any]) -> None:
         with urllib.request.urlopen(request, timeout=12):
             return
     except urllib.error.HTTPError as exc:
-        detail = api_http_error_detail(exc)
         if exc.code in {401, 403}:
-            raise HTTPException(status_code=400, detail=f"OpenAI API authentication failed ({exc.code}). Check the key and model access. {detail}") from exc
-        raise HTTPException(status_code=400, detail=f"OpenAI API connection test failed ({exc.code}). {detail}") from exc
+            raise HTTPException(status_code=400, detail=f"OpenAI API authentication failed ({exc.code}). Check the key and model access.") from exc
+        if exc.code == 429:
+            raise HTTPException(status_code=400, detail="OpenAI API connection test is temporarily rate limited. Please try again shortly.") from exc
+        if 500 <= exc.code <= 599:
+            raise HTTPException(status_code=400, detail="OpenAI API is temporarily unavailable. Please try again shortly.") from exc
+        raise HTTPException(status_code=400, detail=f"OpenAI API connection test failed ({exc.code}).") from exc
     except urllib.error.URLError as exc:
-        raise HTTPException(status_code=400, detail=f"OpenAI API connection test failed: {exc}") from exc
+        raise HTTPException(status_code=400, detail="OpenAI API is temporarily unavailable. Please try again shortly.") from exc
     except TimeoutError as exc:
         raise HTTPException(status_code=400, detail="OpenAI API connection test timed out.") from exc
 
