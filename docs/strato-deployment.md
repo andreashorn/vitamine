@@ -1,6 +1,6 @@
 # VitaMine hosted prototype on Strato
 
-Last updated: 2026-08-06.
+Last updated: 2026-08-07.
 
 This is the project handoff for future Codex sessions. It intentionally contains
 no API keys, invite codes, cookies, or other credentials.
@@ -220,9 +220,18 @@ Do not rely on the `python-docx` fallback for production imports: it appends
 table contents after ordinary paragraphs and therefore destroys the section
 ordering of table-heavy academic CVs.
 
+Hosted uploads also require the local ClamAV daemon. VitaMine invokes
+`clamdscan --fdpass` before it parses or encrypts a CV/database, and fails
+closed if the scanner is unavailable, times out, or reports an infection. This
+is intentionally a local host service: no uploaded CV is sent to a scanning
+vendor. Keep `VITAMINE_MALWARE_SCAN_REQUIRED=1` and
+`VITAMINE_MALWARE_SCANNER=clamdscan` in the protected service environment.
+
 ```sh
-sudo apt-get install pandoc postgresql postgresql-contrib
-command -v pandoc
+sudo apt-get install pandoc postgresql postgresql-contrib clamav-daemon
+sudo systemctl enable --now clamav-daemon.service clamav-freshclam.service
+command -v pandoc clamdscan
+sudo systemctl is-active clamav-daemon.service clamav-freshclam.service
 ```
 
 Useful checks:
@@ -312,6 +321,25 @@ workspaces are likewise under `/run`.
 Uvicorn access-log entries appear only after a request completes. During a long
 CV import, also inspect the uploaded file, worker process, and outbound
 connection before concluding that the progress UI is stuck.
+
+### Upload safety and abuse controls
+
+Apache rejects request bodies over 200 MB before they reach the application.
+The hosted gateway accepts at most five CV files per submission, 20 MB per CV,
+and 50 MB total. It verifies the actual PDF, DOCX, text, or SQLite signature;
+rejects unsafe DOCX archive layouts, encrypted DOCX packages, macros, excessive
+archive members, and decompression-bomb-like packages; then performs the local
+ClamAV scan. Portraits and custom Word templates are scanned before image or
+template parsing as well. The gateway reports only a safe rejection message,
+never scanner output, file contents, or filenames.
+
+Before deploying an upload change, confirm the scanner is available without
+printing a private file path or scanner result:
+
+```sh
+command -v clamdscan
+sudo systemctl is-active clamav-daemon.service clamav-freshclam.service
+```
 
 ### Support identifiers and privacy-safe failures
 
@@ -482,8 +510,13 @@ stop jobs when the gateway restarts.
    child worker and marks that running job failed; it does not replay a request
    that may already have reached an LLM provider.
 5. For a change shared by both, restart the runner only if the changed code is
-   used by jobs, then restart the gateway. Verify both units, `/health`, recent
-   logs, and the affected API.
+used by jobs, then restart the gateway. Verify both units, `/health`, recent
+logs, and the affected API.
+
+For a change to `deploy/strato/apache-vitamine.cloud.conf`, first copy it to a
+temporary path, install it as `/etc/apache2/sites-available/vitamine.cloud.conf`,
+run `sudo apache2ctl configtest`, and reload Apache only after that check
+passes. Do not replace any unrelated virtual host.
 
 The initial split-service handover is the sole exception to the gateway-only
 rule: stop the old integrated gateway, start and enable

@@ -62,6 +62,7 @@ from .paths import (
     write_preferences,
 )
 from .portrait import MAX_PORTRAIT_UPLOAD_BYTES, normalize_portrait_image
+from .upload_security import environment_flag, inspect_cv_upload, inspect_sqlite_upload, scan_uploaded_bytes
 from .scripts.maintain_publications import maintain
 from .scripts.enrich_publications_by_doi import (
     authoritative_metadata as authoritative_registry_metadata,
@@ -120,6 +121,9 @@ from .cv_dates import cv_end_date, cv_entry_sort_key
 
 
 PROJECT = Path(__file__).resolve().parent
+MAX_CV_IMPORT_UPLOAD_FILES = 5
+MAX_CV_IMPORT_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_CV_IMPORT_FILE_BYTES = 20 * 1024 * 1024
 
 
 def hosted_vitamine_plus_active() -> bool:
@@ -132,6 +136,13 @@ def require_hosted_vitamine_plus() -> None:
             status_code=402,
             detail={"code": "vitamine_plus_required", "message": "This feature is part of VitaMine+."},
         )
+
+
+def malware_scan_required() -> bool:
+    return environment_flag(
+        "VITAMINE_MALWARE_SCAN_REQUIRED",
+        default=os.environ.get("VITAMINE_CLOUD_WORKER") == "1",
+    )
 
 SECTION_LABELS = {
     "education": "Education",
@@ -3082,6 +3093,7 @@ async def update_person_portrait(file: UploadFile = File(...)) -> dict[str, Any]
     data = await file.read(MAX_PORTRAIT_UPLOAD_BYTES + 1)
     await file.close()
     try:
+        scan_uploaded_bytes(data, required=malware_scan_required())
         normalized = normalize_portrait_image(data, filename=file.filename or "")
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -6328,6 +6340,7 @@ async def create_export_template(
     template_name = clean_template_name(name, fallback_name)
     template_id = f"custom.{uuid.uuid4().hex}"
     try:
+        scan_uploaded_bytes(data, required=malware_scan_required())
         with connect() as con:
             settings = cv_import_settings(con, include_secret=True)
             skeleton, blueprint = analyze_and_skeletonize(
@@ -6970,6 +6983,11 @@ async def import_database(file: UploadFile = File(...)) -> dict[str, Any]:
     try:
         with upload_path.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)
+        inspect_sqlite_upload(
+            upload_path,
+            maximum_bytes=200 * 1024 * 1024,
+            scan_required=malware_scan_required(),
+        )
         validate_database(upload_path)
         if path.exists():
             validate_database(path)
@@ -7215,6 +7233,11 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
     require_hosted_vitamine_plus()
     if not files:
         raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
+    if len(files) > MAX_CV_IMPORT_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Please upload no more than {MAX_CV_IMPORT_UPLOAD_FILES} CV documents at once.",
+        )
     upload_dir = DATA / "cv-imports"
     upload_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -7225,18 +7248,36 @@ async def upload_cv_import(files: list[UploadFile] = File(...)) -> JSONResponse:
             settings = cv_import_settings(con, include_secret=True)
             settings["review_mode"] = "inbox"
             settings["profile_search_enabled"] = ai_web_discovery_enabled(con)
+            total_bytes = 0
             for index, file in enumerate(files, start=1):
                 filename = cv_import_upload_name(file.filename or f"uploaded-cv-{index}")
                 upload_path = upload_dir / f"{timestamp}-{index}-{filename}"
                 with upload_path.open("wb") as handle:
-                    shutil.copyfileobj(file.file, handle)
+                    file_bytes = 0
+                    while chunk := file.file.read(1024 * 1024):
+                        file_bytes += len(chunk)
+                        total_bytes += len(chunk)
+                        if file_bytes > MAX_CV_IMPORT_FILE_BYTES:
+                            raise HTTPException(status_code=413, detail="Each CV document must be 20 MB or smaller.")
+                        if total_bytes > MAX_CV_IMPORT_UPLOAD_BYTES:
+                            raise HTTPException(status_code=413, detail="The selected CV documents exceed the 50 MB upload limit.")
+                        handle.write(chunk)
                 saved_paths.append(upload_path)
+                inspect_cv_upload(
+                    upload_path,
+                    maximum_bytes=MAX_CV_IMPORT_FILE_BYTES,
+                    scan_required=malware_scan_required(),
+                )
                 results.append(import_cv_file(con, upload_path, file.filename or filename, settings))
             con.commit()
     except HTTPException:
         for path in saved_paths:
             path.unlink(missing_ok=True)
         raise
+    except ValueError as exc:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         for path in saved_paths:
             path.unlink(missing_ok=True)

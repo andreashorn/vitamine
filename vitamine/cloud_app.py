@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from .cloud_crypto import decrypt_private_data, encrypt_private_data, is_encrypted_private_data
 from .llm_usage import usage_costs
+from .upload_security import UploadSafetyError, environment_flag, inspect_cv_upload, inspect_sqlite_upload
 from .public_profiles import (
     PROFILE_BLOCK_KEYS,
     PUBLIC_PROFILE_SCHEMA_VERSION,
@@ -76,6 +77,8 @@ WORKSPACE_MAX_AGE = 60 * 60 * 24
 JOB_RETENTION_DAYS = 30
 MAX_DATABASE_BYTES = 200 * 1024 * 1024
 MAX_JOB_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_JOB_UPLOAD_FILES = 5
+MAX_JOB_UPLOAD_FILE_BYTES = 20 * 1024 * 1024
 PASSWORD_MIN_LENGTH = 10
 PASSWORD_MAX_LENGTH = 256
 LOGIN_WINDOW_MINUTES = 15
@@ -977,6 +980,11 @@ def database_encryption_context(member_id: str, database_id: str) -> str:
 
 def job_upload_encryption_context(member_id: str, job_id: str, stored_name: str) -> str:
     return f"vitamine-job-upload-v1:{member_id}:{job_id}:{stored_name}"
+
+
+def malware_scan_required() -> bool:
+    """Hosted uploads fail closed unless an operator explicitly disables scans."""
+    return environment_flag("VITAMINE_MALWARE_SCAN_REQUIRED", default=True)
 
 
 def encrypt_database_content(content: bytes, *, member_id: str, database_id: str) -> bytes:
@@ -5298,6 +5306,11 @@ async def open_workspace(
                 if total > MAX_DATABASE_BYTES:
                     raise HTTPException(status_code=413, detail="The VitaMine database exceeds the 200 MB session limit.")
                 destination.write(chunk)
+        inspect_sqlite_upload(
+            db_path,
+            maximum_bytes=MAX_DATABASE_BYTES,
+            scan_required=malware_scan_required(),
+        )
         validate_workspace_database(db_path)
         name = safe_database_name(original_filename)
         stored_filename = f"{name}.vitamine"
@@ -5316,6 +5329,11 @@ async def open_workspace(
             output_path=output_path,
             original_filename=stored_filename,
         )
+    except UploadSafetyError as exc:
+        shutil.rmtree(session_dir, ignore_errors=True)
+        with connect() as con:
+            con.execute("DELETE FROM account_databases WHERE id=? AND member_id=?", (database_id, member["id"]))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
         shutil.rmtree(session_dir, ignore_errors=True)
         with connect() as con:
@@ -5516,6 +5534,11 @@ async def queue_cv_import_job(
     require_openai_processing_consent(str(member["id"]))
     if not files:
         raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
+    if len(files) > MAX_JOB_UPLOAD_FILES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Please upload no more than {MAX_JOB_UPLOAD_FILES} CV documents at once.",
+        )
     job_id = secrets.token_urlsafe(18)
     directory = (job_root() / job_id).resolve()
     uploads = directory / "uploads"
@@ -5529,27 +5552,47 @@ async def queue_cv_import_job(
             safe_name = cloud_cv_import_name(original_name)
             stored_name = f"{index}-{safe_name}"
             encrypted_name = f"{stored_name}.enc"
-            destination = uploads / encrypted_name
             file_digest = hashlib.sha256()
             file_bytes = 0
-            upload_content = bytearray()
-            while True:
-                chunk = file.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                file_digest.update(chunk)
-                file_bytes += len(chunk)
-                total_bytes += len(chunk)
-                if total_bytes > MAX_JOB_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail="The selected CV documents exceed the 50 MB upload limit.",
-                    )
-                upload_content.extend(chunk)
-            encrypted_upload = encrypt_private_data(
-                bytes(upload_content),
-                context=job_upload_encryption_context(str(workspace["member_id"]), job_id, stored_name),
+            temporary_upload = tempfile.NamedTemporaryFile(
+                prefix="vitamine-upload-",
+                suffix=Path(safe_name).suffix,
+                delete=False,
             )
+            temporary_path = Path(temporary_upload.name)
+            try:
+                with temporary_upload:
+                    while True:
+                        chunk = file.file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        file_digest.update(chunk)
+                        file_bytes += len(chunk)
+                        total_bytes += len(chunk)
+                        if file_bytes > MAX_JOB_UPLOAD_FILE_BYTES:
+                            raise HTTPException(
+                                status_code=413,
+                                detail="Each CV document must be 20 MB or smaller.",
+                            )
+                        if total_bytes > MAX_JOB_UPLOAD_BYTES:
+                            raise HTTPException(
+                                status_code=413,
+                                detail="The selected CV documents exceed the 50 MB upload limit.",
+                            )
+                        temporary_upload.write(chunk)
+                temporary_path.chmod(0o600)
+                inspect_cv_upload(
+                    temporary_path,
+                    maximum_bytes=MAX_JOB_UPLOAD_FILE_BYTES,
+                    scan_required=malware_scan_required(),
+                )
+                encrypted_upload = encrypt_private_data(
+                    temporary_path.read_bytes(),
+                    context=job_upload_encryption_context(str(workspace["member_id"]), job_id, stored_name),
+                )
+            finally:
+                temporary_path.unlink(missing_ok=True)
+            destination = uploads / encrypted_name
             destination.write_bytes(encrypted_upload)
             destination.chmod(0o600)
             payload_files.append(
@@ -5570,6 +5613,9 @@ async def queue_cv_import_job(
         )
         if not created:
             shutil.rmtree(directory, ignore_errors=True)
+    except UploadSafetyError as exc:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
         shutil.rmtree(directory, ignore_errors=True)
         raise

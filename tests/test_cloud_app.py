@@ -52,6 +52,7 @@ class CloudAppTests(unittest.TestCase):
                 "VITAMINE_JOB_ROOT": str(Path(self.directory.name) / "jobs"),
                 "VITAMINE_JOB_WORK_ROOT": str(Path(self.directory.name) / "job-work"),
                 "VITAMINE_DISABLE_JOB_RUNNER": "1",
+                "VITAMINE_MALWARE_SCAN_REQUIRED": "0",
                 "VITAMINE_DEPLOYMENT_CONFIG": str(
                     Path(__file__).resolve().parents[1] / "deploy" / "strato" / "vitamine-hosted.json"
                 ),
@@ -686,6 +687,20 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(replay.json()["job"]["id"], job_id)
         replacement = self.client.post("/api/cloud/jobs/enrich-cv")
         self.assertEqual(replacement.status_code, 202, replacement.text)
+
+    def test_cv_import_rejects_a_file_with_an_invalid_content_signature(self):
+        self.create_account()
+        self.assertEqual(self.client.post("/gateway/workspace/new").status_code, 200)
+
+        rejected = self.client.post(
+            "/api/cloud/jobs/cv-import",
+            files={"files": ("not-a-cv.pdf", b"not actually a PDF", "application/pdf")},
+        )
+
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        self.assertIn("valid PDF", rejected.json()["detail"])
+        with sqlite3.connect(self.db_path) as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM background_jobs").fetchone()[0], 0)
 
     def test_running_job_cancellation_stops_before_any_worker_or_snapshot(self):
         self.create_account()

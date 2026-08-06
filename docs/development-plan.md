@@ -446,7 +446,12 @@ Evidence: pending
   in `vitamine/cloud_app.py` and `vitamine/cloud_job_runner.py`, documented
   operations in `docs/strato-deployment.md`, and mocked regression coverage in
   `tests/test_provider_failures.py` and `tests/test_cloud_app.py`.
-- [ ] Upload abuse controls and, before a public launch, malware scanning.
+- [x] Upload abuse controls and, before a public launch, malware scanning.
+  Evidence: signature, archive, size, count, and fail-closed local ClamAV
+  checks in `vitamine/upload_security.py`, gateway/worker integration in
+  `vitamine/cloud_app.py` and `vitamine/app.py`, Apache body limit and hosted
+  scanner runbook in `docs/strato-deployment.md`, and regression coverage in
+  `tests/test_upload_security.py` and `tests/test_cloud_app.py`.
 
 ## Research-service integrations
 
