@@ -83,6 +83,9 @@ class CloudMigrationTests(unittest.TestCase):
         self.assertIn("passkey_credentials", tables)
         self.assertIn("member_activity_events", tables)
         self.assertIn("last_login_at", self.table_columns("members"))
+        self.assertIn("openai_processing_consents", tables)
+        self.assertIn("openai_processing_consent_events", tables)
+        self.assertIn("cancel_requested_at", self.table_columns("background_jobs"))
 
     def test_version_seven_usage_is_normalized_to_at_cost_and_trialed(self):
         self.seed_version(7)

@@ -54,6 +54,10 @@ const elements = {
   closePlusDialog: $("#closePlusDialog"),
   plusDeveloperSetting: $("#plusDeveloperSetting"),
   plusDeveloperToggle: $("#plusDeveloperToggle"),
+  openAiProcessingConsent: $("#openAiProcessingConsent"),
+  openAiConsentStatus: $("#openAiConsentStatus"),
+  saveOpenAiConsent: $("#saveOpenAiConsent"),
+  deleteAccountForm: $("#deleteAccountForm"),
 };
 let libraryPollTimer = null;
 let libraryPayload = null;
@@ -102,6 +106,14 @@ async function api(path, options = {}) {
 
 function setBusy(form, busy) {
   for (const control of form.querySelectorAll("button, input")) control.disabled = busy;
+}
+
+function renderOpenAiConsent(consent) {
+  const accepted = Boolean(consent?.accepted);
+  elements.openAiProcessingConsent.checked = accepted;
+  elements.openAiConsentStatus.textContent = accepted
+    ? `Permission recorded for notice version ${consent.policy_version}.`
+    : "AI processing is currently off."
 }
 
 function showAuthTab(name) {
@@ -391,6 +403,7 @@ async function loadLibrary() {
   elements.libraryView.hidden = false;
   elements.accountNav.hidden = false;
   elements.accountIdentity.textContent = payload.account.display_name || payload.account.email;
+  renderOpenAiConsent(payload.openai_processing_consent);
   renderPlusStatus(payload.plus);
   elements.profileStatus.hidden = false;
   if (payload.profile) {
@@ -637,7 +650,10 @@ async function loadPasskeySettings() {
 elements.settingsButton.addEventListener("click", async () => {
   elements.passkeyMessage.textContent = "";
   elements.settingsDialog.showModal();
-  try { await loadPasskeySettings(); } catch (error) { elements.passkeyMessage.textContent = error.message; }
+  try {
+    await loadPasskeySettings();
+    if (libraryPayload?.openai_processing_consent) renderOpenAiConsent(libraryPayload.openai_processing_consent);
+  } catch (error) { elements.passkeyMessage.textContent = error.message; }
 });
 elements.closeSettings.addEventListener("click", () => elements.settingsDialog.close());
 elements.settingsDialog.addEventListener("click", (event) => {
@@ -662,6 +678,51 @@ elements.plusDeveloperToggle.addEventListener("change", async () => {
     elements.passkeyMessage.textContent = error.message;
   } finally {
     elements.plusDeveloperToggle.disabled = false;
+  }
+});
+
+elements.saveOpenAiConsent.addEventListener("click", async () => {
+  const accepted = elements.openAiProcessingConsent.checked;
+  elements.saveOpenAiConsent.disabled = true;
+  elements.passkeyMessage.textContent = "";
+  try {
+    const payload = await api("/api/account/openai-processing-consent", {
+      method: "PUT",
+      body: JSON.stringify({ accepted }),
+    });
+    if (libraryPayload) libraryPayload.openai_processing_consent = payload.consent;
+    renderOpenAiConsent(payload.consent);
+    elements.passkeyMessage.textContent = accepted
+      ? "AI processing permission saved."
+      : "AI processing permission withdrawn. New AI requests are blocked.";
+  } catch (error) {
+    elements.passkeyMessage.textContent = error.message;
+    renderOpenAiConsent(libraryPayload?.openai_processing_consent);
+  } finally {
+    elements.saveOpenAiConsent.disabled = false;
+  }
+});
+
+elements.deleteAccountForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const values = new FormData(elements.deleteAccountForm);
+  if (!window.confirm("Permanently delete your VitaMine account and all of its stored data? This cannot be undone.")) return;
+  setBusy(elements.deleteAccountForm, true);
+  elements.passkeyMessage.textContent = "";
+  try {
+    const result = await api("/api/account", {
+      method: "DELETE",
+      body: JSON.stringify({
+        password: String(values.get("password") || ""),
+        confirmation: String(values.get("confirmation") || ""),
+      }),
+    });
+    const erased = result.erased || {};
+    window.alert(`Account deleted. Erased ${erased.cvs || 0} CV(s), ${erased.public_profiles || 0} public profile(s), and ${erased.sessions || 0} signed-in session(s).`);
+    window.location.assign("/");
+  } catch (error) {
+    elements.passkeyMessage.textContent = error.message;
+    setBusy(elements.deleteAccountForm, false);
   }
 });
 

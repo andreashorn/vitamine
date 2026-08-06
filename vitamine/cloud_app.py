@@ -58,7 +58,10 @@ RESERVED_SLUGS = {
     "health",
     "login",
     "logout",
+    "imprint",
+    "privacy",
     "static",
+    "terms",
     "support",
     "www",
 }
@@ -90,7 +93,8 @@ PROJECT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT / "logo" / "vitamine_logo.png"
 INVITE_ARROW_PATH = PROJECT / "static" / "assets" / "onboarding_arrow_blank.png"
 CLOUD_STATIC = PROJECT / "cloud_static"
-CLOUD_SCHEMA_VERSION = 14
+CLOUD_SCHEMA_VERSION = 15
+OPENAI_CV_PROCESSING_CONSENT_VERSION = "2026-08-05"
 EMAIL_VERIFICATION_MAX_AGE = 60 * 60 * 24
 PASSWORD_RESET_MAX_AGE = 60 * 60
 PASSKEY_CHALLENGE_MAX_AGE = 5 * 60
@@ -143,6 +147,25 @@ CREATE TABLE IF NOT EXISTS member_activity_events (
 
 CREATE INDEX IF NOT EXISTS idx_member_activity_events_member_time
 ON member_activity_events(member_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS openai_processing_consents (
+    member_id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+    policy_version TEXT NOT NULL,
+    granted_at TEXT,
+    withdrawn_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS openai_processing_consent_events (
+    id TEXT PRIMARY KEY,
+    member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK (action IN ('granted', 'withdrawn')),
+    policy_version TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_openai_processing_consent_events_member
+ON openai_processing_consent_events(member_id, occurred_at);
 
 CREATE TABLE IF NOT EXISTS email_verification_tokens (
     token_hash TEXT PRIMARY KEY,
@@ -255,7 +278,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     heartbeat_at TEXT,
     finished_at TEXT,
     updated_at TEXT NOT NULL,
-    acknowledged_at TEXT
+    acknowledged_at TEXT,
+    cancel_requested_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_background_jobs_member
@@ -558,7 +582,8 @@ CREATE TABLE IF NOT EXISTS background_jobs (
     heartbeat_at TEXT,
     finished_at TEXT,
     updated_at TEXT NOT NULL,
-    acknowledged_at TEXT
+    acknowledged_at TEXT,
+    cancel_requested_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_background_jobs_member
@@ -783,6 +808,15 @@ class PaypalBetaTopupClaim(BaseModel):
 
 class PlusDeveloperToggle(BaseModel):
     active: bool
+
+
+class OpenAIProcessingConsentUpdate(BaseModel):
+    accepted: bool
+
+
+class AccountDeletion(BaseModel):
+    password: str = Field(min_length=1, max_length=PASSWORD_MAX_LENGTH)
+    confirmation: str = Field(min_length=6, max_length=32)
 
 
 class DatabaseRename(BaseModel):
@@ -2316,6 +2350,42 @@ def migration_014_admin_usage_dashboard(con: GatewayConnection) -> None:
     )
 
 
+def migration_015_openai_consent(con: GatewayConnection) -> None:
+    """Record the current, versioned permission for managed OpenAI processing."""
+    if not cloud_table_exists(con, "members"):
+        return
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS openai_processing_consents (
+            member_id TEXT PRIMARY KEY REFERENCES members(id) ON DELETE CASCADE,
+            policy_version TEXT NOT NULL,
+            granted_at TEXT,
+            withdrawn_at TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS openai_processing_consent_events (
+            id TEXT PRIMARY KEY,
+            member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+            action TEXT NOT NULL CHECK (action IN ('granted', 'withdrawn')),
+            policy_version TEXT NOT NULL,
+            occurred_at TEXT NOT NULL
+        )
+        """
+    )
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_openai_processing_consent_events_member "
+        "ON openai_processing_consent_events(member_id, occurred_at)"
+    )
+    if con.backend == "postgres":
+        con.execute("ALTER TABLE background_jobs ADD COLUMN IF NOT EXISTS cancel_requested_at TEXT")
+    elif "cancel_requested_at" not in sqlite_column_names(con, "background_jobs"):
+        con.execute("ALTER TABLE background_jobs ADD COLUMN cancel_requested_at TEXT")
+
+
 CLOUD_MIGRATIONS = (
     (1, migration_001_initial_cloud_schema),
     (2, migration_002_account_workspaces),
@@ -2331,6 +2401,7 @@ CLOUD_MIGRATIONS = (
     (12, migration_012_vitamine_plus),
     (13, migration_013_cleanup_cv_jobs),
     (14, migration_014_admin_usage_dashboard),
+    (15, migration_015_openai_consent),
 )
 
 
@@ -2449,6 +2520,36 @@ def account_member(
     if not str(member["email_verified_at"] or "").strip():
         raise HTTPException(status_code=403, detail="Confirm your email address before using VitaMine.")
     return member
+
+
+def openai_processing_consent(member_id: str) -> dict[str, Any]:
+    with connect() as con:
+        row = con.execute(
+            "SELECT * FROM openai_processing_consents WHERE member_id=?",
+            (member_id,),
+        ).fetchone()
+    granted_at = str(row["granted_at"] or "") if row else ""
+    withdrawn_at = str(row["withdrawn_at"] or "") if row else ""
+    policy_version = str(row["policy_version"] or "") if row else ""
+    return {
+        "accepted": bool(granted_at and not withdrawn_at and policy_version == OPENAI_CV_PROCESSING_CONSENT_VERSION),
+        "policy_version": OPENAI_CV_PROCESSING_CONSENT_VERSION,
+        "granted_at": granted_at or None,
+        "withdrawn_at": withdrawn_at or None,
+    }
+
+
+def require_openai_processing_consent(member_id: str) -> dict[str, Any]:
+    consent = openai_processing_consent(member_id)
+    if not consent["accepted"]:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Before VitaMine sends CV or template content to OpenAI's managed AI service, "
+                "review and accept the OpenAI processing notice in Settings."
+            ),
+        )
+    return consent
 
 
 def parsed_utc(value: Any) -> datetime | None:
@@ -2971,6 +3072,8 @@ def start_workspace_worker(row: sqlite3.Row) -> int:
         "VITAMINE_CLOUD_WORKER": "1",
         "VITAMINE_LLM_USAGE_PATH": str(session_dir / "llm-usage.jsonl"),
         "VITAMINE_PLUS_ACTIVE": "1" if member_plus_status(str(row["member_id"]))["active"] else "0",
+        "VITAMINE_OPENAI_PROCESSING_CONSENT": "1"
+        if openai_processing_consent(str(row["member_id"]))["accepted"] else "0",
     }
     env.pop("ZOTERO_API_KEY", None)
     zotero_api_key = account_zotero_api_key(str(row["member_id"]))
@@ -3478,7 +3581,7 @@ def claim_next_background_job() -> Any | None:
         row = con.execute(
             """
             SELECT * FROM background_jobs
-            WHERE status='queued'
+            WHERE status='queued' AND cancel_requested_at IS NULL
             ORDER BY created_at
             LIMIT 1
             """
@@ -3492,7 +3595,7 @@ def claim_next_background_job() -> Any | None:
             SET status='running', started_at=COALESCE(started_at, ?),
                 heartbeat_at=?, updated_at=?,
                 progress_json=?
-            WHERE id=? AND status='queued'
+            WHERE id=? AND status='queued' AND cancel_requested_at IS NULL
             """,
             (
                 now,
@@ -3620,6 +3723,14 @@ def ingest_llm_usage_events(job: Any, path: Path) -> int:
         staged_path.unlink(missing_ok=True)
 
 
+def background_job_requires_openai_consent(job: Any) -> bool:
+    if str(job["kind"]) in {"cv_import", "cleanup_cv"}:
+        return True
+    if str(job["kind"]) != "enrich_cv":
+        return False
+    return str(parsed_json_object(job["payload_json"]).get("scope") or "") != "citation_network"
+
+
 def execute_background_job(job: Any) -> None:
     directory = (job_root() / str(job["id"])).resolve()
     try:
@@ -3639,6 +3750,8 @@ def execute_background_job(job: Any) -> None:
     progress_path = work_directory / "progress.json"
     usage_path = work_directory / "llm-usage.jsonl"
     log_path = work_directory / "worker.log"
+    if background_job_requires_openai_consent(job):
+        require_openai_processing_consent(str(job["member_id"]))
     with connect() as con:
         database = con.execute(
             """
@@ -3692,6 +3805,7 @@ def execute_background_job(job: Any) -> None:
         "VITAMINE_PREFERENCES": str(work_directory / "preferences.json"),
         "VITAMINE_CLOUD_WORKER": "1",
         "VITAMINE_LLM_USAGE_PATH": str(usage_path),
+        "VITAMINE_OPENAI_PROCESSING_CONSENT": "1",
     }
     env.pop("ZOTERO_API_KEY", None)
     zotero_api_key = account_zotero_api_key(str(job["member_id"]))
@@ -3731,6 +3845,16 @@ def execute_background_job(job: Any) -> None:
                 except subprocess.TimeoutExpired:
                     process.kill()
                 raise RuntimeError("VitaMine restarted while the job was running; it will be retried.")
+            if background_job_requires_openai_consent(job):
+                try:
+                    require_openai_processing_consent(str(job["member_id"]))
+                except HTTPException:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise RuntimeError("OpenAI processing permission was withdrawn; the job was stopped.")
             if progress_path.exists():
                 raw_progress = progress_path.read_text(encoding="utf-8", errors="replace")
                 if raw_progress != last_progress:
@@ -4927,6 +5051,7 @@ async def queue_cv_import_job(
     with connect() as con:
         member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
     require_vitamine_plus(member)
+    require_openai_processing_consent(str(member["id"]))
     if not files:
         raise HTTPException(status_code=400, detail="Please choose at least one CV document.")
     job_id = secrets.token_urlsafe(18)
@@ -5005,6 +5130,7 @@ def queue_enrichment_job(
     with connect() as con:
         member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
     require_vitamine_plus(member)
+    require_openai_processing_consent(str(member["id"]))
     job_id = secrets.token_urlsafe(18)
     job, created = create_background_job(
         workspace=workspace,
@@ -5052,6 +5178,7 @@ def queue_cleanup_job(
     with connect() as con:
         member = con.execute("SELECT * FROM members WHERE id=?", (workspace["member_id"],)).fetchone()
     require_vitamine_plus(member)
+    require_openai_processing_consent(str(member["id"]))
     job, created = create_background_job(
         workspace=workspace,
         kind="cleanup_cv",
@@ -5148,6 +5275,7 @@ def list_account_databases(
             "email": member["email"],
             "display_name": member["display_name"],
         },
+        "openai_processing_consent": openai_processing_consent(str(member["id"])),
         "plus": vitamine_plus_status(member),
         "databases": [account_database_payload(row) for row in rows],
         "profile": {
@@ -5156,6 +5284,131 @@ def list_account_databases(
             "updated_at": profile["updated_at"],
         } if profile else None,
     }
+
+
+@app.put("/api/account/openai-processing-consent")
+def update_openai_processing_consent(
+    payload: OpenAIProcessingConsentUpdate,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    member_id = str(member["id"])
+    now = utc_now()
+    with connect() as con:
+        existing = con.execute(
+            "SELECT * FROM openai_processing_consents WHERE member_id=?",
+            (member_id,),
+        ).fetchone()
+        currently_accepted = bool(
+            existing
+            and existing["granted_at"]
+            and not existing["withdrawn_at"]
+            and existing["policy_version"] == OPENAI_CV_PROCESSING_CONSENT_VERSION
+        )
+        if payload.accepted:
+            con.execute(
+                """
+                INSERT INTO openai_processing_consents
+                  (member_id, policy_version, granted_at, withdrawn_at, updated_at)
+                VALUES (?, ?, ?, NULL, ?)
+                ON CONFLICT(member_id) DO UPDATE SET
+                  policy_version=excluded.policy_version, granted_at=excluded.granted_at,
+                  withdrawn_at=NULL, updated_at=excluded.updated_at
+                """,
+                (member_id, OPENAI_CV_PROCESSING_CONSENT_VERSION, now, now),
+            )
+            if not currently_accepted:
+                con.execute(
+                    """
+                    INSERT INTO openai_processing_consent_events
+                      (id, member_id, action, policy_version, occurred_at)
+                    VALUES (?, ?, 'granted', ?, ?)
+                    """,
+                    (secrets.token_urlsafe(18), member_id, OPENAI_CV_PROCESSING_CONSENT_VERSION, now),
+                )
+        elif currently_accepted:
+            con.execute(
+                """
+                UPDATE openai_processing_consents
+                SET withdrawn_at=?, updated_at=? WHERE member_id=?
+                """,
+                (now, now, member_id),
+            )
+            con.execute(
+                """
+                INSERT INTO openai_processing_consent_events
+                  (id, member_id, action, policy_version, occurred_at)
+                VALUES (?, ?, 'withdrawn', ?, ?)
+                """,
+                (secrets.token_urlsafe(18), member_id, OPENAI_CV_PROCESSING_CONSENT_VERSION, now),
+            )
+    return {"ok": True, "consent": openai_processing_consent(member_id)}
+
+
+def remove_member_job_artifacts(job_ids: list[str]) -> None:
+    for job_id in job_ids:
+        safe_job_id = Path(job_id).name
+        if safe_job_id != job_id:
+            raise RuntimeError("Unsafe background-job identifier.")
+        for root in (job_root(), job_work_root()):
+            target = (root / safe_job_id).resolve()
+            if target.parent != root.resolve():
+                raise RuntimeError("Unsafe background-job path.")
+            shutil.rmtree(target, ignore_errors=True)
+
+
+@app.delete("/api/account")
+def delete_account(
+    payload: AccountDeletion,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    member = account_member(authorization, request.cookies.get(SESSION_COOKIE))
+    member_id = str(member["id"])
+    if payload.confirmation.strip().upper() != "DELETE":
+        raise HTTPException(status_code=422, detail='Type DELETE to confirm permanent account deletion.')
+    if not verify_password(payload.password, str(member["password_hash"] or "")):
+        raise HTTPException(status_code=403, detail="Your password could not be confirmed.")
+    with connect() as con:
+        jobs = con.execute(
+            "SELECT id, status FROM background_jobs WHERE member_id=?",
+            (member_id,),
+        ).fetchall()
+        running = [str(row["id"]) for row in jobs if row["status"] == "running"]
+        if running:
+            raise HTTPException(
+                status_code=409,
+                detail="Wait for the running background process to finish before deleting your account.",
+            )
+        queued_job_ids = [str(row["id"]) for row in jobs if row["status"] == "queued"]
+        if queued_job_ids:
+            con.execute(
+                "UPDATE background_jobs SET cancel_requested_at=? WHERE member_id=? AND status='queued'",
+                (utc_now(), member_id),
+            )
+        workspaces = con.execute(
+            "SELECT * FROM workspace_sessions WHERE member_id=?",
+            (member_id,),
+        ).fetchall()
+        counts = {
+            "cvs": int(con.execute("SELECT COUNT(*) AS count FROM account_databases WHERE member_id=?", (member_id,)).fetchone()["count"]),
+            "public_profiles": int(con.execute("SELECT COUNT(*) AS count FROM public_profiles WHERE member_id=?", (member_id,)).fetchone()["count"]),
+            "sessions": int(con.execute("SELECT COUNT(*) AS count FROM device_credentials WHERE member_id=?", (member_id,)).fetchone()["count"]),
+            "queued_artifacts": len(queued_job_ids),
+        }
+        job_ids = [str(row["id"]) for row in jobs]
+    for workspace in workspaces:
+        stop_workspace(workspace)
+    remove_member_job_artifacts(job_ids)
+    with connect() as con:
+        cursor = con.execute("DELETE FROM members WHERE id=?", (member_id,))
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=404, detail="This account no longer exists.")
+    response = JSONResponse({"ok": True, "erased": counts})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(WORKSPACE_COOKIE, path="/")
+    return response
 
 
 @app.get("/api/account/premium-account")
@@ -5395,6 +5648,26 @@ def account_css() -> FileResponse:
 @app.get("/assets/account.js", response_class=FileResponse)
 def account_javascript() -> FileResponse:
     return FileResponse(CLOUD_STATIC / "account.js", media_type="text/javascript")
+
+
+@app.get("/assets/legal.css", response_class=FileResponse)
+def legal_css() -> FileResponse:
+    return FileResponse(CLOUD_STATIC / "legal.css", media_type="text/css")
+
+
+@app.get("/privacy", response_class=FileResponse)
+def privacy_policy() -> FileResponse:
+    return FileResponse(CLOUD_STATIC / "privacy.html", media_type="text/html")
+
+
+@app.get("/terms", response_class=FileResponse)
+def terms_of_service() -> FileResponse:
+    return FileResponse(CLOUD_STATIC / "terms.html", media_type="text/html")
+
+
+@app.get("/imprint", response_class=FileResponse)
+def imprint() -> FileResponse:
+    return FileResponse(CLOUD_STATIC / "imprint.html", media_type="text/html")
 
 
 @app.get("/assets/admin.css", response_class=FileResponse)

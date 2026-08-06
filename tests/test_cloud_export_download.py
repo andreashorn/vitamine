@@ -23,7 +23,7 @@ class CloudExportDownloadTests(unittest.TestCase):
     def test_cloud_workspace_hides_internal_database_panel(self):
         self.assertIn('id="databasePanel"', self.page)
         self.assertIn('databasePanel.hidden = true', self.script)
-        self.assertIn("20260804-cleanup-crossref-verification", self.page)
+        self.assertIn("20260805-cytoscape-network-resilient", self.page)
 
 
 if __name__ == "__main__":

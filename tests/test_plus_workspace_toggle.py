@@ -16,7 +16,7 @@ class PlusWorkspaceToggleTests(unittest.TestCase):
         self.assertIn("state.cloud.plus?.developer_toggle", self.script)
         self.assertIn('api("/api/account/plus-developer-toggle"', self.script)
         self.assertIn("workspacePlusButton.developer", self.styles)
-        self.assertIn("vitamine-plus-dev-toggle", self.page)
+        self.assertIn('id="workspacePlusButton"', self.page)
 
 
 if __name__ == "__main__":

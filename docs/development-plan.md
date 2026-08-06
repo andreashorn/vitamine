@@ -400,16 +400,16 @@ Evidence: pending
 - [x] Encrypt private CV snapshots and queued uploads at the application layer
   with versioned authenticated encryption. Keep active decrypted workspaces and
   job files in runtime-only storage; public profiles remain intentionally public.
-- [ ] Account deletion with complete, verifiable erasure of CVs, portraits,
+- [x] Account deletion with complete, verifiable erasure of CVs, portraits,
   sessions, public snapshots, and queued artifacts.
 - [ ] A complete account-data export, if anything outside the `.vitamine` CV
   should become user-owned data.
 - [ ] Explicit, versioned consent before using CV content or behavior for
   analytics, aggregate research, product improvement, or model development.
-- [ ] A way to withdraw consent without having to delete the account.
+- [x] A way to withdraw consent without having to delete the account.
 - [ ] Documented and enforced retention periods for uploads, temporary
   workspaces, job records, access logs, and deleted accounts.
-- [ ] A privacy policy, terms of service, imprint, and clear processor list
+- [x] A privacy policy, terms of service, imprint, and clear processor list
   covering at least Strato, OpenAI, ORCID, Zotero, OpenAlex, and future email or
   monitoring providers.
 - [ ] A GDPR-oriented data-flow and controller/processor review before opening
@@ -430,7 +430,7 @@ Evidence: pending
   private at-cost operator ledger.
 - [x] Replace the pilot balance/top-up model with a 90-day VitaMine+ trial,
   €25 annual entitlement, and a free tier that cannot invoke managed LLMs.
-- [ ] Tell users clearly when their uploaded CV content is sent to OpenAI and
+- [x] Tell users clearly when their uploaded CV content is sent to OpenAI and
   obtain the appropriate consent.
 - [ ] Add abuse-oriented per-account and per-job spending limits independently
   of VitaMine+ access.

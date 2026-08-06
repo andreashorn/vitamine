@@ -93,9 +93,12 @@ class CloudAppTests(unittest.TestCase):
             con.execute("UPDATE members SET email_verified_at=account_created_at WHERE email=?", (email,))
             con.commit()
 
-    def create_account(self, *, email="tester@example.org"):
+    def create_account(self, *, email="tester@example.org", openai_consent=True):
         _, token = self.redeem()
         self.register(email=email, token=token)
+        if openai_consent:
+            response = self.client.put("/api/account/openai-processing-consent", json={"accepted": True})
+            self.assertEqual(response.status_code, 200, response.text)
         return token
 
     def test_gateway_startup_never_recovers_or_runs_background_jobs(self):
@@ -131,6 +134,103 @@ class CloudAppTests(unittest.TestCase):
         account = self.client.get("/api/account/databases").json()
         self.assertTrue(account["plus"]["active"])
         self.assertEqual(account["plus"]["plan"], "trial")
+
+    def test_openai_processing_consent_is_versioned_and_can_be_withdrawn(self):
+        self.create_account(openai_consent=False)
+        initial = self.client.get("/api/account/databases")
+        self.assertFalse(initial.json()["openai_processing_consent"]["accepted"])
+        granted = self.client.put("/api/account/openai-processing-consent", json={"accepted": True})
+        self.assertEqual(granted.status_code, 200, granted.text)
+        self.assertTrue(granted.json()["consent"]["accepted"])
+        self.assertEqual(granted.json()["consent"]["policy_version"], "2026-08-05")
+        withdrawn = self.client.put("/api/account/openai-processing-consent", json={"accepted": False})
+        self.assertEqual(withdrawn.status_code, 200, withdrawn.text)
+        self.assertFalse(withdrawn.json()["consent"]["accepted"])
+        with sqlite3.connect(self.db_path) as con:
+            actions = [row[0] for row in con.execute(
+                "SELECT action FROM openai_processing_consent_events ORDER BY occurred_at"
+            )]
+        self.assertEqual(actions, ["granted", "withdrawn"])
+
+    def test_account_deletion_erases_linked_data_and_queued_artifacts(self):
+        self.create_account()
+        with sqlite3.connect(self.db_path) as con:
+            member_id = con.execute("SELECT id FROM members WHERE email='tester@example.org'").fetchone()[0]
+            now = "2026-08-05T00:00:00+00:00"
+            con.execute(
+                """
+                INSERT INTO account_databases
+                  (id, member_id, name, filename, sqlite_blob, checksum, revision, size_bytes, created_at, updated_at)
+                VALUES ('cv-delete', ?, 'Delete CV', 'delete.vitamine', X'01', 'checksum', 1, 1, ?, ?)
+                """,
+                (member_id, now, now),
+            )
+            con.execute(
+                """
+                INSERT INTO public_profiles (slug, member_id, snapshot_json, created_at, updated_at, published_at)
+                VALUES ('delete-profile', ?, '{}', ?, ?, ?)
+                """,
+                (member_id, now, now, now),
+            )
+            con.execute(
+                """
+                INSERT INTO background_jobs
+                  (id, member_id, database_id, kind, status, base_revision, payload_json, progress_json, created_at, updated_at)
+                VALUES ('queued-delete', ?, 'cv-delete', 'cv_import', 'queued', 1, '{}', '{}', ?, ?)
+                """,
+                (member_id, now, now),
+            )
+            con.commit()
+        (Path(self.directory.name) / "jobs" / "queued-delete" / "uploads").mkdir(parents=True)
+        (Path(self.directory.name) / "jobs" / "queued-delete" / "uploads" / "payload.enc").write_bytes(b"ciphertext")
+        (Path(self.directory.name) / "job-work" / "queued-delete").mkdir(parents=True)
+        deleted = self.client.request(
+            "DELETE",
+            "/api/account",
+            json={"password": "correct-horse-battery-staple", "confirmation": "DELETE"},
+        )
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(deleted.json()["erased"], {
+            "cvs": 1, "public_profiles": 1, "sessions": 1, "queued_artifacts": 1,
+        })
+        with sqlite3.connect(self.db_path) as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM members").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM account_databases").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM public_profiles").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM background_jobs").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM device_credentials").fetchone()[0], 0)
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM openai_processing_consents").fetchone()[0], 0)
+        self.assertFalse((Path(self.directory.name) / "jobs" / "queued-delete").exists())
+        self.assertFalse((Path(self.directory.name) / "job-work" / "queued-delete").exists())
+
+    def test_account_deletion_waits_for_running_job(self):
+        self.create_account()
+        with sqlite3.connect(self.db_path) as con:
+            member_id = con.execute("SELECT id FROM members WHERE email='tester@example.org'").fetchone()[0]
+            now = "2026-08-05T00:00:00+00:00"
+            con.execute(
+                """
+                INSERT INTO account_databases
+                  (id, member_id, name, filename, sqlite_blob, checksum, revision, size_bytes, created_at, updated_at)
+                VALUES ('cv-running', ?, 'Running CV', 'running.vitamine', X'01', 'checksum', 1, 1, ?, ?)
+                """,
+                (member_id, now, now),
+            )
+            con.execute(
+                """
+                INSERT INTO background_jobs
+                  (id, member_id, database_id, kind, status, base_revision, payload_json, progress_json, created_at, updated_at)
+                VALUES ('running-delete', ?, 'cv-running', 'enrich_cv', 'running', 1, '{}', '{}', ?, ?)
+                """,
+                (member_id, now, now),
+            )
+            con.commit()
+        blocked = self.client.request(
+            "DELETE", "/api/account",
+            json={"password": "correct-horse-battery-staple", "confirmation": "DELETE"},
+        )
+        self.assertEqual(blocked.status_code, 409, blocked.text)
+        self.assertEqual(self.client.get("/api/session").status_code, 200)
 
     def test_expired_plus_account_keeps_core_access_but_llm_jobs_require_upgrade(self):
         self.create_account()
@@ -358,6 +458,20 @@ class CloudAppTests(unittest.TestCase):
         self.assertIn("occasions, in multiple languages.", response.text)
         self.assertNotIn("share a profile", response.text)
 
+    def test_public_legal_pages_list_controller_and_processing_services(self):
+        privacy = self.client.get("/privacy")
+        self.assertEqual(privacy.status_code, 200, privacy.text)
+        self.assertIn("Andreas Horn", privacy.text)
+        self.assertIn("Am Steinfeld 6", privacy.text)
+        for service in ("Strato AG", "OpenAI", "ORCID", "Zotero", "OpenAlex"):
+            self.assertIn(service, privacy.text)
+        terms = self.client.get("/terms")
+        imprint = self.client.get("/imprint")
+        self.assertEqual(terms.status_code, 200, terms.text)
+        self.assertEqual(imprint.status_code, 200, imprint.text)
+        self.assertIn("info@vitamine.cloud", imprint.text)
+        self.assertIn("No commercial-register entry", imprint.text)
+
     def test_uploaded_database_runs_original_vitamine_app_in_isolated_worker(self):
         self.create_account()
         example = Path(__file__).resolve().parents[1] / "data" / "example.vitamine"
@@ -564,6 +678,8 @@ class CloudAppTests(unittest.TestCase):
             )
             self.assertEqual(registered.status_code, 200, registered.text)
             self.verify_email("second@example.org")
+            consent = second_client.put("/api/account/openai-processing-consent", json={"accepted": True})
+            self.assertEqual(consent.status_code, 200, consent.text)
             second_workspace = second_client.post("/gateway/workspace/new")
             self.assertEqual(second_workspace.status_code, 200, second_workspace.text)
             second = second_client.post("/api/cloud/jobs/enrich-cv", headers=headers)
@@ -1004,7 +1120,7 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(page.headers["cache-control"], "no-store")
         self.assertEqual(page.headers["vary"], "Cookie")
         self.assertIn('autocomplete="username webauthn"', page.text)
-        self.assertIn("20260801-passkey-settings", page.text)
+        self.assertIn("20260805-privacy-account", page.text)
         self.assertIn("Stop recounting your career from scratch, over and over again.", page.text)
         self.assertIn('class="vitamine-bottle"', page.text)
         self.assertIn("Alex Researcher", page.text)

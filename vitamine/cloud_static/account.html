@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VitaMine — Academic CV manager</title>
-  <link rel="stylesheet" href="/assets/account.css?v=20260805-sync-arrows">
-  <script src="/assets/account.js?v=20260805-sync-arrows" defer></script>
+  <link rel="stylesheet" href="/assets/account.css?v=20260805-privacy-account">
+  <script src="/assets/account.js?v=20260805-privacy-account" defer></script>
 </head>
 <body id="top">
   <header class="site-header">
@@ -370,6 +370,12 @@
 
     </section>
   </main>
+  <footer class="site-legal-footer">
+    <span>© 2026 VitaMine</span>
+    <a href="/privacy">Privacy policy</a>
+    <a href="/terms">Terms of service</a>
+    <a href="/imprint">Imprint</a>
+  </footer>
 
   <dialog id="profileSetupDialog" class="account-dialog">
     <form id="profileSetupForm">
@@ -399,7 +405,7 @@
   <dialog id="settingsDialog" class="account-dialog settings-dialog">
     <div class="settings-panel">
       <div class="account-dialog-heading">
-        <div><p class="eyebrow">Settings</p><h2>Security</h2></div>
+        <div><p class="eyebrow">Settings</p><h2>Security, privacy &amp; account</h2></div>
         <button id="closeSettings" class="dialog-close" type="button" aria-label="Close">×</button>
       </div>
       <section class="security-setting" aria-labelledby="accountSecurityTitle">
@@ -416,6 +422,29 @@
           <p>Temporarily override your plan to test both the free and VitaMine+ experiences.</p>
         </div>
         <label class="developer-toggle"><input id="plusDeveloperToggle" type="checkbox"> VitaMine+ enabled</label>
+      </section>
+      <section class="security-setting consent-setting" aria-labelledby="openAiConsentTitle">
+        <div>
+          <h3 id="openAiConsentTitle">Managed AI and your CV</h3>
+          <p>VitaMine sends selected CV text and, where relevant, Word-template text to OpenAI when you use AI-assisted import, enrichment, cleanup, or custom-template analysis. It uses VitaMine’s managed OpenAI account; no personal API key is needed.</p>
+          <p class="form-note">Only agree if you are authorized to share this content with OpenAI. See the <a href="/privacy">privacy policy</a> and <a href="/terms">terms of service</a>. You can withdraw permission here; new AI requests will then be blocked.</p>
+          <p id="openAiConsentStatus" class="setting-status"></p>
+        </div>
+        <div class="setting-actions">
+          <label class="consent-choice"><input id="openAiProcessingConsent" type="checkbox"> I agree to this processing</label>
+          <button id="saveOpenAiConsent" class="secondary-button" type="button">Save AI preference</button>
+        </div>
+      </section>
+      <section class="security-setting account-delete-setting" aria-labelledby="deleteAccountTitle">
+        <div>
+          <h3 id="deleteAccountTitle">Delete account</h3>
+          <p>Permanently erase your CVs and portraits, signed-in sessions, public profile snapshot, integrations, and queued uploads. This cannot be undone.</p>
+        </div>
+        <form id="deleteAccountForm" class="delete-account-form">
+          <input name="password" type="password" autocomplete="current-password" placeholder="Current password" required>
+          <input name="confirmation" type="text" autocomplete="off" placeholder="Type DELETE" required>
+          <button class="danger-button" type="submit">Delete account permanently</button>
+        </form>
       </section>
       <p id="passkeyMessage" class="message" role="status"></p>
     </div>
