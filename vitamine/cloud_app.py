@@ -103,6 +103,8 @@ PASSKEY_ORIGIN = "https://vitamine.cloud"
 PLUS_TRIAL_DAYS = 90
 INITIAL_PREMIUM_CREDIT_MICROUSD = 3_000_000  # Legacy migrations only.
 PAYPAL_BETA_TOPUP_MICROUSD = 5_000_000
+OPENAI_ACCOUNT_SPEND_LIMIT_MICROUSD = 200_000
+OPENAI_ACCOUNT_SPEND_WINDOW_HOURS = 24
 LOGGER = logging.getLogger("vitamine.cloud")
 
 
@@ -2552,6 +2554,65 @@ def require_openai_processing_consent(member_id: str) -> dict[str, Any]:
     return consent
 
 
+def openai_account_spend_limit_microusd() -> int:
+    raw = str(os.environ.get("VITAMINE_OPENAI_ACCOUNT_SPEND_LIMIT_MICROUSD") or "").strip()
+    try:
+        configured = int(raw) if raw else OPENAI_ACCOUNT_SPEND_LIMIT_MICROUSD
+    except ValueError:
+        configured = OPENAI_ACCOUNT_SPEND_LIMIT_MICROUSD
+    # An accidental empty, negative, or implausibly high setting must not
+    # silently remove the account-level safety guard.
+    return min(max(configured, 1), 50_000_000)
+
+
+def openai_account_spend_status(member_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    """Return the rolling managed-AI cost guard for one hosted account."""
+    current = now or datetime.now(timezone.utc)
+    cutoff = (current - timedelta(hours=OPENAI_ACCOUNT_SPEND_WINDOW_HOURS)).isoformat()
+    with connect() as con:
+        row = con.execute(
+            """
+            SELECT COALESCE(SUM(wholesale_cost_microusd), 0) AS spent_microusd,
+                   SUM(CASE WHEN wholesale_cost_microusd IS NULL THEN 1 ELSE 0 END) AS unpriced_responses
+            FROM llm_usage_events
+            WHERE member_id=? AND created_at>=?
+            """,
+            (member_id, cutoff),
+        ).fetchone()
+    spent_microusd = int(row["spent_microusd"] or 0)
+    unpriced_responses = int(row["unpriced_responses"] or 0)
+    limit_microusd = openai_account_spend_limit_microusd()
+    return {
+        "limit_microusd": limit_microusd,
+        "window_hours": OPENAI_ACCOUNT_SPEND_WINDOW_HOURS,
+        "spent_microusd": spent_microusd,
+        "unpriced_responses": unpriced_responses,
+        "paused": spent_microusd >= limit_microusd or unpriced_responses > 0,
+    }
+
+
+def require_openai_account_spend_available(member_id: str) -> dict[str, Any]:
+    status = openai_account_spend_status(member_id)
+    if status["unpriced_responses"]:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Managed AI is paused for this account because a recent OpenAI response could not be priced. "
+                "Please contact support."
+            ),
+        )
+    if status["paused"]:
+        limit = status["limit_microusd"] / 1_000_000
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Managed AI is paused for this account after reaching the ${limit:.2f} safety limit "
+                f"in the last {status['window_hours']} hours. It resumes automatically as earlier usage leaves the rolling window."
+            ),
+        )
+    return status
+
+
 def parsed_utc(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(str(value or ""))
@@ -3519,6 +3580,8 @@ def create_background_job(
                 status_code=409,
                 detail="This CV already has a background process running.",
             )
+        if background_job_uses_managed_openai(kind, payload):
+            require_openai_account_spend_available(member_id)
         progress = {
             "phase": "queued",
             "message": "Waiting for the VitaMine worker",
@@ -3674,61 +3737,61 @@ def compact_job_result(result: dict[str, Any]) -> dict[str, Any]:
 def ingest_llm_usage_events(job: Any, path: Path) -> int:
     if not path.is_file():
         return 0
-    staged_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}")
     try:
-        path.replace(staged_path)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except FileNotFoundError:
         return 0
     keys = set(job.keys())
     job_id = job["id"] if "id" in keys else None
     operation = str(job["kind"] if "kind" in keys else "unknown")[:100]
     inserted = 0
-    try:
-        with connect() as con:
-            for line in staged_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                event = parsed_json_object(line)
-                event_key = str(event.get("event_key") or "")[:100]
-                provider = str(event.get("provider") or "")[:40]
-                model = str(event.get("model") or "unknown")[:120]
-                if not event_key or provider != "openai" or not re.fullmatch(r"[A-Za-z0-9._:/-]+", model):
-                    continue
-                counts = []
-                for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"):
-                    value = event.get(key)
-                    counts.append(int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None)
-                costs = usage_costs({**event, **dict(zip(
-                    ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"), counts
-                ))})
-                cursor = con.execute(
-                    """
-                    INSERT INTO llm_usage_events
-                      (id, event_key, member_id, database_id, job_id, operation, provider, model,
-                       input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
-                       priced_model, pricing_version, wholesale_cost_microusd, charged_cost_microusd,
-                       markup_basis_points, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(event_key) DO NOTHING
-                    """,
-                    (
-                        secrets.token_urlsafe(18), event_key, job["member_id"], job["database_id"], job_id,
-                        operation, provider, model, *counts, costs["priced_model"], costs["pricing_version"],
-                        costs["wholesale_cost_microusd"], costs["charged_cost_microusd"],
-                        costs["markup_basis_points"],
-                        str(event.get("occurred_at") or utc_now())[:40],
-                    ),
-                )
-                inserted += max(0, cursor.rowcount)
-        return inserted
-    finally:
-        staged_path.unlink(missing_ok=True)
+    with connect() as con:
+        for line in lines:
+            event = parsed_json_object(line)
+            event_key = str(event.get("event_key") or "")[:100]
+            provider = str(event.get("provider") or "")[:40]
+            model = str(event.get("model") or "unknown")[:120]
+            if not event_key or provider != "openai" or not re.fullmatch(r"[A-Za-z0-9._:/-]+", model):
+                continue
+            counts = []
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"):
+                value = event.get(key)
+                counts.append(int(value) if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None)
+            costs = usage_costs({**event, **dict(zip(
+                ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens"), counts
+            ))})
+            cursor = con.execute(
+                """
+                INSERT INTO llm_usage_events
+                  (id, event_key, member_id, database_id, job_id, operation, provider, model,
+                   input_tokens, cached_input_tokens, output_tokens, reasoning_tokens,
+                   priced_model, pricing_version, wholesale_cost_microusd, charged_cost_microusd,
+                   markup_basis_points, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(event_key) DO NOTHING
+                """,
+                (
+                    secrets.token_urlsafe(18), event_key, job["member_id"], job["database_id"], job_id,
+                    operation, provider, model, *counts, costs["priced_model"], costs["pricing_version"],
+                    costs["wholesale_cost_microusd"], costs["charged_cost_microusd"],
+                    costs["markup_basis_points"],
+                    str(event.get("occurred_at") or utc_now())[:40],
+                ),
+            )
+            inserted += max(0, cursor.rowcount)
+    return inserted
+
+
+def background_job_uses_managed_openai(kind: str, payload: dict[str, Any]) -> bool:
+    if kind in {"cv_import", "cleanup_cv"}:
+        return True
+    if kind != "enrich_cv":
+        return False
+    return str(payload.get("scope") or "") != "citation_network"
 
 
 def background_job_requires_openai_consent(job: Any) -> bool:
-    if str(job["kind"]) in {"cv_import", "cleanup_cv"}:
-        return True
-    if str(job["kind"]) != "enrich_cv":
-        return False
-    return str(parsed_json_object(job["payload_json"]).get("scope") or "") != "citation_network"
+    return background_job_uses_managed_openai(str(job["kind"]), parsed_json_object(job["payload_json"]))
 
 
 def execute_background_job(job: Any) -> None:
@@ -3752,6 +3815,7 @@ def execute_background_job(job: Any) -> None:
     log_path = work_directory / "worker.log"
     if background_job_requires_openai_consent(job):
         require_openai_processing_consent(str(job["member_id"]))
+        require_openai_account_spend_available(str(job["member_id"]))
     with connect() as con:
         database = con.execute(
             """
@@ -3848,13 +3912,15 @@ def execute_background_job(job: Any) -> None:
             if background_job_requires_openai_consent(job):
                 try:
                     require_openai_processing_consent(str(job["member_id"]))
+                    ingest_llm_usage_events(job, usage_path)
+                    require_openai_account_spend_available(str(job["member_id"]))
                 except HTTPException:
                     process.terminate()
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
-                    raise RuntimeError("OpenAI processing permission was withdrawn; the job was stopped.")
+                    raise RuntimeError("Managed AI permission was withdrawn or this account reached its safety limit; the job was stopped.")
             if progress_path.exists():
                 raw_progress = progress_path.read_text(encoding="utf-8", errors="replace")
                 if raw_progress != last_progress:
@@ -4248,6 +4314,8 @@ async def proxy_to_workspace(request: Request, worker_path: str) -> Response:
                 status_code=409,
                 detail="This CV is being updated by a background process. It will unlock automatically when the process finishes.",
             )
+    if workspace_request_uses_managed_openai(worker_path, request.method):
+        require_openai_account_spend_available(str(row["member_id"]))
     url = f"http://127.0.0.1:{row['port']}/{worker_path.lstrip('/')}"
     if request.url.query:
         url = f"{url}?{request.url.query}"
@@ -4304,6 +4372,20 @@ async def proxy_to_workspace(request: Request, worker_path: str) -> Response:
         status_code=upstream.status_code,
         headers=response_headers,
         media_type=upstream.headers.get("content-type"),
+    )
+
+
+def workspace_request_uses_managed_openai(worker_path: str, method: str) -> bool:
+    if method.upper() != "POST":
+        return False
+    path = "/" + worker_path.lstrip("/")
+    if re.fullmatch(r"/api/entries/\d+/translate", path):
+        return True
+    if path in {"/api/export-templates", "/api/cv-import/upload", "/api/actions/enrich-cv", "/api/actions/cleanup-cv"}:
+        return True
+    return bool(
+        re.fullmatch(r"/api/export-formats/[^/]+/prompt-plan", path)
+        or re.fullmatch(r"/api/actions/export/[^/]+", path)
     )
 
 
@@ -5464,7 +5546,8 @@ def premium_account_summary(
         "pricing_source": "https://developers.openai.com/api/docs/pricing",
         "daily": daily,
         "recent": recent,
-        "enforcement_enabled": False,
+        "enforcement_enabled": True,
+        "spend_guard": openai_account_spend_status(str(member["id"])),
         "top_up": paypal_beta_topup_config(),
     }
 

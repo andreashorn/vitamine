@@ -540,6 +540,17 @@ same environment wrapper and `-m vitamine.scripts.manage_cloud premium-accounts`
 Token counts and costs are operational measurements only. They are not shown
 to users and do not represent a prepaid balance.
 
+Managed AI has a per-account abuse guard, independent of VitaMine+ access. It
+pauses new managed-AI work for that account once recorded OpenAI wholesale cost
+reaches $0.20 in the preceding rolling 24 hours; it resumes automatically as
+earlier usage leaves that window. Active background jobs recheck the guard as
+usage arrives and stop when the threshold is crossed. There is intentionally no
+separate per-job limit. The default can be changed only through
+`VITAMINE_OPENAI_ACCOUNT_SPEND_LIMIT_MICROUSD` in `/etc/vitamine-cloud.env`;
+the current production setting is the code default `200000`. An unpriced recent
+OpenAI response also pauses further managed-AI work so an unknown model cannot
+bypass the safety boundary.
+
 ## Operator usage dashboard
 
 The separate operator dashboard lives at `https://vitamine.cloud/admin`. It is

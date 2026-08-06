@@ -129,7 +129,14 @@ class CloudAppTests(unittest.TestCase):
         self.assertEqual(payload["balance_microusd"], 0)
         self.assertEqual(payload["credited_microusd"], 0)
         self.assertEqual(payload["charged_microusd"], 0)
-        self.assertFalse(payload["enforcement_enabled"])
+        self.assertTrue(payload["enforcement_enabled"])
+        self.assertEqual(payload["spend_guard"], {
+            "limit_microusd": 200_000,
+            "window_hours": 24,
+            "spent_microusd": 0,
+            "unpriced_responses": 0,
+            "paused": False,
+        })
         self.assertFalse(payload["top_up"]["enabled"])
         account = self.client.get("/api/account/databases").json()
         self.assertTrue(account["plus"]["active"])
@@ -586,6 +593,35 @@ class CloudAppTests(unittest.TestCase):
         duplicate = self.client.post("/api/cloud/jobs/enrich-cv")
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
         self.assertIn("already has a background process", duplicate.json()["detail"])
+
+    def test_daily_openai_spend_guard_pauses_new_managed_ai_jobs(self):
+        self.create_account()
+        opened = self.client.post("/gateway/workspace/new")
+        self.assertEqual(opened.status_code, 200, opened.text)
+        with sqlite3.connect(self.db_path) as con:
+            member_id = con.execute("SELECT id FROM members WHERE email='tester@example.org'").fetchone()[0]
+            database_id = opened.json()["database_id"]
+            con.execute(
+                """
+                INSERT INTO llm_usage_events
+                  (id, event_key, member_id, database_id, operation, provider, model,
+                   wholesale_cost_microusd, charged_cost_microusd, created_at)
+                VALUES ('guard-event', 'openai:guard-event', ?, ?, 'enrich_cv', 'openai', 'gpt-5.4-nano',
+                        200000, 200000, ?)
+                """,
+                (member_id, database_id, "2099-01-01T00:00:00+00:00"),
+            )
+            con.commit()
+
+        paused = self.client.post("/api/cloud/jobs/enrich-cv")
+        self.assertEqual(paused.status_code, 429, paused.text)
+        self.assertIn("$0.20 safety limit", paused.json()["detail"])
+        summary = self.client.get("/api/account/premium-account")
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertTrue(summary.json()["spend_guard"]["paused"])
+        self.assertEqual(summary.json()["spend_guard"]["spent_microusd"], 200_000)
+        with sqlite3.connect(self.db_path) as con:
+            self.assertEqual(con.execute("SELECT COUNT(*) FROM background_jobs").fetchone()[0], 0)
 
     def test_cloud_cleanup_is_a_distinct_queued_job(self):
         self.create_account()

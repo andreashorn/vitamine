@@ -432,8 +432,9 @@ Evidence: pending
   €25 annual entitlement, and a free tier that cannot invoke managed LLMs.
 - [x] Tell users clearly when their uploaded CV content is sent to OpenAI and
   obtain the appropriate consent.
-- [ ] Add abuse-oriented per-account and per-job spending limits independently
-  of VitaMine+ access.
+- [x] Add abuse-oriented per-account and per-job spending limits independently
+  of VitaMine+ access. The current pilot uses a per-account $0.20 rolling
+  24-hour managed-AI guard; it deliberately has no separate per-job cap.
 - [ ] An operator view for unusually expensive, repeated, failed, or stuck
   jobs.
 - [ ] Robust job idempotency and cancellation so retries cannot silently repeat
