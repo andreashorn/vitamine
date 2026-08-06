@@ -14,7 +14,7 @@ class OnboardingTests(unittest.TestCase):
         html = (root / "vitamine" / "static" / "index.html").read_text()
         script = (root / "vitamine" / "static" / "app.js").read_text()
 
-        self.assertIn("20260805-cytoscape-network-resilient", html)
+        self.assertIn("20260806-openai-enrichment-consent", html)
         self.assertEqual(html.count('id="enrichCvDashboard"'), 1)
         self.assertLess(html.index('id="enrichCvDashboard"'), html.index('id="cloudAccountMenu"'))
         self.assertIn('class="topbarEnrichButton"', html)
@@ -32,6 +32,21 @@ class OnboardingTests(unittest.TestCase):
             script,
         )
         self.assertIn("panel.hidden = !state.cloud.enabled", script)
+
+    def test_hosted_enrichment_requests_openai_consent_before_starting_a_job(self):
+        root = Path(__file__).resolve().parents[1]
+        html = (root / "vitamine" / "static" / "index.html").read_text()
+        script = (root / "vitamine" / "static" / "app.js").read_text()
+
+        self.assertIn('id="openAiEnrichmentConsentDialog"', html)
+        self.assertIn('id="acceptOpenAiEnrichmentConsent"', html)
+        self.assertIn("Send CV content to OpenAI?", html)
+        self.assertIn('href="/privacy"', html)
+        self.assertIn('href="/terms"', html)
+        self.assertIn("async function ensureOpenAiEnrichmentConsent()", script)
+        self.assertIn('api("/api/account/databases")', script)
+        self.assertIn('api("/api/account/openai-processing-consent"', script)
+        self.assertIn("await ensureOpenAiEnrichmentConsent()", script)
 
     def test_blank_database_starts_on_cv_import_step(self):
         with tempfile.TemporaryDirectory() as directory:

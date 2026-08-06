@@ -6,7 +6,7 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260805-cytoscape-jelly-network">
+  <link rel="stylesheet" href="/static/styles.css?v=20260806-openai-enrichment-consent">
 </head>
 <body>
   <header class="topbar">
@@ -907,6 +907,25 @@
     </div>
   </dialog>
 
+  <dialog id="openAiEnrichmentConsentDialog" class="openAiEnrichmentConsentDialog" aria-labelledby="openAiEnrichmentConsentTitle">
+    <section class="openAiEnrichmentConsentPanel">
+      <div class="dialogHeader">
+        <div>
+          <p class="openAiEnrichmentConsentEyebrow">Your permission is needed</p>
+          <h2 id="openAiEnrichmentConsentTitle">Send CV content to OpenAI?</h2>
+        </div>
+        <button id="cancelOpenAiEnrichmentConsent" type="button" aria-label="Cancel enrichment">×</button>
+      </div>
+      <p>To enrich this CV, VitaMine will send selected CV text to OpenAI through VitaMine’s managed OpenAI account. CV content can include personal data.</p>
+      <p>Only continue if you are authorised to share this content. Your versioned permission is recorded and can be withdrawn in Account Settings at any time; withdrawing it blocks future managed-AI requests.</p>
+      <p class="openAiEnrichmentConsentLinks"><a href="/privacy" target="_blank" rel="noopener">Read the privacy policy</a><a href="/terms" target="_blank" rel="noopener">Terms of service</a></p>
+      <div class="formActions openAiEnrichmentConsentActions">
+        <button id="cancelOpenAiEnrichmentConsentAction" type="button">Cancel</button>
+        <button id="acceptOpenAiEnrichmentConsent" type="button">Agree and enrich CV</button>
+      </div>
+    </section>
+  </dialog>
+
   <dialog id="citationExplorerDialog" class="citationExplorerDialog">
     <section class="citationExplorerPanel">
       <div class="dialogHeader">
@@ -966,6 +985,6 @@
   </dialog>
 
   <script src="/static/vendor/cytoscape-3.30.4.min.js?v=20260805"></script>
-  <script src="/static/app.js?v=20260805-cytoscape-network-resilient"></script>
+  <script src="/static/app.js?v=20260806-openai-enrichment-consent"></script>
 </body>
 </html>

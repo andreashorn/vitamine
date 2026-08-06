@@ -14,6 +14,7 @@ const state = {
     enabled: false,
     workspace: null,
     plus: null,
+    openAiProcessingConsent: null,
     activeJob: null,
     resuming: false,
   },
@@ -324,6 +325,57 @@ function requirePlusUi() {
   if (hasVitaminePlus()) return true;
   showWorkspacePlusDialog();
   return false;
+}
+
+function requestOpenAiEnrichmentConsent() {
+  const dialog = $("#openAiEnrichmentConsentDialog");
+  const accept = $("#acceptOpenAiEnrichmentConsent");
+  const cancel = $("#cancelOpenAiEnrichmentConsent");
+  const cancelAction = $("#cancelOpenAiEnrichmentConsentAction");
+  if (!dialog || !accept || !cancel || !cancelAction) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (accepted) => {
+      if (settled) return;
+      settled = true;
+      accept.removeEventListener("click", grantConsent);
+      cancel.removeEventListener("click", declineConsent);
+      cancelAction.removeEventListener("click", declineConsent);
+      dialog.removeEventListener("close", closeDialog);
+      if (dialog.open) dialog.close();
+      resolve(accepted);
+    };
+    const declineConsent = () => finish(false);
+    const closeDialog = () => finish(false);
+    const grantConsent = async () => {
+      accept.disabled = true;
+      try {
+        const payload = await api("/api/account/openai-processing-consent", {
+          method: "PUT",
+          body: JSON.stringify({ accepted: true }),
+        });
+        state.cloud.openAiProcessingConsent = payload.consent;
+        finish(true);
+      } catch (error) {
+        setStatus(error.message, { error: true });
+      } finally {
+        accept.disabled = false;
+      }
+    };
+    accept.addEventListener("click", grantConsent);
+    cancel.addEventListener("click", declineConsent);
+    cancelAction.addEventListener("click", declineConsent);
+    dialog.addEventListener("close", closeDialog);
+    dialog.showModal();
+  });
+}
+
+async function ensureOpenAiEnrichmentConsent() {
+  if (!state.cloud.enabled || !state.cloud.workspace?.background_jobs) return true;
+  const account = await api("/api/account/databases");
+  state.cloud.openAiProcessingConsent = account.openai_processing_consent || null;
+  if (state.cloud.openAiProcessingConsent?.accepted) return true;
+  return requestOpenAiEnrichmentConsent();
 }
 
 function configureWorkspacePlus() {
@@ -5256,7 +5308,13 @@ async function init() {
     await loadOnboarding();
   };
   $("#enrichCvDashboard").addEventListener("click", () => {
-    if (requirePlusUi()) enrichCv();
+    void (async () => {
+      try {
+        if (requirePlusUi() && await ensureOpenAiEnrichmentConsent()) await enrichCv();
+      } catch (error) {
+        setStatus(error.message, { error: true });
+      }
+    })();
   });
   const cleanupCv = async () => {
     const cleanupPath = state.cloud.enabled && state.cloud.workspace?.background_jobs
