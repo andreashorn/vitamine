@@ -81,7 +81,7 @@ const state = {
     citingWorks: [],
     nextCitingPage: null,
   },
-  citationNetwork: { data: null, graph: null, refreshing: false, settleTimer: null },
+  citationNetwork: { data: null, graph: null, refreshing: false, scope: "focused", pointer: null },
   activity: {
     timer: null,
     startedAt: null,
@@ -2512,72 +2512,135 @@ function citationNetworkDoi(node) {
   return citationDoiHref(node.doi);
 }
 
-function networkNodeTooltip(node) {
-  return [node.title, node.authors, [node.venue, node.year].filter(Boolean).join(" · "), `${formatMetricNumber(node.citations)} citations`]
-    .filter(Boolean).join("\n");
+function citationNetworkView(data) {
+  const own = data.nodes.filter((node) => node.kind === "own");
+  if (state.citationNetwork.scope === "all") return { nodes: data.nodes, links: data.links, ownTotal: own.length };
+  const linkedOwnIds = new Set(data.links.map((link) => link.target));
+  const visibleOwn = own.filter((node) => linkedOwnIds.has(node.id)).slice(0, 14);
+  const visibleOwnIds = new Set(visibleOwn.map((node) => node.id));
+  const links = data.links.filter((link) => visibleOwnIds.has(link.target));
+  const visibleCitingIds = new Set(links.map((link) => link.source));
+  return {
+    nodes: data.nodes.filter((node) => visibleOwnIds.has(node.id) || visibleCitingIds.has(node.id)),
+    links,
+    ownTotal: own.length,
+  };
 }
 
-function runCitationNetworkLayout(graph, { reset = false, fit = false } = {}) {
-  if (!graph) return;
-  graph.layout({
-    name: "cose",
-    animate: true,
-    animationDuration: reset ? 900 : 560,
-    padding: 96,
-    nodeRepulsion: 18000,
-    idealEdgeLength: 195,
-    edgeElasticity: 0.22,
-    gravity: 0.14,
-    numIter: 1400,
-    initialTemp: 220,
-    coolingFactor: 0.97,
-    minTemp: 1,
-    nodeDimensionsIncludeLabels: true,
-    nodeOverlap: 34,
-    componentSpacing: 100,
-    randomize: reset,
-    fit,
-  }).run();
+function citationNetworkRadius(node) {
+  const citations = Math.max(0, Number(node.citations || 0));
+  const scaled = Math.min(1, Math.log1p(citations) / Math.log(1001));
+  return node.kind === "own" ? 8 + scaled * 8 : 3.5 + scaled * 4.5;
 }
 
-function renderCitationNetwork() {
+function paintCitationNetworkNode(node, context) {
+  const radius = citationNetworkRadius(node);
+  const own = node.kind === "own";
+  const outer = own ? "#08786d" : "#355e82";
+  const middle = own ? "#28c2a7" : "#8db8d5";
+  const highlight = own ? "#d9fff4" : "#edf7ff";
+  const gradient = context.createRadialGradient(node.x - radius * 0.38, node.y - radius * 0.42, radius * 0.1, node.x, node.y, radius);
+  gradient.addColorStop(0, highlight);
+  gradient.addColorStop(0.22, middle);
+  gradient.addColorStop(1, outer);
+  context.save();
+  context.beginPath();
+  context.arc(node.x, node.y, radius, 0, 2 * Math.PI);
+  context.fillStyle = gradient;
+  context.shadowColor = own ? "rgba(7, 120, 109, .40)" : "rgba(43, 83, 119, .24)";
+  context.shadowBlur = own ? 12 : 7;
+  context.shadowOffsetY = 2;
+  context.fill();
+  context.shadowColor = "transparent";
+  context.lineWidth = own ? 1.5 : 1;
+  context.strokeStyle = own ? "rgba(1, 73, 66, .85)" : "rgba(31, 66, 97, .72)";
+  context.stroke();
+  if (own) {
+    context.beginPath();
+    context.arc(node.x - radius * 0.22, node.y - radius * 0.26, Math.max(1.5, radius * 0.22), 0, 2 * Math.PI);
+    context.fillStyle = "rgba(255, 255, 255, .55)";
+    context.fill();
+  }
+  context.restore();
+}
+
+function positionCitationNetworkTooltip() {
+  const chart = $("#citationNetworkGraph");
+  const tooltip = $("#citationNetworkTooltip");
+  const pointer = state.citationNetwork.pointer;
+  if (!chart || !tooltip || tooltip.hidden || !pointer) return;
+  const margin = 18;
+  const width = Math.min(285, chart.clientWidth - margin * 2);
+  const left = Math.max(margin, Math.min(chart.clientWidth - width - margin, pointer.x + 18));
+  const top = Math.max(margin, Math.min(chart.clientHeight - 132, pointer.y + 18));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function updateCitationNetworkScopeControls() {
+  document.querySelectorAll("[data-citation-network-scope]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.citationNetworkScope === state.citationNetwork.scope));
+  });
+}
+
+function renderCitationNetwork({ reset = false } = {}) {
   const chart = $("#citationNetworkGraph");
   const data = state.citationNetwork.data;
   if (!chart || !data) return;
-  state.citationNetwork.graph?.destroy();
+  state.citationNetwork.graph?._destructor?.();
   state.citationNetwork.graph = null;
   if (!data.cached) { chart.innerHTML = `<div class="citationNetworkPending"><span class="citationPaperSpinner" aria-hidden="true"></span><strong>Preparing your citation network</strong><span>VitaMine is collecting citing papers in the background. You can close this window and check back shortly.</span></div>`; return; }
-  if (!window.cytoscape) { chart.innerHTML = `<p class="emptyState">The interactive graph renderer could not load. Please check your connection and reopen this view.</p>`; return; }
+  if (!window.ForceGraph) { chart.innerHTML = `<p class="emptyState">The interactive graph renderer could not load. Please check your connection and reopen this view.</p>`; return; }
   chart.innerHTML = `<div id="citationNetworkCanvas" class="citationNetworkCanvas"></div><aside id="citationNetworkTooltip" class="citationNetworkTooltip" hidden></aside>`;
+  chart.addEventListener("pointermove", (event) => {
+    const bounds = chart.getBoundingClientRect();
+    state.citationNetwork.pointer = { x: event.clientX - bounds.left, y: event.clientY - bounds.top };
+    positionCitationNetworkTooltip();
+  });
   const tooltip = $("#citationNetworkTooltip");
-  const graph = window.cytoscape({
-    container: $("#citationNetworkCanvas"),
-    elements: [
-      ...data.nodes.map((node) => ({ data: { ...node } })),
-      ...data.links.map((link, index) => ({ data: { id: `edge-${index}`, source: link.source, target: link.target } })),
-    ],
-    style: [
-      { selector: "node", style: { "background-fill": "radial-gradient", "background-gradient-stop-colors": "#a8c6d9 #6689a2", "background-gradient-stop-positions": "0% 100%", "border-width": 2, "border-color": "#4c6476", "shadow-blur": 7, "shadow-color": "#405c70", "shadow-opacity": 0.23, "shadow-offset-y": 2, width: "mapData(citations, 0, 1000, 9, 20)", height: "mapData(citations, 0, 1000, 9, 20)", "overlay-opacity": 0, "transition-property": "background-color, border-width, border-color", "transition-duration": "160ms" } },
-      { selector: 'node[kind = "own"]', style: { "background-fill": "radial-gradient", "background-gradient-stop-colors": "#48c6b0 #0b7669", "background-gradient-stop-positions": "0% 100%", "border-width": 4, "border-color": "#075e55", "shadow-blur": 12, "shadow-color": "#0c766b", "shadow-opacity": 0.3, width: "mapData(citations, 0, 1000, 24, 46)", height: "mapData(citations, 0, 1000, 24, 46)" } },
-      { selector: "node:active", style: { "border-width": 4, "border-color": "#172554" } },
-      { selector: "edge", style: { width: 1.8, "line-gradient-stop-colors": "#b4cecd #6f9e9b", "line-gradient-stop-positions": "0% 100%", opacity: 0.68, "curve-style": "bezier" } },
-    ],
-    wheelSensitivity: 0.18,
-    minZoom: 0.2,
-    maxZoom: 3,
-    layout: { name: "preset" },
-  });
+  const view = citationNetworkView(data);
+  const graph = window.ForceGraph()($("#citationNetworkCanvas"))
+    .graphData({ nodes: view.nodes.map((node) => ({ ...node })), links: view.links.map((link) => ({ ...link })) })
+    .nodeId("id")
+    .nodeLabel(() => "")
+    .nodeCanvasObject((node, context) => paintCitationNetworkNode(node, context))
+    .nodePointerAreaPaint((node, color, context) => {
+      context.beginPath();
+      context.arc(node.x, node.y, citationNetworkRadius(node) + 3, 0, 2 * Math.PI);
+      context.fillStyle = color;
+      context.fill();
+    })
+    .linkColor((link) => link.target?.kind === "own" ? "rgba(21, 125, 116, .34)" : "rgba(71, 113, 145, .26)")
+    .linkWidth((link) => link.target?.kind === "own" ? 1.35 : 1)
+    .linkCurvature(0.09)
+    .linkDirectionalParticles(1)
+    .linkDirectionalParticleWidth(1.3)
+    .linkDirectionalParticleColor(() => "rgba(50, 150, 138, .48)")
+    .linkDirectionalParticleSpeed(0.0025)
+    .backgroundColor("rgba(0,0,0,0)")
+    .enableNodeDrag(true)
+    .onNodeHover((node) => {
+      if (!node) { tooltip.hidden = true; return; }
+      tooltip.innerHTML = `<strong>${escapeHtml(node.title || "Untitled publication")}</strong><span>${escapeHtml(node.authors || "Authors unavailable")}</span><span>${escapeHtml([node.venue, node.year].filter(Boolean).join(" · ") || "Publication details unavailable")}</span><span>${formatMetricNumber(node.citations)} citations${node.kind === "own" ? " · your paper" : " · citing paper"}</span>`;
+      tooltip.hidden = false;
+      positionCitationNetworkTooltip();
+    })
+    .onNodeClick((node) => {
+      const href = citationNetworkDoi(node);
+      if (href) window.open(href, "_blank", "noopener,noreferrer");
+    });
   state.citationNetwork.graph = graph;
-  runCitationNetworkLayout(graph, { reset: true, fit: true });
-  graph.on("mouseover", "node", (event) => { const node = event.target.data(); tooltip.innerHTML = `<strong>${escapeHtml(node.title)}</strong><span>${escapeHtml(node.authors || "Authors unavailable")}</span><span>${escapeHtml([node.venue, node.year].filter(Boolean).join(" · "))}</span><span>${formatMetricNumber(node.citations)} citations</span>`; tooltip.hidden = false; });
-  graph.on("mousemove", "node", (event) => { const position = event.renderedPosition; tooltip.style.left = `${Math.min(chart.clientWidth - 270, position.x + 16)}px`; tooltip.style.top = `${Math.min(chart.clientHeight - 130, position.y + 16)}px`; });
-  graph.on("mouseout", "node", () => { tooltip.hidden = true; });
-  graph.on("tap", "node", (event) => { const href = citationNetworkDoi(event.target.data()); if (href) window.open(href, "_blank", "noopener,noreferrer"); });
-  graph.on("free", "node", () => {
-    window.clearTimeout(state.citationNetwork.settleTimer);
-    state.citationNetwork.settleTimer = window.setTimeout(() => runCitationNetworkLayout(graph), 90);
-  });
-  $("#citationNetworkSummary").textContent = `${data.nodes.filter((node) => node.kind === "own").length} own papers · ${data.nodes.filter((node) => node.kind === "citing").length} citing papers · drag a dot to arrange the graph${state.citationNetwork.refreshing ? " · updating in background" : ""}`;
+  graph.d3Force("charge")?.strength(-155);
+  graph.d3Force("link")?.distance((link) => link.target?.kind === "own" ? 92 : 72).strength(0.52);
+  graph.d3ReheatSimulation();
+  window.setTimeout(() => graph.zoomToFit(650, 86), reset ? 80 : 180);
+  const totalOwn = data.nodes.filter((node) => node.kind === "own").length;
+  const totalCiting = data.nodes.filter((node) => node.kind === "citing").length;
+  const scopeNote = state.citationNetwork.scope === "focused" && totalOwn > view.nodes.filter((node) => node.kind === "own").length
+    ? ` · focused on ${view.nodes.filter((node) => node.kind === "own").length} most-cited papers`
+    : " · complete cached network";
+  $("#citationNetworkSummary").textContent = `${view.nodes.filter((node) => node.kind === "own").length} of ${totalOwn} own papers · ${view.nodes.filter((node) => node.kind === "citing").length} of ${totalCiting} citing papers${scopeNote} · drag a dot and the network will resettle${state.citationNetwork.refreshing ? " · updating in background" : ""}`;
+  updateCitationNetworkScopeControls();
 }
 
 async function openCitationNetwork() {
@@ -5380,10 +5443,24 @@ async function init() {
   $("#refreshCitationNetwork")?.addEventListener("click", () => {
     if (requirePlusUi()) queueCitationNetworkRefresh();
   });
-  $("#citationNetworkZoomIn")?.addEventListener("click", () => state.citationNetwork.graph?.zoom({ level: state.citationNetwork.graph.zoom() * 1.25, renderedPosition: { x: 480, y: 300 } }));
-  $("#citationNetworkZoomOut")?.addEventListener("click", () => state.citationNetwork.graph?.zoom({ level: state.citationNetwork.graph.zoom() / 1.25, renderedPosition: { x: 480, y: 300 } }));
-  $("#citationNetworkFit")?.addEventListener("click", () => state.citationNetwork.graph?.fit(undefined, 72));
-  $("#citationNetworkReset")?.addEventListener("click", () => runCitationNetworkLayout(state.citationNetwork.graph, { reset: true, fit: true }));
+  $("#citationNetworkZoomIn")?.addEventListener("click", () => {
+    const graph = state.citationNetwork.graph;
+    if (graph) graph.zoom(graph.zoom() * 1.25, 220);
+  });
+  $("#citationNetworkZoomOut")?.addEventListener("click", () => {
+    const graph = state.citationNetwork.graph;
+    if (graph) graph.zoom(graph.zoom() / 1.25, 220);
+  });
+  $("#citationNetworkFit")?.addEventListener("click", () => state.citationNetwork.graph?.zoomToFit(500, 86));
+  $("#citationNetworkReset")?.addEventListener("click", () => renderCitationNetwork({ reset: true }));
+  document.querySelectorAll("[data-citation-network-scope]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const scope = button.dataset.citationNetworkScope;
+      if (!scope || scope === state.citationNetwork.scope) return;
+      state.citationNetwork.scope = scope;
+      renderCitationNetwork({ reset: true });
+    });
+  });
   document.querySelectorAll("[data-dashboard-map-mode]").forEach((button) => {
     button.addEventListener("click", () => selectDashboardMapMode(button.dataset.dashboardMapMode));
   });

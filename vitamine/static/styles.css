@@ -3940,15 +3940,22 @@ label.invalid input {
 
 .citationNetworkPanel { display: flex; flex-direction: column; min-height: calc(100vh - 20px); box-sizing: border-box; }
 
-.citationNetworkControls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.citationNetworkControls { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; align-items: center; }
 .citationNetworkControls button { min-width: 34px; }
+.citationNetworkScope { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid #c6d4dc; border-radius: 7px; background: #f8fbfc; }
+.citationNetworkScope button { min-width: 0; padding: 5px 8px; border: 0; border-radius: 5px; background: transparent; color: #4a6470; font-size: 12px; }
+.citationNetworkScope button[aria-pressed="true"] { background: #d9f3ec; color: #075f55; box-shadow: 0 1px 2px rgba(15, 43, 54, .12); }
 
 .citationNetworkGraph {
   position: relative;
   flex: 1;
   min-height: 420px;
   border: 1px solid var(--line);
-  background: radial-gradient(circle at 50% 45%, #f8fffe, #edf5f7);
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(232, 255, 249, .7), transparent 46%),
+    radial-gradient(circle at 12% 88%, rgba(219, 239, 252, .58), transparent 40%),
+    #fbfdfd;
 }
 
 .citationNetworkPending {
@@ -3967,10 +3974,15 @@ label.invalid input {
 .citationNetworkCanvas {
   position: absolute;
   inset: 0;
+  cursor: grab;
   background:
-    radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.72), transparent 50%),
-    linear-gradient(120deg, rgba(100, 181, 169, 0.09), transparent 46%);
+    radial-gradient(circle at 50% 45%, rgba(255, 255, 255, 0.84), transparent 52%),
+    linear-gradient(120deg, rgba(100, 181, 169, 0.075), transparent 46%);
 }
+
+.citationNetworkCanvas:active { cursor: grabbing; }
+
+.citationNetworkCanvas canvas { display: block; }
 
 .citationNetworkTooltip {
   position: absolute;
@@ -3979,17 +3991,18 @@ label.invalid input {
   display: grid;
   gap: 3px;
   padding: 11px 12px;
-  border: 1px solid #b7c7d3;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, .97);
-  box-shadow: 0 8px 25px rgba(15, 23, 42, .18);
+  border: 1px solid rgba(126, 157, 174, .66);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .98);
+  box-shadow: 0 13px 32px rgba(22, 59, 76, .18), 0 2px 7px rgba(22, 59, 76, .08);
   color: #334155;
   font-size: 12px;
   line-height: 1.35;
   pointer-events: none;
 }
 
-.citationNetworkTooltip strong { color: #172554; font-size: 13px; }
+.citationNetworkTooltip strong { color: #164158; font-size: 13px; line-height: 1.3; }
+.citationNetworkTooltip span:last-child { color: #397066; font-weight: 600; }
 
 @media (max-width: 560px) {
   .citationNetworkDialog { width: calc(100vw - 12px); height: calc(100vh - 12px); max-height: calc(100vh - 12px); }
