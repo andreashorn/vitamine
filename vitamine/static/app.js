@@ -1904,20 +1904,26 @@ async function importCvFiles(files) {
 }
 
 async function loadConnections() {
-  const data = await api("/api/connections");
-  state.connections = data;
-  $("#connectionOrcid").value = data.orcid_id || "";
-  $("#connectionZoteroKey").value = "";
-  renderZoteroLibraries();
-  $("#connectionZoteroLibrary").value = data.zotero_library_value || "";
-  $("#connectionZoteroSource").value = data.zotero_source_mode || "my_publications";
-  renderZoteroCollections();
-  $("#connectionStatus").textContent = data.zotero_api_key_set
-    ? "Zotero key saved"
-    : (data.orcid_id ? "ORCID linked; Zotero optional" : "No publication source linked");
-  updateZoteroSourceVisibility();
-  await loadOrcidOAuthStatus();
-  await loadZoteroOAuthStatus();
+  const orcidInput = $("#connectionOrcid");
+  try {
+    const data = await api("/api/connections");
+    state.connections = data;
+    orcidInput.value = data.orcid_id || "";
+    orcidInput.readOnly = false;
+    $("#connectionZoteroKey").value = "";
+    renderZoteroLibraries();
+    $("#connectionZoteroLibrary").value = data.zotero_library_value || "";
+    $("#connectionZoteroSource").value = data.zotero_source_mode || "my_publications";
+    renderZoteroCollections();
+    $("#connectionStatus").textContent = data.zotero_api_key_set
+      ? "Zotero key saved"
+      : (data.orcid_id ? "ORCID linked; Zotero optional" : "No publication source linked");
+    updateZoteroSourceVisibility();
+    await loadOrcidOAuthStatus();
+    await loadZoteroOAuthStatus();
+  } finally {
+    orcidInput.readOnly = false;
+  }
 }
 
 async function saveConnections(event) {
