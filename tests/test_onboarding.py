@@ -20,6 +20,8 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn('class="topbarEnrichButton"', html)
         self.assertIn('id="orcidOauthDescription"', html)
         self.assertIn('id="linkOrcid" class="orcidLinkButton"', html)
+        self.assertIn('id="connectionOrcid" autocomplete="off"', html)
+        self.assertIn('id="orcidLinkValue" autocomplete="off"', html)
         self.assertGreaterEqual(html.count('class="orcidIdMark"'), 2)
         self.assertIn('id="orcidConnectionTitle">ORCID', html)
         self.assertIn('id="zoteroConnectionTitle">Zotero', html)
