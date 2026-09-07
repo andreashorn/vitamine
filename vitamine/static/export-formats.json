@@ -50,6 +50,31 @@
       }
     },
     {
+      "id": "vitamine.compact-research-cv",
+      "name": "Compact Research CV",
+      "summary": "A compact research CV with a clear profile, tabular career history, selected achievements, and publications. Available in English.",
+      "length": "Short · typically 2 pages",
+      "focus": ["career overview", "selected achievements", "selected publications"],
+      "audience": "Research applications, nominations, and concise academic introductions.",
+      "preview": "/static/export-previews/compact-research.svg",
+      "preinstalled": false,
+      "content_profile": "short",
+      "exporter": "compact_research",
+      "languages": ["en"],
+      "quality": {
+        "key": "ready",
+        "label": "",
+        "description": "Ready"
+      },
+      "source": {
+        "kind": "vitamine",
+        "title": "VitaMine Compact Research CV",
+        "url": "",
+        "note": "Reusable Word layout populated from the current CV, with automatic page numbering.",
+        "reviewed_on": "2026-09-07"
+      }
+    },
+    {
       "id": "vitamine.formal-academic",
       "name": "Formal Academic CV",
       "summary": "A comprehensive, chronology-heavy record for medical-faculty review, promotion, and institutional dossiers.",

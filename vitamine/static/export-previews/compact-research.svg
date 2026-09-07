@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Compact Research CV with magenta headings and date columns</title>
+  <rect width="240" height="320" rx="8" fill="#eee9ec"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="132" y="34" width="62" height="7" fill="#202020"/>
+  <g fill="#95004a">
+    <path d="M43 55h4v4h-4zM43 104h4v4h-4zM43 149h4v4h-4zM43 194h4v4h-4zM43 239h4v4h-4z"/>
+    <path d="M50 54h52v6H50zM50 103h65v6H50zM50 148h91v6H50zM50 193h61v6H50zM50 238h87v6H50z"/>
+    <rect x="98" y="69" width="64" height="4"/>
+  </g>
+  <g fill="#8f8f8f">
+    <path d="M54 69h32v3H54zM54 77h32v3H54zM54 85h32v3H54zM54 93h32v3H54z"/>
+    <path d="M98 77h82v3H98zM98 85h90v3H98zM98 93h96v3H98z"/>
+    <path d="M61 117h23v3H61zM61 130h23v3H61zM98 117h96v3H98zM98 123h81v3H98zM98 130h91v3H98zM98 136h74v3H98z"/>
+    <path d="M61 162h23v3H61zM61 175h23v3H61zM98 162h92v3H98zM98 168h79v3H98zM98 175h96v3H98zM98 181h88v3H98z"/>
+    <path d="M61 207h23v3H61zM61 220h23v3H61zM98 207h96v3H98zM98 213h72v3H98zM98 220h85v3H98zM98 226h91v3H98z"/>
+    <path d="M54 252h3v2h-3zM61 251h131v3H61zM61 257h117v3H61zM54 266h3v2h-3zM61 265h124v3H61z"/>
+  </g>
+  <text x="44" y="289" font-family="Arial, sans-serif" font-size="6" fill="#95004a">1/2</text>
+  <rect x="159" y="285" width="35" height="3" fill="#95004a"/>
+</svg>

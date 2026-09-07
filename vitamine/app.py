@@ -117,6 +117,7 @@ from .custom_docx_templates import (
     template_sha256,
     translate_template_headings,
 )
+from .compact_research_cv import render_compact_research_cv
 from .cv_dates import cv_end_date, cv_entry_sort_key
 
 
@@ -7478,6 +7479,29 @@ def build_designed_cv_action(format_name: str, lang: str = "en") -> JSONResponse
     return JSONResponse(build_response(result.stdout, str(int(time.time())), {"language": lang}))
 
 
+def build_compact_research_cv_action(lang: str = "en") -> JSONResponse:
+    if lang != "en":
+        raise HTTPException(status_code=422, detail="This template is currently available in English only.")
+    output_path = OUTPUT / "compact_research_cv_en.docx"
+    try:
+        with connect() as con:
+            render_report = render_compact_research_cv(con, output_path)
+    except (OSError, ValueError):
+        return JSONResponse(
+            {"ok": False, "stderr": "The Compact Research CV could not be rendered."},
+            status_code=500,
+        )
+    return JSONResponse(build_response(
+        f"docx: output/{output_ref(output_path)}",
+        str(int(time.time())),
+        {
+            "language": "en",
+            "template_id": "vitamine.compact-research-cv",
+            "template_render": render_report,
+        },
+    ))
+
+
 def built_docx_path(relative_docx: str) -> Path:
     relative = Path(str(relative_docx or ""))
     if relative.is_absolute():
@@ -7675,6 +7699,8 @@ def build_installed_export_format(format_id: str, lang: str = "en") -> JSONRespo
         raise HTTPException(status_code=422, detail="This local format is a preview package; its Word exporter is not implemented yet.")
     if exporter == "bundled_docx":
         return build_bundled_export_template(item, lang)
+    if exporter == "compact_research":
+        return build_compact_research_cv_action(lang)
     if exporter == "modern":
         response_builder = lambda: build_designed_cv_action("modern", lang)
     elif exporter == "r4ri":

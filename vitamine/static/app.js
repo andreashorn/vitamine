@@ -3677,7 +3677,9 @@ async function removeExportFormat(formatId) {
 async function buildExportFormat(formatId) {
   const format = state.exportFormats.find((item) => item.id === formatId);
   if (!format) return;
-  const language = exportLanguage();
+  const language = format.languages?.length === 1 && format.languages[0] === "en"
+    ? "en"
+    : exportLanguage();
   if (format.content_profile === "long") await saveExportSettings();
   const legacyPaths = {
     one_page: "/api/actions/build-ultrashort-tabular",
