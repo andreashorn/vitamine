@@ -16,8 +16,8 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
-from vitamine.scripts.export_utils import compile_typst_if_available
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
+from vitamine.scripts.export_utils import configure_researcher_name, researcher_name_pattern
 
 DB = active_db_path()
 LANG = "en"
@@ -171,7 +171,7 @@ def typst_citation(value: str | None, *, size: str = "9pt") -> str:
     value = citation_text(value)
     pieces = []
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             before = value[cursor : match.start()]
             stripped = before.rstrip()
@@ -196,7 +196,7 @@ def add_docx_citation(doc: Document, value: str, *, size: float = 9.2, after: fl
     set_paragraph_spacing(paragraph, after=after)
     value = citation_text(value)
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             run = paragraph.add_run(value[cursor : match.start()])
             set_run_font(run, size=size)
@@ -246,15 +246,23 @@ def contribution_rows(con: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def biosketch_name(person: sqlite3.Row | None) -> str:
+    if not person:
+        return "VitaMine CV"
+    name = clean(person["display_name"]) or clean(person["full_name"])
+    degrees = clean(person["degrees"])
+    return f"{name}, {degrees}" if name and degrees else name or "VitaMine CV"
+
+
 def build_html() -> str:
     with connect() as con:
         person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
         contributions = contribution_rows(con)
-    name = "Horn, Andreas Georg, MD, PhD"
+    configure_researcher_name(person)
+    name = biosketch_name(person)
     position = "Associate Professor of Neurology"
     era = "ANHORN"
     if person:
-        name = f"Horn, Andreas Georg, {clean(person['degrees']) or 'MD, PhD'}"
         position = clean(person["position_title"]) or position
         era = clean(person["era_commons"]) or era
     lines = [
@@ -284,7 +292,6 @@ def build_html() -> str:
         lines.append(f"<p><strong>{contribution['ordinal']}. {html.escape(contribution['title'])}.</strong> {html.escape(contribution['narrative'])}</p>")
         for citation in citations:
             lines.append(f'<p class="citation">{html.escape(citation_text(citation))}</p>')
-    lines.append("<p><strong>Complete List of Published Work in MyBibliography:</strong><br>https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/</p>")
     return html_page("\n".join(lines))
 
 
@@ -292,11 +299,11 @@ def build_typst() -> str:
     with connect() as con:
         person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
         contributions = contribution_rows(con)
-    name = "Horn, Andreas Georg, MD, PhD"
+    configure_researcher_name(person)
+    name = biosketch_name(person)
     position = "Associate Professor of Neurology"
     era = "ANHORN"
     if person:
-        name = f"Horn, Andreas Georg, {clean(person['degrees']) or 'MD, PhD'}"
         position = clean(person["position_title"]) or position
         era = clean(person["era_commons"]) or era
     lines = [
@@ -350,7 +357,6 @@ def build_typst() -> str:
         for citation in citations:
             lines.append("#grid(columns: (0.22in, 6.92in), gutter: 0.08in, row-gutter: 0.015in,\n"
                          f"  [{text('')}],\n  [{typst_citation(citation)}]\n)")
-    lines.append(paragraph("Complete List of Published Work in MyBibliography: https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/", size="9pt"))
     return "\n".join(lines) + "\n"
 
 
@@ -358,11 +364,11 @@ def build_docx(path: Path) -> Path:
     with connect() as con:
         person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
         contributions = contribution_rows(con)
-    name = "Horn, Andreas Georg, MD, PhD"
+    configure_researcher_name(person)
+    name = biosketch_name(person)
     position = "Associate Professor of Neurology"
     era = "ANHORN"
     if person:
-        name = f"Horn, Andreas Georg, {clean(person['degrees']) or 'MD, PhD'}"
         position = clean(person["position_title"]) or position
         era = clean(person["era_commons"]) or era
 
@@ -413,12 +419,6 @@ def build_docx(path: Path) -> Path:
         add_docx_paragraph(doc, f"{contribution['ordinal']}. {contribution['title']}. {contribution['narrative']}", bold=True, after=2)
         for citation in citations:
             add_docx_citation(doc, citation, size=9.2, after=1)
-    add_docx_paragraph(
-        doc,
-        "Complete List of Published Work in MyBibliography: https://www.ncbi.nlm.nih.gov/myncbi/andreas.horn.2/bibliography/public/",
-        size=9.2,
-    )
-
     doc.core_properties.title = "NIH Biosketch Draft"
     doc.core_properties.author = name
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,26 +435,9 @@ def build(lang: str = "en") -> dict[str, str]:
     LANG = "de" if lang == "de" else "en"
     OUTPUT.mkdir(parents=True, exist_ok=True)
     stem = output_stem()
-    html_path = OUTPUT / f"{stem}.html"
-    typ_path = OUTPUT / f"{stem}.typ"
-    pdf_path = OUTPUT / f"{stem}.pdf"
     docx_path = OUTPUT / f"{stem}.docx"
-    html_path.write_text(build_html(), encoding="utf-8")
-    typ_path.write_text(build_typst(), encoding="utf-8")
-    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
     docx = build_docx(docx_path)
-    result = {
-        "html": f"output/{output_ref(html_path)}",
-        "typst": f"output/{output_ref(typ_path)}",
-    }
-    if pdf:
-        result["pdf"] = f"output/{output_ref(pdf)}"
-    if docx:
-        result["docx"] = f"output/{output_ref(docx)}"
-    warnings = [item for item in (warning,) if item]
-    if warnings:
-        result["warning"] = " ".join(warnings)
-    return result
+    return {"docx": f"output/{output_ref(docx)}"}
 
 
 if __name__ == "__main__":

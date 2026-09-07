@@ -10,6 +10,8 @@ import re
 import sqlite3
 import urllib.parse
 
+from vitamine.field_locks import locked_field_values
+
 from maintain_publications import maintain
 from import_background_docs import (
     DB,
@@ -69,7 +71,16 @@ def accessible_libraries(api_key: str) -> list[dict[str, str]]:
             }
         except Exception:
             group_names = {}
-    for group_id, permissions in groups.items():
+    group_permissions = {
+        str(group_id): permissions
+        for group_id, permissions in groups.items()
+        if str(group_id) != "all"
+    }
+    all_group_permissions = groups.get("all")
+    if isinstance(all_group_permissions, dict) and all_group_permissions.get("library"):
+        for group_id in group_names:
+            group_permissions.setdefault(group_id, all_group_permissions)
+    for group_id, permissions in group_permissions.items():
         if isinstance(permissions, dict) and not permissions.get("library"):
             continue
         libraries.append({"type": "groups", "id": str(group_id), "name": group_names.get(str(group_id)) or f"Group {group_id}"})
@@ -114,7 +125,13 @@ def discover_group_id(env: dict[str, str], group_name: str) -> str | None:
 
 def zotero_env(con: sqlite3.Connection) -> dict[str, str]:
     env: dict[str, str] = {}
-    api_key = setting(con, "zotero_api_key") or os.environ.get("ZOTERO_API_KEY") or ""
+    stored_key = setting(con, "zotero_api_key")
+    environment_key = os.environ.get("ZOTERO_API_KEY") or ""
+    api_key = (
+        environment_key
+        if os.environ.get("VITAMINE_CLOUD_WORKER") == "1" and environment_key
+        else stored_key or environment_key
+    )
     library_type = setting(con, "zotero_library_type") or os.environ.get("ZOTERO_LIBRARY_TYPE") or "users"
     library_id = setting(con, "zotero_library_id") or os.environ.get("ZOTERO_LIBRARY_ID") or ""
     group_name = setting(con, "zotero_group_name") or os.environ.get("ZOTERO_GROUP_NAME") or ""
@@ -315,6 +332,12 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
             year=zotero_year(data),
         )
         if existing:
+            protected = list(params)
+            indexes = {"authors": 4, "title": 5, "venue": 6, "year": 7, "doi": 8, "pmid": 9, "url": 10, "raw_citation": 13}
+            locked = locked_field_values(con, "publication", int(existing["id"]))
+            for field, index in indexes.items():
+                if field in locked:
+                    protected[index] = existing[field]
             con.execute(
                 """
                 UPDATE publications SET
@@ -323,7 +346,7 @@ def sync_zotero(con: sqlite3.Connection | None = None) -> dict[str, int]:
                   abstract=?, extra=?, raw_citation=?, confidence='high'
                 WHERE id=?
                 """,
-                (*params, existing["id"]),
+                (*protected, existing["id"]),
             )
         else:
             con.execute(

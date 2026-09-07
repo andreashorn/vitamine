@@ -27,7 +27,15 @@ LOG = ROOT / "output" / "vitamine_server.log"
 RUNTIME_DIR = Path.home() / "Library" / "Application Support" / "vitamine"
 VENV_DIR = RUNTIME_DIR / ".venv"
 VENV_PYTHON = VENV_DIR / "bin" / "python"
-REQUIRED_PACKAGES = ("fastapi", "uvicorn", "python-docx", "python-multipart", "eval-type-backport")
+REQUIRED_PACKAGES = (
+    "fastapi",
+    "uvicorn",
+    "python-docx",
+    "python-multipart",
+    "eval-type-backport",
+    "pypdf",
+    "citeproc-py[full]==0.9.3",
+)
 SERVER_APP_MODULES = ("vitamine.app:app", "projects.cv.app:app")
 
 
@@ -68,7 +76,7 @@ def runtime_import_probe() -> bool:
         [
             str(VENV_PYTHON),
             "-c",
-            "import fastapi, uvicorn, docx, multipart, eval_type_backport",
+            "import fastapi, uvicorn, docx, multipart, eval_type_backport, citeproc, citeproc_styles",
         ],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,

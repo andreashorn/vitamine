@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <title>VitaMine — Operator dashboard</title>
+    <link rel="stylesheet" href="/assets/admin.css?v=20260806-spend-job-alerts">
+    <script src="/assets/admin.js?v=20260806-spend-job-alerts" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section id="loginPanel" class="login-panel" aria-labelledby="loginTitle" hidden>
+        <p class="eyebrow">VitaMine operations</p>
+        <h1 id="loginTitle">Operator dashboard</h1>
+        <p class="intro">Sign in to view anonymized account activity and managed API usage.</p>
+        <form id="loginForm">
+          <label>Username<input id="username" name="username" autocomplete="username" required></label>
+          <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+          <button type="submit">Sign in</button>
+          <p id="loginMessage" class="message" role="status"></p>
+        </form>
+      </section>
+
+      <section id="dashboard" hidden aria-live="polite">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow">VitaMine operations</p>
+            <h1>Usage dashboard</h1>
+            <p id="privacyNotice" class="intro"></p>
+          </div>
+          <div class="header-actions">
+            <time id="generatedAt"></time>
+            <button id="refreshButton" class="quiet" type="button">Refresh</button>
+            <button id="logoutButton" class="quiet" type="button">Sign out</button>
+          </div>
+        </header>
+
+        <div id="overview" class="metric-grid"></div>
+
+        <section class="panel">
+          <div class="section-heading">
+            <div><p class="eyebrow">Last 30 days</p><h2>Activity trend</h2></div>
+            <p>Logins are recorded from this dashboard’s launch onward. Job and LLM totals include their retained operational ledger.</p>
+          </div>
+          <div id="trend" class="trend" aria-label="Daily usage activity"></div>
+          <div class="legend"><span><i class="login"></i>Logins</span><span><i class="enrich"></i>Enrichment</span><span><i class="llm"></i>LLM calls</span></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading"><div><p class="eyebrow">Last 30 days</p><h2>Background jobs</h2></div></div>
+          <div id="jobs" class="job-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="section-heading"><div><p class="eyebrow">Operator review</p><h2>Job alerts</h2></div><p>Flags unusual cost, repeated starts, failures, stale queued/running jobs, and unavailable OpenAI usage data. Account pseudonyms only.</p></div>
+          <div class="table-wrap"><table><thead><tr><th>Member</th><th>Signal</th><th>Job</th><th>Count</th><th>Cost</th><th>Age</th></tr></thead><tbody id="jobAlerts"></tbody></table></div>
+        </section>
+
+        <section class="panel member-panel">
+          <div class="section-heading">
+            <div><p class="eyebrow">Anonymized accounts</p><h2>Member usage</h2></div>
+            <label class="filter-label">Filter members<input id="memberFilter" type="search" placeholder="Pseudonym or status"></label>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Member</th><th>AI status</th><th>Inactive</th><th>Account age</th><th>Logins*</th><th>Enrich</th><th>LLM calls</th><th>Tokens in / out</th><th>API cost</th></tr></thead>
+              <tbody id="members"></tbody>
+            </table>
+          </div>
+          <p class="footnote">* Successful password or passkey logins recorded after this dashboard was enabled.</p>
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

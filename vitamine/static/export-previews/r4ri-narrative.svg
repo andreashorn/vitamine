@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a modular narrative research CV</title>
+  <rect width="240" height="320" rx="8" fill="#ece9f0"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="44" y="35" width="112" height="10" rx="2" fill="#3e3158"/>
+  <rect x="44" y="52" width="139" height="4" fill="#82798f"/>
+  <g><rect x="44" y="77" width="152" height="43" rx="3" fill="#f2eef7"/><rect x="44" y="132" width="152" height="43" rx="3" fill="#eef4f3"/><rect x="44" y="187" width="152" height="43" rx="3" fill="#f4f1eb"/><rect x="44" y="242" width="152" height="43" rx="3" fill="#eef1f6"/></g>
+  <g fill="#3e3158"><rect x="52" y="86" width="74" height="6"/><rect x="52" y="141" width="91" height="6"/><rect x="52" y="196" width="84" height="6"/><rect x="52" y="251" width="105" height="6"/></g>
+  <g fill="#92909a"><rect x="52" y="100" width="134" height="3"/><rect x="52" y="109" width="118" height="3"/><rect x="52" y="155" width="134" height="3"/><rect x="52" y="164" width="124" height="3"/><rect x="52" y="210" width="134" height="3"/><rect x="52" y="219" width="113" height="3"/><rect x="52" y="265" width="134" height="3"/><rect x="52" y="274" width="121" height="3"/></g>
+</svg>

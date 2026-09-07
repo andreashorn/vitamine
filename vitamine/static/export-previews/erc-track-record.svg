@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of an ERC-style CV and track record</title>
+  <rect width="240" height="320" rx="8" fill="#e8ebf1"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="44" y="35" width="118" height="10" rx="2" fill="#173b67"/>
+  <rect x="44" y="52" width="72" height="4" fill="#76879b"/>
+  <rect x="44" y="72" width="152" height="2" fill="#d9a441"/>
+  <g fill="#173b67"><rect x="44" y="88" width="66" height="6"/><rect x="44" y="149" width="86" height="6"/><rect x="44" y="218" width="102" height="6"/></g>
+  <g fill="#97a3b0"><rect x="44" y="105" width="33" height="4"/><rect x="86" y="105" width="110" height="4"/><rect x="44" y="117" width="33" height="4"/><rect x="86" y="117" width="101" height="4"/><rect x="44" y="129" width="33" height="4"/><rect x="86" y="129" width="94" height="4"/><rect x="44" y="166" width="152" height="4"/><rect x="44" y="177" width="146" height="4"/><rect x="44" y="188" width="151" height="4"/><rect x="44" y="199" width="126" height="4"/><rect x="44" y="235" width="12" height="4"/><rect x="63" y="235" width="133" height="4"/><rect x="44" y="247" width="12" height="4"/><rect x="63" y="247" width="126" height="4"/><rect x="44" y="259" width="12" height="4"/><rect x="63" y="259" width="137" height="4"/><rect x="44" y="271" width="12" height="4"/><rect x="63" y="271" width="119" height="4"/></g>
+</svg>

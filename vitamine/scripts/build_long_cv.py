@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import datetime as dt
 import argparse
 import html
@@ -16,12 +17,22 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Inches, Pt, RGBColor
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
-from vitamine.scripts.export_utils import compile_typst_if_available, markdown_to_html_body
+from vitamine.scripts.export_utils import (
+    configure_researcher_name,
+    markdown_to_html_body,
+    researcher_name_pattern,
+    sanitize_docx_compatibility_markup,
+)
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
+from vitamine.citation_styles import configured_citation_style, format_publication
 
 DB = active_db_path()
+FORMAL_ACADEMIC_TEMPLATE = ROOT / "vitamine" / "templates" / "formal-academic" / "template.docx"
 
 LANG = "en"
 
@@ -209,6 +220,20 @@ def publication_category_groups(con: sqlite3.Connection) -> list[tuple[str, list
           lower(title)
         """
     ).fetchall()
+    prompt_plan_raw = get_setting(con, "export_prompt_plan:vitamine.formal-academic")
+    try:
+        prompt_plan = json.loads(prompt_plan_raw) if prompt_plan_raw else {}
+    except json.JSONDecodeError:
+        prompt_plan = {}
+    planned_ids = [
+        int(value)
+        for value in prompt_plan.get("selected_publication_ids", [])
+        if str(value).isdigit()
+    ]
+    if planned_ids:
+        order = {publication_id: index for index, publication_id in enumerate(planned_ids)}
+        rows = [row for row in rows if int(row["id"]) in order]
+        rows.sort(key=lambda row: order[int(row["id"])])
     groups: list[tuple[str, list[sqlite3.Row]]] = []
     for category, label_key in PUBLICATION_CATEGORY_ORDER:
         if category not in selected:
@@ -322,9 +347,10 @@ def connect() -> sqlite3.Connection:
 
 def person_block(con: sqlite3.Connection) -> list[str]:
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+    configure_researcher_name(person)
     today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
     if not person:
-        return [f"**{tr('faculty')}**", "", f"# {tr('cv')}"]
+        return [f"# {tr('cv')}"]
     rows = [
         (tr("date_prepared").rstrip(":"), today),
         (tr("name").rstrip(":"), person["display_name"] or person["full_name"]),
@@ -334,7 +360,7 @@ def person_block(con: sqlite3.Connection) -> list[str]:
         (tr("work_email").rstrip(":"), person["work_email"]),
         (tr("place_of_birth").rstrip(":"), person["place_of_birth"]),
     ]
-    out = [f"<div class=\"cv-kicker\">{tr('faculty')}</div>", "", f"# {tr('cv')}", ""]
+    out = [f"# {tr('cv')}", ""]
     out.append("|  |  |")
     out.append("| --- | --- |")
     for label, value in rows:
@@ -349,6 +375,7 @@ def entry_rows(con: sqlite3.Connection, section_key: str) -> list[sqlite3.Row]:
         SELECT * FROM cv_entries
         WHERE section_key = ?
           AND include_long = 1
+          AND (section_key != 'funding' OR COALESCE(grant_status, 'funded') IN ('funded', 'past'))
         ORDER BY id
         """,
         (section_key,),
@@ -393,11 +420,14 @@ def trainee_achievement_map(con: sqlite3.Connection) -> dict[int, list[str]]:
         parts = [title] if title else []
         organization = row_value(row, "organization")
         amount = row_value(row, "amount")
-        if organization:
+        if organization and organization.casefold() not in title.casefold():
             parts.append(organization)
-        if amount:
+        if amount and amount.casefold() not in title.casefold():
             parts.append(amount)
-        achievements.setdefault(row["cv_entry_id"], []).append(", ".join(parts))
+        value = ", ".join(parts)
+        existing = achievements.setdefault(row["cv_entry_id"], [])
+        if value and value not in existing:
+            existing.append(value)
     return achievements
 
 
@@ -477,7 +507,7 @@ def markdown_publication_citation(row: sqlite3.Row) -> str:
     title = citation_cell(title)
     venue = citation_cell(venue)
     year = citation_cell(year)
-    authors = re.sub(r"\b(Andreas\s+Horn|Horn\s+A\.?)\b", r"**\1**", authors)
+    authors = researcher_name_pattern().sub(r"**\g<0>**", authors)
     parts = []
     if authors:
         parts.append(authors)
@@ -599,7 +629,7 @@ def typ_rich_text(value: str | None, *, bold_names: bool = False, underline: boo
     if bold_names:
         pieces = []
         pos = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?)\b", text):
+        for match in researcher_name_pattern().finditer(text):
             if match.start() > pos:
                 before = text[pos : match.start()]
                 stripped = before.rstrip()
@@ -856,6 +886,7 @@ def grouped_rows(rows: list[sqlite3.Row]) -> list[tuple[str | None, list[sqlite3
 def build_typst() -> str:
     con = connect()
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
+    configure_researcher_name(person)
     today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
     achievements_by_entry = trainee_achievement_map(con)
 
@@ -863,11 +894,7 @@ def build_typst() -> str:
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.73in, right: 0.62in, top: 0.72in, bottom: 0.55in))',
         f'#set text(font: "Helvetica", size: 10.5pt, lang: "{LANG}")',
         "#set par(leading: 0.49em)",
-        "#align(center)[",
-        f"  {typ_text(tr('faculty'), bold=True)}",
-        "  #linebreak()",
-        f"  {typ_text(tr('cv'), bold=True)}",
-        "]",
+        f"#align(center)[{typ_text(tr('cv'), bold=True)}]",
         "#v(0.32in)",
     ]
     if person:
@@ -1088,6 +1115,10 @@ def add_publication_docx(doc: Document, index: int, row: sqlite3.Row) -> None:
     paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(0.32))
     run = paragraph.add_run(f"{index}.\t")
     set_run_font(run, size=10.5)
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        set_run_font(paragraph.add_run(alternate), size=10.5)
+        return
     authors = citation_cell(row["authors"])
     title = citation_cell(row["title"])
     venue = citation_cell(row["venue"])
@@ -1104,7 +1135,7 @@ def add_publication_docx(doc: Document, index: int, row: sqlite3.Row) -> None:
             set_run_font(sep, size=10.5)
         first = False
         pos = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?)\b", text_value):
+        for match in researcher_name_pattern().finditer(text_value):
             if match.start() > pos:
                 run = paragraph.add_run(text_value[pos:match.start()])
                 set_run_font(run, size=10.5, italic=italic, underline=underline)
@@ -1126,89 +1157,805 @@ def add_wrapped_body_paragraphs(doc: Document, value: str) -> None:
             add_text_paragraph(doc, text_value, size=11, after=2, justify=True)
 
 
+def _normalized_paragraph_text(paragraph: Paragraph) -> str:
+    return " ".join(paragraph.text.split()).strip()
+
+
+def _find_paragraph(doc: Document, text: str) -> Paragraph | None:
+    expected = " ".join(text.split()).strip()
+    return next(
+        (paragraph for paragraph in doc.paragraphs if _normalized_paragraph_text(paragraph) == expected),
+        None,
+    )
+
+
+def _remove_paragraph(paragraph: Paragraph | None) -> None:
+    if paragraph is not None and paragraph._p.getparent() is not None:
+        paragraph._p.getparent().remove(paragraph._p)
+
+
+def _remove_table(table: Table | None) -> None:
+    if table is not None and table._tbl.getparent() is not None:
+        table._tbl.getparent().remove(table._tbl)
+
+
+def _prototype_run_properties(paragraph: Paragraph):
+    for run in paragraph.runs:
+        if run._r.rPr is not None:
+            return copy.deepcopy(run._r.rPr)
+    return None
+
+
+def _clear_paragraph(paragraph: Paragraph) -> None:
+    for child in list(paragraph._p):
+        if child.tag != qn("w:pPr"):
+            paragraph._p.remove(child)
+
+
+def _styled_run(
+    paragraph: Paragraph,
+    text_value: str,
+    run_properties,
+    *,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    underline: bool | None = None,
+):
+    run = paragraph.add_run(text_value)
+    if run_properties is not None:
+        run._r.insert(0, copy.deepcopy(run_properties))
+    if bold is not None:
+        run.bold = bold
+    if italic is not None:
+        run.italic = italic
+    if underline is not None:
+        run.underline = underline
+    return run
+
+
+def _set_plain_paragraph(paragraph: Paragraph, text_value: str) -> None:
+    run_properties = _prototype_run_properties(paragraph)
+    _clear_paragraph(paragraph)
+    _styled_run(paragraph, text_value, run_properties)
+
+
+def _replace_repeating_paragraph(paragraph: Paragraph, values: list[str]) -> list[Paragraph]:
+    if not values:
+        _remove_paragraph(paragraph)
+        return []
+    prototype = copy.deepcopy(paragraph._p)
+    result = []
+    cursor = paragraph
+    _set_plain_paragraph(paragraph, values[0])
+    result.append(paragraph)
+    for value in values[1:]:
+        element = copy.deepcopy(prototype)
+        cursor._p.addnext(element)
+        cursor = Paragraph(element, paragraph._parent)
+        _set_plain_paragraph(cursor, value)
+        result.append(cursor)
+    return result
+
+
+def _set_cell_paragraphs(cell, values: str | list[str]) -> None:
+    items = values if isinstance(values, list) else [values]
+    if not items:
+        items = [""]
+    paragraphs = cell.paragraphs
+    prototype = copy.deepcopy(paragraphs[0]._p)
+    for paragraph in paragraphs:
+        if paragraph._p.getparent() is not None:
+            paragraph._p.getparent().remove(paragraph._p)
+    for value in items:
+        element = copy.deepcopy(prototype)
+        cell._tc.append(element)
+        _set_plain_paragraph(Paragraph(element, cell), clean_cell(value))
+
+
+def _populate_table(table: Table, records: list[list[str | list[str]]]) -> None:
+    prototype = copy.deepcopy(table.rows[0]._tr)
+    for row in list(table.rows):
+        table._tbl.remove(row._tr)
+    for record in records:
+        row_element = copy.deepcopy(prototype)
+        table._tbl.append(row_element)
+        row = table.rows[-1]
+        for index, cell in enumerate(row.cells):
+            value: str | list[str] = record[index] if index < len(record) else ""
+            _set_cell_paragraphs(cell, value)
+
+
+def _paragraph_after(anchor: Paragraph, prototype_element) -> Paragraph:
+    element = copy.deepcopy(prototype_element)
+    anchor._p.addnext(element)
+    return Paragraph(element, anchor._parent)
+
+
+def _date_year(value: str | None) -> int | None:
+    matches = re.findall(r"\b(?:19|20)\d{2}\b", clean_cell(value))
+    return int(matches[0]) if matches else None
+
+
+def _formal_period(row: sqlite3.Row) -> str:
+    start = row_value(row, "start_date").rstrip(",")
+    end = row_value(row, "end_date").rstrip(",")
+    if start and end:
+        return f"{start}-{end}"
+    if start:
+        raw_text = row_value(row, "raw_text").lstrip()
+        raw_date = raw_text.split("|", 1)[0].strip()
+        is_open_ended = raw_date.startswith(f"{start}-") or raw_text.startswith(f"{start}-")
+        return f"{start}-" if is_open_ended else start
+    return end
+
+
+def _description_parts(row: sqlite3.Row) -> list[str]:
+    return [clean_cell(part) for part in row_value(row, "description").split("|") if clean_cell(part)]
+
+
+def _formal_four_columns(row: sqlite3.Row) -> list[str]:
+    parts = _description_parts(row)
+    title = row_value(row, "title") or (parts[0] if parts else "")
+    organization = row_value(row, "organization")
+    if not organization and len(parts) >= 3:
+        organization = parts[-1]
+    detail = ""
+    if len(parts) >= 3:
+        detail = parts[1]
+    elif row_value(row, "role") and row_value(row, "role") != organization:
+        detail = row_value(row, "role")
+    elif row_value(row, "location") and row_value(row, "location") != organization:
+        detail = row_value(row, "location")
+    elif len(parts) == 2 and parts[1] != organization:
+        detail = parts[1]
+    elif len(parts) == 1 and parts[0] not in {title, organization}:
+        detail = parts[0]
+    return [_formal_period(row), title, detail, organization]
+
+
+def _formal_three_columns(row: sqlite3.Row, *, role_in_right: bool = False) -> list[str]:
+    parts = _description_parts(row)
+    title = row_value(row, "title") or (parts[0] if parts else "")
+    organization = row_value(row, "organization")
+    role = row_value(row, "role")
+    if not organization and len(parts) >= 2:
+        organization = parts[-1]
+    middle = title
+    if role and not role_in_right and role not in middle:
+        middle = f"{middle}\n{role}" if middle else role
+    right = organization
+    if role and role_in_right and role not in right:
+        right = f"{right}\n{role}" if right else role
+    extra = row_value(row, "location")
+    if extra and extra not in right:
+        right = f"{right}\n{extra}" if right else extra
+    return [_formal_period(row), middle, right]
+
+
+def _formal_two_columns(row: sqlite3.Row, *, date_left: bool = True) -> list[str | list[str]]:
+    left = _formal_period(row) if date_left else row_value(row, "title")
+    title = row_value(row, "title")
+    details = []
+    if date_left and title:
+        details.append(title)
+    description = row_value(row, "description")
+    if description and description != title:
+        details.extend(clean_cell(part) for part in description.split("|") if clean_cell(part) and clean_cell(part) != title)
+    organization = row_value(row, "organization")
+    if organization and organization not in details:
+        details.append(organization)
+    role = row_value(row, "role")
+    if role and role not in details:
+        details.append(role)
+    if not details and row_value(row, "raw_text"):
+        details.append(row_value(row, "raw_text"))
+    return [left, details]
+
+
+def _funding_record(row: sqlite3.Row) -> list[str | list[str]]:
+    role_amount = " ".join(
+        part for part in (row_value(row, "role"), f"({row_value(row, 'amount')})" if row_value(row, "amount") else "") if part
+    )
+    details = [
+        "\n".join(part for part in (row_value(row, "title"), row_value(row, "organization")) if part),
+    ]
+    if role_amount:
+        details.append(role_amount)
+    if row_value(row, "description"):
+        details.append(row_value(row, "description"))
+    return [_formal_period(row), details]
+
+
+def _formal_trainee_records(con: sqlite3.Connection) -> list[list[str | list[str]]]:
+    rows = con.execute(
+        """
+        SELECT
+          t.id AS trainee_id,
+          t.cv_entry_id,
+          t.name,
+          t.name_de,
+          t.degree,
+          t.degree_de,
+          t.career_stage,
+          t.career_stage_de,
+          t.institution,
+          t.institution_de,
+          COALESCE(t.start_date, c.start_date) AS start_date,
+          COALESCE(t.end_date, c.end_date) AS end_date,
+          t.mentoring_role,
+          t.mentoring_role_de
+        FROM trainees t
+        LEFT JOIN cv_entries c ON c.id = t.cv_entry_id
+        WHERE c.id IS NULL OR c.include_long = 1
+        ORDER BY t.id
+        """
+    ).fetchall()
+    achievement_rows = con.execute(
+        """
+        SELECT trainee_id, title, organization, amount
+        FROM trainee_achievements
+        ORDER BY year, id
+        """
+    ).fetchall()
+    achievements: dict[int, list[str]] = {}
+    for row in achievement_rows:
+        title = clean_cell(row["title"])
+        organization = clean_cell(row["organization"])
+        amount = clean_cell(row["amount"])
+        parts = [title] if title else []
+        if organization and organization.casefold() not in title.casefold():
+            parts.append(organization)
+        if amount and amount.casefold() not in title.casefold():
+            parts.append(amount)
+        value = ", ".join(parts)
+        values = achievements.setdefault(row["trainee_id"], [])
+        if value and value not in values:
+            values.append(value)
+
+    records = []
+    for row in rows:
+        name = clean_cell(row["name_de"] if LANG == "de" and clean_cell(row["name_de"]) else row["name"])
+        degree = clean_cell(row["degree_de"] if LANG == "de" and clean_cell(row["degree_de"]) else row["degree"])
+        institution = clean_cell(
+            row["institution_de"] if LANG == "de" and clean_cell(row["institution_de"]) else row["institution"]
+        )
+        career_stage = clean_cell(
+            row["career_stage_de"] if LANG == "de" and clean_cell(row["career_stage_de"]) else row["career_stage"]
+        )
+        mentoring_role = clean_cell(
+            row["mentoring_role_de"]
+            if LANG == "de" and clean_cell(row["mentoring_role_de"])
+            else row["mentoring_role"]
+        )
+        start = clean_cell(row["start_date"])
+        end = clean_cell(row["end_date"])
+        dates = f"{start}-{end}" if start and end else start or end
+        identity = " / ".join(part for part in (name, degree, institution) if part)
+        labels = (
+            ("Karrierestufe", "Betreuungsrolle", "Erfolge")
+            if LANG == "de"
+            else ("Career Stage", "Mentoring Role", "Accomplishments")
+        )
+        detail_parts = []
+        if career_stage:
+            detail_parts.append(f"{labels[0]}: {career_stage}")
+        if mentoring_role:
+            detail_parts.append(f"{labels[1]}: {mentoring_role}")
+        trainee_achievements = achievements.get(row["trainee_id"], [])
+        if trainee_achievements:
+            detail_parts.append(f"{labels[2]}: " + "; ".join(trainee_achievements))
+        cell_paragraphs = [identity]
+        if detail_parts:
+            cell_paragraphs.append("; ".join(detail_parts))
+        records.append([dates, cell_paragraphs])
+    return records
+
+
+def _compact_current_funding(row: sqlite3.Row) -> str:
+    detail = ". ".join(
+        part.rstrip(".")
+        for part in (row_value(row, "title"), row_value(row, "role"), row_value(row, "amount"))
+        if part
+    )
+    return f"{_formal_period(row)}\t{detail}"
+
+
+def _format_initials(given_names: list[str]) -> str:
+    initials = []
+    for name in given_names:
+        for part in re.split(r"[-–]", name):
+            letter = next((character for character in part if character.isalpha()), "")
+            if letter:
+                initials.append(f"{letter.upper()}.")
+    return " ".join(initials)
+
+
+def _formal_authors(value: str | None) -> str:
+    people = [clean_cell(person) for person in clean_cell(value).split(",") if clean_cell(person)]
+    formatted = []
+    for person in people:
+        words = person.split()
+        if len(words) < 2 or re.fullmatch(r"[A-Z][A-Za-zÀ-ž'’-]+,?\s+[A-Z](?:\\.[A-Z]?\\.?)*", person):
+            formatted.append(person)
+            continue
+        suffix = ""
+        if words[-1].rstrip(".").lower() in {"jr", "sr", "ii", "iii", "iv"}:
+            suffix = f", {words.pop()}"
+        surname = words.pop()
+        initials = _format_initials(words)
+        formatted.append(f"{surname}, {initials}{suffix}".strip())
+    if len(formatted) == 1:
+        return formatted[0]
+    if len(formatted) == 2:
+        return f"{formatted[0]}, & {formatted[1]}"
+    return ", ".join(formatted[:-1]) + f", & {formatted[-1]}" if formatted else ""
+
+
+def _add_text_with_own_name_bold(paragraph: Paragraph, value: str, run_properties) -> None:
+    position = 0
+    pattern = researcher_name_pattern()
+    for match in pattern.finditer(value):
+        if match.start() > position:
+            _styled_run(paragraph, value[position:match.start()], run_properties, bold=False)
+        _styled_run(paragraph, match.group(0), run_properties, bold=True)
+        position = match.end()
+    if position < len(value):
+        _styled_run(paragraph, value[position:], run_properties, bold=False)
+
+
+def _add_hyperlink(paragraph: Paragraph, url: str, display: str, run_properties) -> None:
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    if run_properties is not None:
+        properties = copy.deepcopy(run_properties)
+    else:
+        properties = OxmlElement("w:rPr")
+    for tag in ("w:b", "w:bCs", "w:color", "w:u"):
+        for node in list(properties.findall(qn(tag))):
+            properties.remove(node)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(color)
+    properties.append(underline)
+    run.append(properties)
+    text = OxmlElement("w:t")
+    text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    text.text = display
+    run.append(text)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _add_publication_citation(paragraph: Paragraph, row: sqlite3.Row) -> None:
+    run_properties = _prototype_run_properties(paragraph)
+    _clear_paragraph(paragraph)
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        _add_text_with_own_name_bold(paragraph, alternate, run_properties)
+        return
+    authors = _formal_authors(row["authors"])
+    year = citation_cell(row["year"])
+    title = sentence_part(row["title"])
+    venue = sentence_part(row["venue"].title() if clean_cell(row["venue"]).isupper() else row["venue"])
+    if authors:
+        _add_text_with_own_name_bold(paragraph, authors, run_properties)
+    if year:
+        _styled_run(paragraph, f" ({year}). ", run_properties, bold=False)
+    elif authors:
+        _styled_run(paragraph, ". ", run_properties, bold=False)
+    if title:
+        _styled_run(paragraph, f"{title} ", run_properties, bold=False)
+    if venue:
+        _styled_run(paragraph, venue, run_properties, bold=False, italic=True, underline=True)
+    link = doi_url(row)
+    if link:
+        _styled_run(paragraph, " ", run_properties, bold=False)
+        normalized = normalize_url(link)
+        _add_hyperlink(paragraph, normalized, normalized, run_properties)
+
+
+def _populate_publication_table(table: Table, rows: list[sqlite3.Row]) -> None:
+    cell = table.rows[0].cells[0]
+    prototype = copy.deepcopy(cell.paragraphs[0]._p)
+    for paragraph in list(cell.paragraphs):
+        cell._tc.remove(paragraph._p)
+    if not rows:
+        cell._tc.append(copy.deepcopy(prototype))
+        return
+    for row in rows:
+        element = copy.deepcopy(prototype)
+        cell._tc.append(element)
+        _add_publication_citation(Paragraph(element, cell), row)
+
+
+def _insert_publication_paragraphs(
+    heading: Paragraph,
+    prototype,
+    rows: list[sqlite3.Row],
+) -> None:
+    cursor = heading
+    for row in rows:
+        cursor = _paragraph_after(cursor, prototype)
+        _add_publication_citation(cursor, row)
+
+
+def _is_own_publication(row: sqlite3.Row, person: sqlite3.Row | None) -> bool:
+    if person is None:
+        return True
+    display_name = clean_cell(person["display_name"] or person["full_name"])
+    surname = display_name.split()[-1].casefold() if display_name else ""
+    authors = clean_cell(row["authors"]).casefold()
+    return not surname or bool(re.search(rf"\b{re.escape(surname)}\b", authors))
+
+
+def _set_metrics_paragraph(paragraph: Paragraph, con: sqlite3.Connection, person: sqlite3.Row | None) -> None:
+    rows = con.execute(
+        """
+        SELECT authors, COALESCE(openalex_cited_by_count, 0) AS citations
+        FROM publications
+        WHERE COALESCE(suppress_display, 0) = 0
+        """
+    ).fetchall()
+    counts = sorted(
+        (int(row["citations"] or 0) for row in rows if _is_own_publication(row, person)),
+        reverse=True,
+    )
+    total = sum(counts)
+    h_index = max((index for index, count in enumerate(counts, 1) if count >= index), default=0)
+    i10_index = sum(1 for count in counts if count >= 10)
+    run_properties = _prototype_run_properties(paragraph)
+    _clear_paragraph(paragraph)
+    metrics = f"{len(counts)} Publications; {total:,} citations; h-index: {h_index}; i10-index: {i10_index}"
+    _styled_run(paragraph, metrics, run_properties)
+    orcid = clean_cell(person["orcid_id"] if person and "orcid_id" in person.keys() else "")
+    if orcid:
+        _styled_run(paragraph, "\nORCID: ", run_properties)
+        _add_hyperlink(paragraph, f"https://orcid.org/{orcid}", orcid, run_properties)
+
+
+def _set_linked_body_paragraph(paragraph: Paragraph, value: str) -> None:
+    run_properties = _prototype_run_properties(paragraph)
+    _clear_paragraph(paragraph)
+    position = 0
+    pattern = re.compile(r"(?<!@)\b(?:https?://[^\s)]+|www\.[^\s)]+)")
+    for match in pattern.finditer(value):
+        if match.start() > position:
+            _styled_run(paragraph, value[position:match.start()], run_properties)
+        display = match.group(0).rstrip(".,;")
+        trailing = match.group(0)[len(display):]
+        _add_hyperlink(paragraph, normalize_url(display), display, run_properties)
+        if trailing:
+            _styled_run(paragraph, trailing, run_properties)
+        position = match.end()
+    if position < len(value):
+        _styled_run(paragraph, value[position:], run_properties)
+
+
+def _remove_heading_and_table(heading: Paragraph | None, table: Table | None) -> None:
+    _remove_paragraph(heading)
+    _remove_table(table)
+
+
+def _remove_empty_paragraphs_before(paragraph: Paragraph | None) -> None:
+    if paragraph is None:
+        return
+    cursor = paragraph._p.getprevious()
+    while cursor is not None and cursor.tag == qn("w:p"):
+        text_value = "".join(node.text or "" for node in cursor.iter(qn("w:t"))).strip()
+        if text_value:
+            break
+        previous = cursor.getprevious()
+        cursor.getparent().remove(cursor)
+        cursor = previous
+
+
+def _strip_word_editing_ids(doc: Document) -> None:
+    """Remove optional editing-session IDs that become duplicated by cloning.
+
+    Word requires ``w14:paraId`` values to be unique. Prototype rows and
+    publication paragraphs intentionally clone OOXML, so retaining those IDs
+    would create hundreds of duplicates. They are editing metadata rather than
+    layout or content and are safe to omit; Word recreates them when necessary.
+    """
+    attributes = (qn("w14:paraId"), qn("w14:textId"))
+    for part in doc.part.package.parts:
+        root = getattr(part, "element", None)
+        if root is None:
+            root = getattr(part, "_element", None)
+        if root is None:
+            continue
+        for element in root.iter():
+            for attribute in attributes:
+                element.attrib.pop(attribute, None)
+
+
 def build_docx(path: Path, lang: str = "en") -> Path:
     global LANG
     LANG = "de" if lang == "de" else "en"
+    if not FORMAL_ACADEMIC_TEMPLATE.exists():
+        raise FileNotFoundError(f"Formal Academic CV template is missing: {FORMAL_ACADEMIC_TEMPLATE}")
     con = connect()
     person = con.execute("SELECT * FROM person WHERE id=1").fetchone()
-    today = dt.datetime.now().strftime("%d.%m.%Y") if LANG == "de" else dt.datetime.now().strftime("%B %-d, %Y")
-    doc = Document()
-    section = doc.sections[0]
-    section.page_width = Inches(8.5)
-    section.page_height = Inches(11)
-    section.top_margin = Inches(0.5)
-    section.bottom_margin = Inches(0.5)
-    section.left_margin = Inches(0.5)
-    section.right_margin = Inches(0.5)
-    styles = doc.styles
-    styles["Normal"].font.name = "Arial"
-    styles["Normal"]._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
-    styles["Normal"].font.size = Pt(11)
+    configure_researcher_name(person)
+    now = dt.datetime.now()
+    if LANG == "de":
+        today = now.strftime("%d.%m.%Y")
+    else:
+        day = now.day
+        suffix = "th" if 10 <= day % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        today = f"{day}{suffix} {now.strftime('%B %Y')}"
 
-    title = doc.add_paragraph()
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    set_paragraph_spacing(title, after=6)
-    add_paragraph_border(title, top=True, bottom=True)
-    run = title.add_run(tr("cv").upper())
-    set_run_font(run, size=13, bold=True)
+    doc = Document(FORMAL_ACADEMIC_TEMPLATE)
+    tables = list(doc.tables)
+    if len(tables) != 25:
+        con.close()
+        raise RuntimeError(f"Formal Academic CV template has {len(tables)} tables; expected 25.")
 
-    if person:
-        rows = [
-            (tr("date_prepared").rstrip(":"), today),
-            (tr("name").rstrip(":"), person["display_name"] or person["full_name"]),
-            (tr("office_address").rstrip(":"), person["office_address"]),
-            (tr("work_phone").rstrip(":"), person["work_phone"]),
-            (tr("work_email").rstrip(":"), person["work_email"]),
-            (tr("place_of_birth").rstrip(":"), person["place_of_birth"]),
-        ]
-        add_metadata_table(doc, rows)
+    if LANG == "de":
+        _set_plain_paragraph(doc.paragraphs[1], tr("cv"))
+    _remove_paragraph(doc.paragraphs[0])
 
-    achievements_by_entry = trainee_achievement_map(con)
-    marker_ord = ord("A")
-    for section_key, section_title in SECTION_ORDER:
-        rows = entry_rows(con, section_key)
-        if not rows:
-            continue
-        add_section_heading(doc, f"{chr(marker_ord)}.", localized_section_title(section_key, section_title))
-        marker_ord += 1
-        if section_key in {"editorial_activities", "mentoring"}:
-            for subcategory, grouped in grouped_rows(rows):
-                if subcategory:
-                    add_subheading(doc, subcategory)
-                add_entry_rows_docx(
-                    doc,
-                    grouped,
-                    achievements_by_entry if section_key == "mentoring" else None,
-                    include_amount=False,
-                )
+    metadata = [
+        (tr("date_prepared"), today),
+        (tr("name"), person["display_name"] or person["full_name"] if person else ""),
+        (tr("office_address"), person["office_address"] if person else ""),
+        (tr("home_address"), person["home_address"] if person else ""),
+        (tr("work_phone"), person["work_phone"] if person else ""),
+        (tr("work_email"), person["work_email"] if person else ""),
+        (tr("place_of_birth"), person["place_of_birth"] if person else ""),
+    ]
+    for index, (label, value) in enumerate(metadata):
+        if index >= len(tables[0].rows):
+            break
+        _set_cell_paragraphs(tables[0].rows[index].cells[0], label)
+        _set_cell_paragraphs(tables[0].rows[index].cells[1], value)
+
+    rows_by_section = {key: entry_rows(con, key) for key, _title in SECTION_ORDER}
+    four_column_mapping = [
+        ("education", 1, "Education:"),
+        ("postdoctoral_training", 2, "Postdoctoral Training:"),
+        ("academic_appointments", 3, "Faculty Academic Appointments:"),
+        ("hospital_appointments", 4, "Appointments at Hospitals/Affiliated Institutions:"),
+        ("professional_positions", 5, "Other Professional Positions:"),
+    ]
+    for section_key, table_index, heading_text in four_column_mapping:
+        rows = rows_by_section[section_key]
+        if rows:
+            records = [_formal_four_columns(row) for row in rows]
+            if section_key == "hospital_appointments":
+                merged_records = []
+                for record in records:
+                    if not any(record[1:]) and merged_records:
+                        merged_records[-1][0] = f"{merged_records[-1][0]}\n{record[0]}"
+                    else:
+                        merged_records.append(record)
+                records = merged_records
+            _populate_table(tables[table_index], records)
         else:
-            add_entry_rows_docx(
-                doc,
-                rows,
-                achievements_by_entry if section_key == "mentoring" else None,
-                include_amount=section_key == "funding",
-            )
+            _remove_heading_and_table(_find_paragraph(doc, heading_text), tables[table_index])
 
-    publication_groups = publication_category_groups(con)
-    if publication_groups:
-        add_section_heading(doc, f"{chr(marker_ord)}.", tr("scholarship"))
-        marker_ord += 1
-        for label_key, rows in publication_groups:
-            add_subheading(doc, tr(label_key))
-            for index, row in enumerate(rows, 1):
-                add_publication_docx(doc, index, row)
+    committee_rows = rows_by_section["committee_service"]
+    local_committee = [row for row in committee_rows if row_value(row, "subcategory").lower() == "local"]
+    international_committee = [row for row in committee_rows if row not in local_committee]
+    if local_committee:
+        _populate_table(tables[6], [_formal_three_columns(row) for row in local_committee])
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Local"), tables[6])
+    if international_committee:
+        _populate_table(tables[7], [_formal_three_columns(row) for row in international_committee])
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "International"), tables[7])
+    if not committee_rows:
+        _remove_paragraph(_find_paragraph(doc, "Committee Service:"))
+
+    simple_three_column = [
+        ("professional_societies", 8, "Professional Societies:"),
+        ("grant_review", 9, "Grant Review Activities:"),
+    ]
+    for section_key, table_index, heading_text in simple_three_column:
+        rows = rows_by_section[section_key]
+        if rows:
+            _populate_table(
+                tables[table_index],
+                [
+                    _formal_three_columns(row, role_in_right=section_key == "grant_review")
+                    for row in rows
+                ],
+            )
+        else:
+            _remove_heading_and_table(_find_paragraph(doc, heading_text), tables[table_index])
+
+    editorial_rows = rows_by_section["editorial_activities"]
+    ad_hoc_rows = [
+        row for row in editorial_rows
+        if row_value(row, "subcategory").lower() == "ad hoc reviewer"
+        or row_value(row, "title").lower() == "ad hoc reviewer"
+    ]
+    other_editorial = [row for row in editorial_rows if row not in ad_hoc_rows]
+    if ad_hoc_rows:
+        journals = []
+        for row in ad_hoc_rows:
+            value = row_value(row, "description") or row_value(row, "raw_text")
+            journals.extend(line.strip() for line in value.splitlines() if line.strip())
+        _populate_table(tables[10], [[journals]])
+        for paragraph in tables[10].cell(0, 0).paragraphs:
+            if re.search(r"(?:https?://|www\.)", paragraph.text):
+                _set_linked_body_paragraph(paragraph, paragraph.text)
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Ad hoc Reviewer"), tables[10])
+    if other_editorial:
+        _populate_table(tables[11], [_formal_three_columns(row) for row in other_editorial])
+        other_editorial_heading = _find_paragraph(doc, "Other Editorial Roles")
+        if other_editorial_heading:
+            other_editorial_heading.paragraph_format.space_before = Pt(6)
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Other Editorial Roles"), tables[11])
+    if not editorial_rows:
+        _remove_paragraph(_find_paragraph(doc, "Editorial Activities:"))
+
+    honors = rows_by_section["honors"]
+    if honors:
+        _populate_table(tables[12], [_formal_four_columns(row) for row in honors])
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Honors and Prizes:"), tables[12])
+
+    funding = rows_by_section["funding"]
+    current_funding = []
+    past_funding = []
+    for row in funding:
+        start_year = _date_year(row_value(row, "start_date"))
+        end_year = _date_year(row_value(row, "end_date"))
+        if start_year is not None and start_year >= now.year - 1 and (end_year is None or end_year >= now.year):
+            current_funding.append(row)
+        else:
+            past_funding.append(row)
+    if past_funding:
+        _populate_table(tables[13], [_funding_record(row) for row in past_funding])
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Past"), tables[13])
+    current_slot = _find_paragraph(doc, "{{CURRENT_FUNDING_ENTRY}}")
+    if current_slot and current_funding:
+        _replace_repeating_paragraph(current_slot, [_compact_current_funding(row) for row in current_funding])
+    else:
+        _remove_paragraph(current_slot)
+        _remove_paragraph(_find_paragraph(doc, "Current"))
+    if not funding:
+        _remove_paragraph(_find_paragraph(doc, "Report of Funded and Unfunded Projects"))
+
+    teaching = rows_by_section["teaching"]
+    if teaching:
+        teaching_records = []
+        for row in teaching:
+            record = _formal_three_columns(row)
+            if not row_value(row, "title") and teaching_records:
+                if record[0]:
+                    teaching_records[-1][0] = f"{teaching_records[-1][0]}\n{record[0]}"
+                if record[2]:
+                    teaching_records[-1][2] = f"{teaching_records[-1][2]}\n{record[2]}"
+            else:
+                teaching_records.append(record)
+        _populate_table(tables[14], teaching_records)
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Teaching of Students in Courses:"), tables[14])
+
+    mentoring = rows_by_section["mentoring"]
+    general_mentoring = [
+        row for row in mentoring
+        if row_value(row, "title").lower().startswith("supervision of phd students")
+    ]
+    trainee_records = _formal_trainee_records(con)
+    if general_mentoring:
+        _populate_table(tables[15], [_formal_three_columns(row) for row in general_mentoring])
+    else:
+        _remove_heading_and_table(
+            _find_paragraph(doc, "Research Supervisory and Training Responsibilities:"),
+            tables[15],
+        )
+    if trainee_records:
+        _populate_table(tables[16], trainee_records)
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Other Formally Supervised Trainees"), tables[16])
+    if not teaching and not mentoring:
+        _remove_paragraph(_find_paragraph(doc, "Report of Local Teaching and Training"))
+
+    invited = rows_by_section["invited_presentations"]
+    if invited:
+        _populate_table(tables[17], [_formal_two_columns(row) for row in invited])
+    else:
+        _remove_heading_and_table(
+            _find_paragraph(doc, "Report of Regional, National and International Invited Teaching and Presentations"),
+            tables[17],
+        )
+        _remove_paragraph(_find_paragraph(doc, tr("no_sponsor")))
+
+    clinical = rows_by_section["clinical_activities"]
+    if clinical:
+        _populate_table(tables[18], [_formal_two_columns(row, date_left=False) for row in clinical])
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Clinical Innovations:"), tables[18])
+        _remove_paragraph(_find_paragraph(doc, "Report of Clinical Activities and Innovations"))
+
+    innovations = rows_by_section["education_innovations"]
+    if innovations:
+        _populate_table(tables[19], [_formal_two_columns(row, date_left=False) for row in innovations])
+    else:
+        _remove_table(tables[19])
+        _remove_paragraph(_find_paragraph(doc, "Report of Teaching and Education Innovations"))
+
+    community = rows_by_section["community_service"]
+    if community:
+        _populate_table(tables[20], [_formal_two_columns(row) for row in community])
+    else:
+        _remove_heading_and_table(_find_paragraph(doc, "Activities"), tables[20])
+        _remove_paragraph(_find_paragraph(doc, "Report of Education of Patients and Service to the Community"))
+
+    publication_groups = {
+        label_key: [row for row in rows if _is_own_publication(row, person)]
+        for label_key, rows in publication_category_groups(con)
+    }
+    publication_groups = {label_key: rows for label_key, rows in publication_groups.items() if rows}
+    publication_prototype = copy.deepcopy(tables[21].rows[0].cells[0].paragraphs[0]._p)
+    peer_reviewed = publication_groups.get("peer_reviewed", [])
+    if peer_reviewed:
+        _populate_publication_table(tables[21], peer_reviewed)
+    else:
+        _remove_table(tables[21])
+        _remove_paragraph(_find_paragraph(doc, "Research Investigations"))
+
+    body_publication_headings = {
+        "books_chapters": "Books / Chapters",
+        "patents": "Patents",
+    }
+    for label_key, heading_text in body_publication_headings.items():
+        heading = _find_paragraph(doc, heading_text)
+        rows = publication_groups.get(label_key, [])
+        if heading and rows:
+            _insert_publication_paragraphs(heading, publication_prototype, rows)
+        else:
+            _remove_paragraph(heading)
+
+    for unused_heading in (
+        "Other peer-reviewed scholarship",
+        "Case reports",
+        "Letters to the Editor",
+        "Theses",
+    ):
+        _remove_paragraph(_find_paragraph(doc, unused_heading))
+    for table in tables[22:25]:
+        _remove_table(table)
+
+    metrics = _find_paragraph(doc, "{{SCHOLARSHIP_METRICS}}")
+    if publication_groups and metrics:
+        _set_metrics_paragraph(metrics, con, person)
+    else:
+        _remove_paragraph(metrics)
+        _remove_paragraph(_find_paragraph(doc, "Peer-Reviewed Scholarship in print or other media:"))
+        _remove_paragraph(_find_paragraph(doc, "Report of Scholarship"))
 
     report = con.execute("SELECT title, body, title_de, body_de FROM narrative_reports WHERE id=1").fetchone()
-    if report and clean_cell(row_value(report, "body")):
-        add_section_heading(doc, f"{chr(marker_ord)}.", row_value(report, "title") or tr("narrative_report"))
-        add_wrapped_body_paragraphs(doc, row_value(report, "body"))
+    narrative_heading = _find_paragraph(doc, "Narrative Report")
+    _remove_empty_paragraphs_before(narrative_heading)
+    narrative_body = _find_paragraph(doc, "{{NARRATIVE_BODY}}")
+    if report and clean_cell(row_value(report, "body")) and narrative_body:
+        _set_plain_paragraph(narrative_heading, row_value(report, "title") or tr("narrative_report"))
+        _set_linked_body_paragraph(narrative_body, row_value(report, "body"))
+        narrative_body.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+    else:
+        _remove_paragraph(narrative_heading)
+        _remove_paragraph(narrative_body)
 
     con.close()
     if person:
         doc.core_properties.author = person["display_name"] or person["full_name"] or ""
     doc.core_properties.title = tr("cv")
+    _strip_word_editing_ids(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
+    sanitize_docx_compatibility_markup(path)
     return path
 
 
@@ -1216,32 +1963,10 @@ def build(lang: str = "en") -> dict[str, str]:
     global LANG
     LANG = "de" if lang == "de" else "en"
     OUTPUT.mkdir(parents=True, exist_ok=True)
-    markdown = build_markdown()
     stem = output_stem()
-    md_path = OUTPUT / f"{stem}.md"
-    html_path = OUTPUT / f"{stem}.html"
     docx_path = OUTPUT / f"{stem}.docx"
-    pdf_path = OUTPUT / f"{stem}.pdf"
-    typ_path = OUTPUT / f"{stem}.typ"
-    md_path.write_text(markdown, encoding="utf-8")
-    html_doc, html_warning = markdown_to_html(markdown)
-    html_path.write_text(html_doc, encoding="utf-8")
-    typ_path.write_text(build_typst(), encoding="utf-8")
-    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
     docx = build_docx(docx_path, LANG)
-    result = {
-        "markdown": f"output/{output_ref(md_path)}",
-        "html": f"output/{output_ref(html_path)}",
-        "typst": f"output/{output_ref(typ_path)}",
-    }
-    if pdf:
-        result["pdf"] = f"output/{output_ref(pdf)}"
-    if docx:
-        result["docx"] = f"output/{output_ref(docx)}"
-    warnings = [item for item in (html_warning, warning) if item]
-    if warnings:
-        result["warning"] = " ".join(warnings)
-    return result
+    return {"docx": f"output/{output_ref(docx)}"}
 
 
 if __name__ == "__main__":

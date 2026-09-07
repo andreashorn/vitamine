@@ -6,15 +6,72 @@
   <title>VitaMine</title>
   <link rel="icon" type="image/png" href="/logo/vitamine_icon.png">
   <link rel="apple-touch-icon" href="/logo/vitamine_icon.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260708-export-links">
+  <link rel="stylesheet" href="/static/styles.css?v=20260806-openai-enrichment-consent">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <img class="brandLogo" src="/logo/vitamine_logo.png" alt="" width="1672" height="941">
-      <p id="status">Ready</p>
+      <button id="brandHome" class="brandHome" type="button" aria-label="Go to Dashboard" title="Dashboard">
+        <img class="brandLogo" src="/logo/vitamine_logo.png" alt="" width="1672" height="941">
+      </button>
     </div>
-    <div class="actions"></div>
+    <div id="globalActivity" class="globalActivity" role="status" aria-live="polite">
+      <span id="processingIndicator" class="processingIndicator" aria-hidden="true"></span>
+      <div class="globalActivityMessage">
+        <p id="status">Ready</p>
+        <time id="processingTime" hidden>0:00</time>
+      </div>
+      <details id="globalConsole" class="globalConsole">
+        <summary>Details</summary>
+        <pre id="globalConsoleOutput">VitaMine is ready.</pre>
+      </details>
+    </div>
+    <div class="actions">
+      <button id="enrichCvDashboard" class="topbarEnrichButton" type="button" title="Find and review information from trusted research databases and online profiles">
+        <svg class="topbarEnrichIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="m12 3 1.35 4.15L17.5 8.5l-4.15 1.35L12 14l-1.35-4.15L6.5 8.5l4.15-1.35L12 3Z"></path>
+          <path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z"></path>
+        </svg>
+        <span>Enrich CV</span>
+      </button>
+      <button id="cleanupCvDashboard" class="topbarCleanupButton" type="button" title="Find conservative corrections, duplicates, and junk entries for review">
+        <svg class="topbarEnrichIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="m4 7 3 3 5-6"></path>
+          <path d="M12 7h8M12 12h8M4 17l3 3 5-6M12 17h8"></path>
+        </svg>
+        <span>Cleanup CV</span>
+      </button>
+      <button id="workspacePlusButton" class="workspacePlusButton" type="button" hidden>VitaMine+</button>
+      <div id="cloudAccountMenu" class="cloudAccountMenu" hidden>
+        <button id="cloudAccountMenuButton" class="cloudAccountMenuButton" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Account menu">
+          <span id="cloudAccountInitials" aria-hidden="true">VM</span>
+        </button>
+        <div id="cloudAccountMenuPanel" class="cloudAccountMenuPanel" role="menu" hidden>
+          <div class="cloudAccountIdentity">
+            <strong id="cloudAccountName">VitaMine account</strong>
+            <span id="cloudAccountEmail"></span>
+          </div>
+          <button id="cloudCancelJob" type="button" role="menuitem" hidden>Cancel background process</button>
+          <button id="cloudMyCvs" type="button" role="menuitem">My CVs</button>
+          <a id="cloudDownloadDatabase" href="/gateway/workspace/download" download role="menuitem" title="Portable SQLite database for VitaMine desktop">Download personal SQLite copy (.vitamine)</a>
+          <button id="cloudSignOut" type="button" role="menuitem">Sign out</button>
+        </div>
+      </div>
+      <button class="topbarViewButton" id="inboxTab" data-view="inbox" type="button" aria-label="Import inbox" aria-controls="inboxView" aria-pressed="false" title="Import inbox">
+        <svg class="topbarViewIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M5 4h14l2 9v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6l2-9Z"></path>
+          <path d="M3 13h5l2 3h4l2-3h5"></path>
+        </svg>
+        <span id="inboxBadge" class="topbarBadge" hidden>0</span>
+      </button>
+      <button class="topbarViewButton" id="profileSyncButton" type="button" aria-label="Profile sync suggestions" title="Profile sync suggestions">
+        <svg class="topbarViewIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M20 7h-5l2-2a1 1 0 1 0-1.4-1.4l-3.7 3.7a1 1 0 0 0 0 1.4l3.7 3.7A1 1 0 1 0 17 10l-2-2h5a1 1 0 1 0 0-2Z"></path>
+          <path d="M4 17h5l-2 2a1 1 0 1 0 1.4 1.4l3.7-3.7a1 1 0 0 0 0-1.4l-3.7-3.7A1 1 0 1 0 7 14l2 2H4a1 1 0 1 0 0 2Z"></path>
+        </svg>
+        <span id="profileSyncBadge" class="topbarBadge" hidden>0</span>
+      </button>
+    </div>
   </header>
 
   <main>
@@ -31,14 +88,15 @@
     <section id="dashboardView" class="view active" role="tabpanel" aria-labelledby="dashboardTab">
       <div class="dashboardGrid">
         <div class="dashboardLeft">
-          <section class="panel">
+          <section id="databasePanel" class="panel">
             <div class="panelHeader">
               <h2>Database</h2>
-              <p>Start with the bundled example, create a blank workspace, or load an existing VitaMine file.</p>
+              <p id="databaseModeHelp">Start with the bundled example, create a blank workspace, or load an existing VitaMine file.</p>
             </div>
             <div class="databaseStatus">
               <span>Current database</span>
               <strong id="databaseName">Loading...</strong>
+              <button id="renameDatabase" type="button">Rename</button>
             </div>
             <div class="buttonRow">
               <button id="useExampleDatabase" type="button">Use Example</button>
@@ -46,12 +104,42 @@
               <button id="loadDatabase" type="button">Load Existing</button>
               <input id="databaseFileInput" type="file" accept=".vitamine,.sqlite,.db,application/vnd.sqlite3,application/octet-stream" hidden>
             </div>
+            <dialog id="newDatabaseDialog" class="databaseDialog">
+              <form id="newDatabaseForm" class="databaseDialogPanel">
+                <div class="dialogHeader">
+                  <h2>New Blank Database</h2>
+                  <button id="closeNewDatabaseDialog" type="button" aria-label="Close new database dialog">Close</button>
+                </div>
+                <label id="newDatabaseNameField">Database name
+                  <input id="newDatabaseName" autocomplete="off" value="workspace">
+                </label>
+                <p id="newDatabaseError" class="fieldError" hidden></p>
+                <div class="formActions">
+                  <button type="submit">Create</button>
+                </div>
+              </form>
+            </dialog>
+            <dialog id="renameDatabaseDialog" class="databaseDialog">
+              <form id="renameDatabaseForm" class="databaseDialogPanel">
+                <div class="dialogHeader">
+                  <h2>Rename Database</h2>
+                  <button id="closeRenameDatabaseDialog" type="button" aria-label="Close rename database dialog">Close</button>
+                </div>
+                <label id="renameDatabaseNameField">Database name
+                  <input id="renameDatabaseName" autocomplete="off">
+                </label>
+                <p id="renameDatabaseError" class="fieldError" hidden></p>
+                <div class="formActions">
+                  <button type="submit">Rename</button>
+                </div>
+              </form>
+            </dialog>
           </section>
 
           <section class="panel">
             <div class="panelHeader">
               <h2>Import CV</h2>
-              <p>Drop a long CV, NIH biosketch, or both. The bundled local LLM can extract entries, person details, publications, and narrative text.</p>
+              <p>Drop a long CV, NIH biosketch, or both. VitaMine can extract entries, person details, publications, and narrative text.</p>
             </div>
             <div id="importCvDropzone" class="dropzone">
               <img class="dropzoneIcon" src="/static/assets/dropzone.png" alt="" aria-hidden="true">
@@ -59,7 +147,8 @@
               <span>DOCX, PDF, TXT, or Markdown</span>
             </div>
             <input id="cvImportFileInput" type="file" accept=".docx,.pdf,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown" multiple hidden>
-            <div class="grid two">
+            <p id="managedLlmNotice" class="fieldStatus" hidden>AI-assisted CV extraction is ready to use.</p>
+            <div id="cvImportSettingsControls" class="grid two">
               <label>LLM provider
                 <select id="cvImportProvider">
                   <option value="bundled_llama">Bundled Local LLM</option>
@@ -80,17 +169,26 @@
             </div>
             <div id="cvImportApiFields" class="grid two" hidden>
               <label id="cvImportApiBaseUrlField">API base URL<input id="cvImportApiBaseUrl" placeholder="https://api.openai.com/v1"></label>
-              <label id="cvImportApiModelField">Model<input id="cvImportApiModel" placeholder="gpt-4.1-mini"></label>
-              <label>API key<input id="cvImportApiKey" type="password" placeholder="Paste to set or replace"></label>
+              <label id="cvImportOpenAiModelField">OpenAI model
+                <select id="cvImportOpenAiModel">
+                  <option value="gpt-5.4-nano">GPT-5.4 nano (reasoning, lowest current cost)</option>
+                  <option value="gpt-4.1-mini">GPT-4.1 mini (fast, lower cost)</option>
+                  <option value="gpt-4.1">GPT-4.1 (higher quality)</option>
+                  <option value="gpt-4o-mini">GPT-4o mini</option>
+                  <option value="gpt-4o">GPT-4o</option>
+                  <option value="custom">Custom...</option>
+                </select>
+              </label>
+              <label id="cvImportApiModelField">Custom model<input id="cvImportApiModel" placeholder="gpt-4.1-mini"></label>
+              <label>API key<input id="cvImportApiKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste to set or replace"></label>
               <span id="cvImportKeyStatus" class="fieldStatus"></span>
             </div>
-            <pre id="cvImportOutput" class="logBox">No CV import run in this session.</pre>
           </section>
 
           <section class="panel">
             <div class="panelHeader">
               <h2>Metrics</h2>
-              <p>Quick overview of publication data and export readiness.</p>
+              <p>A profile-style overview of your publication record and its reach.</p>
             </div>
             <div id="metricsGrid" class="metricsGrid"></div>
             <div class="subPanel">
@@ -108,8 +206,7 @@
               </div>
               <div class="metricToolbar">
                 <input id="journalMetricSearch" type="search" placeholder="Filter venues">
-                <button id="fetchJournalMetrics" type="button">Fetch OpenAlex Metrics</button>
-                <button id="saveJournalMetrics" type="button">Save IFs</button>
+                <span class="fieldStatus">OpenAlex metrics refresh automatically after publication imports. Manual edits save when changed.</span>
               </div>
               <div id="journalMetricEditor" class="metricEditor"></div>
             </div>
@@ -123,58 +220,94 @@
               <p>Pull publication metadata from connected researcher services into the local VitaMine file.</p>
             </div>
             <form id="connectionsForm" class="connectionsForm">
-              <label>ORCID iD<input id="connectionOrcid" placeholder="0000-0000-0000-0000"></label>
-              <label>Zotero API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
-              <label>Zotero library
-                <select id="connectionZoteroLibrary">
-                  <option value="">Auto-detect from key</option>
-                </select>
-              </label>
-              <label>Zotero source
-                <select id="connectionZoteroSource">
-                  <option value="my_publications">My Publications</option>
-                  <option value="library">Whole library</option>
-                  <option value="collection">Collection</option>
-                </select>
-              </label>
-              <label id="connectionZoteroCollectionWrap">Collection
-                <select id="connectionZoteroCollection"></select>
-              </label>
-              <label>Publication source policy
-                <select id="publicationSourcePolicy">
-                  <option value="zotero_primary_orcid_validation">Zotero primary, ORCID validation</option>
-                  <option value="orcid_primary_zotero_validation">ORCID primary, Zotero validation</option>
-                  <option value="zotero_only">Zotero only</option>
-                  <option value="orcid_only">ORCID only</option>
-                </select>
-              </label>
+              <section class="connectionService" aria-labelledby="orcidConnectionTitle">
+                <div class="connectionServiceHeader">
+                  <span class="orcidIdMark" aria-hidden="true">iD</span>
+                  <div>
+                    <h3 id="orcidConnectionTitle">ORCID</h3>
+                    <p>Link and verify the researcher identity used for this CV.</p>
+                  </div>
+                </div>
+                <label>ORCID iD
+                  <span class="linkedInput">
+                    <input id="connectionOrcid" autocomplete="off" placeholder="0000-0000-0000-0000" readonly>
+                    <button id="linkOrcid" class="orcidLinkButton" type="button">
+                      <span class="orcidIdMark" aria-hidden="true">iD</span>
+                      <span>Link ORCID</span>
+                    </button>
+                  </span>
+                </label>
+                <p class="connectionServiceHint">Secure ORCID sign-in verifies your iD as part of linking it.</p>
+              </section>
+
+              <section class="connectionService" aria-labelledby="zoteroConnectionTitle">
+                <div class="connectionServiceHeader">
+                  <span class="zoteroMark" aria-hidden="true">Z</span>
+                  <div>
+                    <h3 id="zoteroConnectionTitle">Zotero</h3>
+                    <p>Choose the library and records VitaMine should import.</p>
+                  </div>
+                </div>
+                <div class="connectionFields">
+                  <label id="connectionZoteroKeyWrap">API key<input id="connectionZoteroKey" type="password" placeholder="Paste to set or replace"></label>
+                  <label>Library
+                    <select id="connectionZoteroLibrary">
+                      <option value="">Auto-detect from key</option>
+                    </select>
+                  </label>
+                  <label>Source
+                    <select id="connectionZoteroSource">
+                      <option value="my_publications">My Publications</option>
+                      <option value="library">Whole library</option>
+                      <option value="collection">Collection</option>
+                    </select>
+                  </label>
+                  <label id="connectionZoteroCollectionWrap">Collection
+                    <select id="connectionZoteroCollection"></select>
+                  </label>
+                </div>
+                <div class="buttonRow zoteroActions">
+                  <button id="connectZotero" type="button">Connect Zotero</button>
+                  <button id="disconnectZotero" type="button" hidden>Disconnect Zotero</button>
+                  <button id="testZoteroConnection" type="button" title="Check access and refresh the list of available Zotero libraries">Refresh libraries</button>
+                  <button id="loadZoteroCollections" type="button">Load collections</button>
+                </div>
+                <span id="connectionStatus" class="connectionServiceStatus"></span>
+              </section>
+
               <div class="buttonRow connectionActions">
-                <button type="submit">Save Connections</button>
-                <button id="connectZotero" type="button">Connect Zotero</button>
-                <button id="testZoteroConnection" type="button">Test Link</button>
-                <button id="loadZoteroCollections" type="button">Load Collections</button>
-                <span id="connectionStatus"></span>
+                <button type="submit">Save connection settings</button>
               </div>
             </form>
-            <div class="buttonRow">
-              <button id="syncSourcesDashboard" type="button">Sync Sources</button>
-              <button id="syncZoteroDashboard" type="button">Sync Zotero</button>
-              <button id="syncOrcidDashboard" type="button">Sync ORCID</button>
-              <button id="enrichDoiDashboard" type="button">Enrich DOI Metadata</button>
-              <button id="maintainPubsDashboard" type="button">Apply Journal Metrics / Clean</button>
-            </div>
-            <pre id="syncOutput" class="logBox">No sync run in this session.</pre>
           </section>
 
           <section class="panel collaborationPanel">
             <div class="panelHeader">
-              <h2>Collaboration Map</h2>
-              <p>OpenAlex coauthor institutions linked to the researcher’s institution.</p>
+              <h2>World Map</h2>
+              <div class="dashboardMapToggle" role="group" aria-label="World map data">
+                <button type="button" data-dashboard-map-mode="collaborations" aria-pressed="true">Coauthors</button>
+                <button type="button" data-dashboard-map-mode="citations" aria-pressed="false">Citations</button>
+              </div>
+              <p>Explore coauthor institutions or the affiliations of researchers who cite your work.</p>
             </div>
             <div id="collaborationMap" class="collaborationMap" role="img" aria-label="World map of collaboration institutions"></div>
             <div class="mapSummary">
               <div id="collaborationMapStats" class="miniList"></div>
               <div id="collaborationCountries" class="miniList"></div>
+            </div>
+            <div class="citationProfile" aria-label="Citation profile from current publications">
+              <div class="citationProfileHeader">
+                <h3>Citation Profile</h3>
+                <div class="citationProfileActions">
+                  <span id="citationProfileCoverage"></span>
+                  <button id="exploreCitations" type="button">Explore citations</button>
+                  <button id="exploreCitationNetwork" type="button">Citation network</button>
+                </div>
+              </div>
+              <div class="citationProfileBody">
+                <div id="citationProfileTable" class="citationProfileTable"></div>
+                <div id="citationProfileChart" class="citationProfileChart"></div>
+              </div>
             </div>
           </section>
         </div>
@@ -184,62 +317,103 @@
 
     <section id="exportsView" class="view" role="tabpanel" aria-labelledby="exportsTab">
       <section id="exportsPanel" class="panel">
-        <div class="panelHeader">
-          <h2>Exports</h2>
-          <p>Build CV variants from the curated database.</p>
+        <div class="panelHeader exportLibraryHeader">
+          <div>
+            <h2>Export a CV</h2>
+            <p>Choose a format and create an editable Word document.</p>
+          </div>
+          <div class="exportHeaderControls">
+            <label class="exportLanguageControl">Language
+              <select id="exportLanguage">
+                <option value="en">English</option>
+                <option id="homeLanguageOption" value="secondary">Deutsch</option>
+              </select>
+            </label>
+            <label class="exportCitationControl">Citation style
+              <select id="exportCitationStyle"></select>
+              <span class="citationAttribution">Alternative styles use <a href="https://citationstyles.org/" target="_blank" rel="noopener">Citation Style Language</a>.</span>
+            </label>
+          </div>
         </div>
         <div class="exportControls">
-          <label>Language
-            <select id="exportLanguage">
-              <option value="en">English</option>
-              <option id="homeLanguageOption" value="de">Deutsch</option>
-            </select>
+          <label>Find a format
+            <input id="exportFormatSearch" type="search" placeholder="Search formats">
           </label>
+          <div id="exportFormatCount" class="libraryCount" aria-live="polite"></div>
         </div>
-        <div class="exportList">
-          <article class="exportCard">
-            <h3>Tabular One Page CV</h3>
-            <p>One-page DOCX with a tightly curated publication list.</p>
-            <div class="buttonRow">
-              <button id="buildUltraDashboard" type="button">Build</button>
-              <a id="openUltraDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
-              <a id="openUltraDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
-              <a id="openUltraDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
+        <details class="promptExportPanel">
+          <summary>Tailor an export with instructions</summary>
+          <div class="promptExportBody">
+            <div class="promptExportIntro">
+              <div>
+                <h3>Prompt-guided export</h3>
+                <p>Ask Vitamine to choose publications and interpret length or emphasis requirements. You can review the plan before exporting.</p>
+              </div>
+              <label>Format
+                <select id="promptExportFormat"></select>
+              </label>
             </div>
-          </article>
-          <article class="exportCard">
-            <h3>Short CV</h3>
-            <p>Compact PDF/HTML export with a separate selected-publications list.</p>
+            <label>Instructions
+              <textarea id="promptExportInstructions" rows="5" placeholder="Keep the CV to two pages, include no more than 10 publications, prefer recent first- or last-author work with high impact factors, include the paper first-authored by Marie Curie, use APA 7th edition for citations, and add hyperlinks to the DOIs."></textarea>
+            </label>
             <div class="buttonRow">
-              <button id="buildShortDashboard" type="button">Build</button>
-              <a id="openShortDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
-              <a id="openShortDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
-              <a id="openShortDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
+              <button id="createPromptExportPlan" type="button">Create export plan</button>
+              <button id="clearPromptExportPlan" class="quietButton" type="button" hidden>Clear plan</button>
             </div>
-          </article>
-          <article class="exportCard">
-            <h3>Long CV</h3>
-            <p>Current long CV builder. This will become the Harvard-style export.</p>
-            <div id="longPublicationCategories" class="checkboxStack compact"></div>
-            <div class="buttonRow">
-              <button id="buildLongDashboard" type="button">Build</button>
-              <a id="openLongDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
-              <a id="openLongDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
-              <a id="openLongDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
+            <div id="promptExportPlan" class="promptExportPlan" hidden></div>
+          </div>
+        </details>
+
+        <section class="templateImportPanel" aria-labelledby="templateImportHeading">
+          <div class="templateImportIntro">
+            <div>
+              <h3 id="templateImportHeading">Learn a format from your Word CV</h3>
+              <p>Drop a DOCX here. VitaMine keeps its Word-native layout, removes recognized CV content into private placeholders, and classifies it as Long, Short, Ultrashort, or Biosketch.</p>
             </div>
-          </article>
-          <article class="exportCard">
-            <h3>NIH Biosketch</h3>
-            <p>Biosketch export with current Contributions to Science.</p>
-            <div class="buttonRow">
-              <button id="buildBiosketchDashboard" type="button">Build</button>
-              <a id="openBiosketchDashboardDocx" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View DOCX</a>
-              <a id="openBiosketchDashboardHtml" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View HTML</a>
-              <a id="openBiosketchDashboardPdf" class="disabledLink" aria-disabled="true" tabindex="-1" target="_blank">View PDF</a>
+            <label>Template name
+              <input id="customTemplateName" maxlength="100" placeholder="e.g. Faculty application CV">
+            </label>
+          </div>
+          <div id="customTemplateDropzone" class="templateDropzone" tabindex="0" role="button" aria-controls="customTemplateFileInput">
+            <svg class="wordTemplateIcon" viewBox="0 0 48 56" aria-hidden="true" focusable="false">
+              <path class="wordTemplatePage" d="M12 2h21l11 11v39a2 2 0 0 1-2 2H12a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"></path>
+              <path class="wordTemplateFold" d="M33 2v11h11"></path>
+              <path class="wordTemplateLine" d="M28 23h10M28 29h10M28 35h8"></path>
+              <rect class="wordTemplateBadge" x="2" y="19" width="29" height="27" rx="3"></rect>
+              <path class="wordTemplateLetter" d="m8 26 3.2 13h3.4l2.2-8.1L19 39h3.4l3.3-13h-3.2l-2 9-2.3-9h-2.8l-2.3 9-2-9H8Z"></path>
+            </svg>
+            <div>
+              <strong>Drop a Word CV to add its format</strong>
+              <span id="customTemplateFileLabel">DOCX only · up to 20 MB</span>
             </div>
-          </article>
+            <button id="chooseCustomTemplateFile" type="button">Choose Word document</button>
+            <input id="customTemplateFileInput" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+          </div>
+          <p id="customTemplateStatus" class="fieldStatus" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="formatShelf" aria-labelledby="installedFormatsHeading">
+          <div class="formatShelfHeader">
+            <h3 id="installedFormatsHeading">Your formats</h3>
+          </div>
+          <div id="installedExportFormats" class="formatGrid"></div>
+        </section>
+
+        <section class="formatShelf localFormatShelf" aria-labelledby="localFormatsHeading">
+          <div class="formatShelfHeader">
+            <h3 id="localFormatsHeading">More formats</h3>
+          </div>
+          <div id="availableExportFormats" class="formatGrid"></div>
+          <p id="availableFormatsEmpty" class="emptyState" hidden>No more formats match.</p>
+        </section>
+
+        <div id="exportResult" class="exportResult" hidden>
+          <div>
+            <strong id="exportResultTitle">Your Word document is ready</strong>
+            <span id="exportOutput"></span>
+          </div>
+          <a id="exportResultLink" class="buttonLink" href="#" target="_blank" rel="noopener">Open Word document</a>
         </div>
-        <pre id="exportOutput" class="logBox">No export run in this session.</pre>
       </section>
     </section>
 
@@ -270,6 +444,15 @@
             <label>Start<input name="start_date" id="entryStart"></label>
             <label>End<input name="end_date" id="entryEnd"></label>
           </div>
+          <label id="entryGrantStatusField" hidden>Grant status
+            <select name="grant_status" id="entryGrantStatus">
+              <option value="planned">Planned</option>
+              <option value="submitted">Submitted</option>
+              <option value="rejected">Rejected</option>
+              <option value="funded">Funded</option>
+              <option value="past">Past</option>
+            </select>
+          </label>
           <fieldset>
             <legend>English</legend>
             <label>Title<input name="title" id="entryTitle"></label>
@@ -279,8 +462,12 @@
             <label>Amount<input name="amount" id="entryAmount"></label>
             <label>Description<textarea name="description" id="entryDescription" rows="6"></textarea></label>
           </fieldset>
+          <div class="entryTranslationControls" aria-label="Translate this entry">
+            <button id="translateEntryToAdditional" type="button">Translate English → additional language</button>
+            <button id="translateEntryToEnglish" type="button">Translate additional language → English</button>
+          </div>
           <fieldset>
-            <legend>German</legend>
+            <legend id="additionalLanguageLegend">Deutsch</legend>
             <label>Title<input name="title_de" id="entryTitleDe"></label>
             <label>Organization<input name="organization_de" id="entryOrganizationDe"></label>
             <label>Location<input name="location_de" id="entryLocationDe"></label>
@@ -299,20 +486,78 @@
             <label><input type="checkbox" id="includeBiosketch"> Biosketch</label>
           </div>
           <div class="formActions">
-            <button type="submit">Save</button>
             <button id="deleteEntry" type="button">Delete</button>
           </div>
         </form>
       </div>
     </section>
 
+    <section id="inboxView" class="view" role="tabpanel" aria-labelledby="inboxTab">
+      <section class="panel">
+        <div class="panelHeader">
+          <h2>Inbox</h2>
+          <p>Review imported candidates and conservative CV cleanup suggestions. Applying a cleanup item records an audit entry; publication changes are marked for a future optional ORCID sync.</p>
+        </div>
+        <div class="toolbar inboxToolbar">
+          <select id="inboxStatusFilter">
+            <option value="pending">Pending</option>
+            <option value="accepted">Accepted</option>
+            <option value="rejected">Rejected</option>
+            <option value="skipped">Skipped</option>
+            <option value="all">All</option>
+          </select>
+          <select id="inboxTypeFilter">
+            <option value="all">All types</option>
+            <option value="entry">Entries</option>
+            <option value="publication">Publications</option>
+            <option value="person">Person fields</option>
+            <option value="identifier">Identifiers</option>
+            <option value="narrative_report">Narrative</option>
+            <option value="contribution">Contributions</option>
+            <option value="cleanup_suggestion">Cleanup suggestions</option>
+            <option value="metadata_update">Metadata updates</option>
+          </select>
+          <button id="selectInboxVisible" type="button">Select Visible</button>
+          <button id="acceptInboxSelected" type="button">Accept Checked</button>
+          <button id="rejectInboxSelected" type="button">Reject Checked</button>
+          <button id="restoreInboxSelected" type="button">Restore Checked</button>
+          <button id="resolveInboxPublications" type="button">Resolve DOI / Title</button>
+          <button id="acceptHighConfidenceInbox" type="button">Accept High Confidence</button>
+          <button id="rejectDuplicateInbox" type="button">Reject Duplicates</button>
+        </div>
+        <div class="inboxLegend" aria-label="Import inbox confidence color legend">
+          <span><i class="confidence-low" aria-hidden="true"></i>Low confidence: check carefully</span>
+          <span><i class="confidence-medium" aria-hidden="true"></i>Medium confidence: likely, but review</span>
+          <span><i class="confidence-high" aria-hidden="true"></i>High confidence: likely correct</span>
+        </div>
+        <div id="inboxList" class="inboxList"></div>
+      </section>
+    </section>
+
     <section id="personView" class="view" role="tabpanel" aria-labelledby="personTab">
+      <section class="personPortraitPanel" aria-labelledby="personPortraitHeading">
+        <div class="personPortraitPreview">
+          <img id="personPortraitImage" alt="" hidden>
+          <span id="personPortraitPlaceholder" aria-hidden="true">Portrait</span>
+        </div>
+        <div class="personPortraitCopy">
+          <h2 id="personPortraitHeading">Profile picture</h2>
+          <p>Larger JPEG or PNG pictures are resized automatically and stored as an optimized PNG inside this VitaMine database. The public profile and future portrait-based exports can reuse it.</p>
+          <div class="buttonRow">
+            <label class="buttonLike" for="personPortraitInput">Choose picture</label>
+            <input id="personPortraitInput" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" hidden>
+            <button id="removePersonPortrait" type="button" hidden>Remove picture</button>
+          </div>
+          <p id="personPortraitStatus" class="fieldStatus" role="status" aria-live="polite">JPEG or PNG, up to 25 MB. Saved as PNG.</p>
+        </div>
+      </section>
       <form id="personForm" class="personGrid">
         <label>Full name<input name="full_name"></label>
         <label>Display name<input name="display_name"></label>
         <label>Degrees<input name="degrees"></label>
         <label>Position title<input name="position_title"></label>
         <label>Native / Second CV Language<input id="homeLanguageLabel" maxlength="40" value="Deutsch"></label>
+        <label>Language code<input id="homeLanguageCode" maxlength="12" value="de" placeholder="e.g. de, fr, es"></label>
         <label>Office address<input name="office_address"></label>
         <label>Home address<input name="home_address"></label>
         <label>Work phone<input name="work_phone"></label>
@@ -320,34 +565,44 @@
         <label>Place of birth<input name="place_of_birth"></label>
         <label>eRA Commons<input name="era_commons"></label>
         <fieldset class="ownInstitutionFields">
-          <legend>Map Institution</legend>
-          <label>Institution<input name="own_institution_name" placeholder="University Hospital Cologne"></label>
-          <label>Country<input name="own_institution_country" placeholder="Germany"></label>
-          <label>Country code<input name="own_institution_country_code" placeholder="DE"></label>
-          <label>Latitude<input name="own_institution_latitude" type="number" step="0.000001" placeholder="50.9242"></label>
-          <label>Longitude<input name="own_institution_longitude" type="number" step="0.000001" placeholder="6.9184"></label>
+          <legend>Map institution</legend>
+          <label>Institution<input name="own_institution_name" placeholder="Researcher’s institution"></label>
+          <label>Country<input name="own_institution_country" placeholder="Country"></label>
+          <label>Country code<input name="own_institution_country_code" placeholder="ISO code"></label>
+          <label>Latitude<input name="own_institution_latitude" type="number" step="0.000001" placeholder="Latitude"></label>
+          <label>Longitude<input name="own_institution_longitude" type="number" step="0.000001" placeholder="Longitude"></label>
+          <p class="ownInstitutionHint">Map coordinates are added automatically after you save an institution or connect ORCID.</p>
         </fieldset>
-        <button type="submit">Save Person</button>
+        <p id="personAutosaveStatus" class="personAutosaveStatus" data-state="saved" role="status" aria-live="polite">Changes save automatically</p>
       </form>
       <section class="identifierPanel">
-        <div class="panelHeader compactHeader">
-          <h2>Identifiers</h2>
-          <p>Researcher profiles and persistent IDs stored in the local CV database.</p>
-        </div>
-        <form id="identifierForm" class="identifierForm">
-          <input id="identifierId" type="hidden">
-          <label>Platform<input id="identifierPlatform" placeholder="ORCID"></label>
-          <label>Type<input id="identifierType" placeholder="ORCID iD"></label>
-          <label>Value<input id="identifierValue" placeholder="0000-0000-0000-0000"></label>
-          <label>URL<input id="identifierUrl" placeholder="https://orcid.org/..."></label>
-          <label class="identifierNotesField">Notes<textarea id="identifierNotes" rows="2"></textarea></label>
-          <div class="buttonRow">
-            <button type="submit">Save Identifier</button>
-            <button id="newIdentifier" type="button">New</button>
-            <button id="deleteIdentifier" type="button">Delete</button>
+        <div class="panelHeader compactHeader identifierPanelHeader">
+          <div>
+            <h2>Identifiers</h2>
+            <p>Researcher profiles and persistent IDs stored in the CV database.</p>
           </div>
-        </form>
+          <button id="addIdentifier" type="button">Add identifier</button>
+        </div>
         <div id="personIdentifiers" class="identifierList"></div>
+        <dialog id="identifierDialog" class="identifierDialog">
+          <form id="identifierForm" class="identifierForm">
+            <div class="dialogHeader">
+              <h2 id="identifierDialogTitle">Add identifier</h2>
+              <button id="closeIdentifierDialog" type="button" aria-label="Close identifier editor">Close</button>
+            </div>
+            <input id="identifierId" type="hidden">
+            <label>Platform<input id="identifierPlatform" placeholder="ORCID"></label>
+            <label>Type<input id="identifierType" placeholder="ORCID iD"></label>
+            <label>Value<input id="identifierValue" placeholder="0000-0000-0000-0000"></label>
+            <label>URL<input id="identifierUrl" placeholder="https://orcid.org/..."></label>
+            <label class="identifierNotesField">Notes<textarea id="identifierNotes" rows="3"></textarea></label>
+            <p id="identifierFormError" class="identifierFormError" role="alert" hidden></p>
+            <div class="formActions identifierFormActions">
+              <button id="deleteIdentifier" type="button" hidden>Delete</button>
+              <button type="submit">Save identifier</button>
+            </div>
+          </form>
+        </dialog>
       </section>
     </section>
 
@@ -355,8 +610,20 @@
       <div class="toolbar">
         <input id="pubSearch" type="search" placeholder="Search publications">
         <label class="inlineCheck"><input id="showSuppressedPubs" type="checkbox"> Show hidden/problem rows</label>
-        <button id="importPublicationIds" type="button" title="Import from DOI or PubMed IDs" aria-label="Import publications from DOI or PubMed IDs">Wand</button>
-        <button id="newPublication" type="button">New Publication</button>
+        <div id="publicationCategoryFilters" class="categoryFilters" aria-label="Publication categories"></div>
+        <button class="iconButton" id="importPublicationIds" type="button" title="Import from DOI or PubMed IDs" aria-label="Import publications from DOI or PubMed IDs">
+          <svg class="buttonIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72"></path>
+            <path d="m14 7 3 3"></path>
+            <path d="M5 6v4M19 14v4M10 2v2M7 8H3M21 16h-4M11 3H9"></path>
+          </svg>
+        </button>
+        <button class="iconButton" id="newPublication" type="button" title="New Publication" aria-label="New Publication">
+          <svg class="buttonIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M5 12h14"></path>
+            <path d="M12 5v14"></path>
+          </svg>
+        </button>
       </div>
       <div class="publicationWorkspace">
         <div class="publicationMainStack">
@@ -417,9 +684,13 @@
           <label>Authors<textarea id="publicationAuthors" rows="2"></textarea></label>
           <div class="grid two">
             <label>Year<input id="publicationYear"></label>
-            <label>Category<input id="publicationCategory" placeholder="peer_reviewed"></label>
+            <label>Category<select id="publicationCategory"></select></label>
           </div>
           <label>Venue<input id="publicationVenue"></label>
+          <div id="publicationVenuePropagation" class="publicationVenuePropagation" hidden>
+            <label class="inlineCheck"><input id="publicationApplyVenueToMatches" type="checkbox" disabled> Apply this canonical title to <span id="publicationVenueMatchCount">matching publications</span></label>
+            <small id="publicationVenuePropagationHint" class="fieldStatus">Checking the local journal catalog…</small>
+          </div>
           <div class="grid two">
             <label>DOI<input id="publicationDoi"></label>
             <label>PMID<input id="publicationPmid"></label>
@@ -449,10 +720,147 @@
           <div class="formActions">
             <button id="resolvePublicationIdentifiers" type="submit">Import</button>
           </div>
-          <pre id="publicationIdentifierResults" class="logBox">No identifier import run in this session.</pre>
         </form>
       </dialog>
     </section>
+
+    <dialog id="importReviewDialog" class="importReviewDialog">
+      <form method="dialog" class="importReviewPanel">
+        <div class="dialogHeader">
+          <h2>Review Import</h2>
+          <button id="closeImportReview" type="button" aria-label="Close import review">Close</button>
+        </div>
+        <div id="importReviewSummary" class="importReviewSummary"></div>
+        <div id="importReviewList" class="inboxList compactInbox"></div>
+        <div class="formActions">
+          <button id="acceptReviewSelected" type="button">Accept Checked</button>
+          <button id="rejectReviewSelected" type="button">Reject Checked</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="profileSyncDialog" class="importReviewDialog profileSyncDialog">
+      <form method="dialog" class="importReviewPanel">
+        <div class="dialogHeader">
+          <h2 id="profileSyncTitle">Profile sync</h2>
+          <button id="closeProfileSync" type="button" aria-label="Close profile sync">Close</button>
+        </div>
+        <p id="profileSyncDescription" class="profileSyncDescription"></p>
+        <div id="profileSyncList" class="inboxList compactInbox"></div>
+        <div class="formActions">
+          <button id="skipProfileSync" type="button">Skip</button>
+          <button id="applyProfileSync" type="button">Update profile</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="llmOnboardingDialog" class="onboardingDialog llmDialogWithCoach">
+      <form id="llmOnboardingForm" class="onboardingDialogPanel">
+        <img class="llmSetupCoach" src="/static/assets/onboarding_llm_config.png" alt="Configure the LLM to work on your CV">
+        <div class="onboardingDialogHero">
+          <span class="onboardingLemon" aria-hidden="true">🍋</span>
+          <div>
+            <span class="eyebrow">Your CV is ready to import</span>
+            <h2>Choose how VitaMine should read it</h2>
+            <p>A language model helps VitaMine recognize CV sections and review the extracted information. Choose a private local model or connect a model service.</p>
+          </div>
+        </div>
+        <details class="onboardingOpenAiSetup" open>
+          <summary>Connect OpenAI</summary>
+          <label>OpenAI API key
+            <input id="onboardingApiKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="sk-…">
+          </label>
+          <p class="fieldStatus">The key is stored locally on this Mac and is sent only to OpenAI when VitaMine makes an API request.</p>
+        </details>
+        <button id="showOnboardingAdvancedConfig" type="button">Advanced configuration</button>
+        <button id="showOnboardingHowto" type="button" aria-expanded="false">How to set up an API key</button>
+        <div id="onboardingHowto" class="onboardingHowto" hidden>
+          <p>For OpenAI, sign in to the API platform, create a key, copy it once, and paste it above. API usage is billed separately from a ChatGPT subscription.</p>
+          <a href="https://platform.openai.com/settings/organization/api-keys" target="_blank" rel="noopener">Open OpenAI API key settings</a>
+        </div>
+        <p id="llmOnboardingError" class="fieldError" hidden></p>
+        <div class="onboardingDialogActions">
+          <button id="useLocalOnboardingModel" class="onboardingPrimaryAction" type="button">Use private local model</button>
+          <button id="saveOnboardingApiKey" type="submit" disabled>Use OpenAI API</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="llmAdvancedDialog" class="onboardingDialog llmDialogWithCoach advancedLlmDialog">
+      <form id="llmAdvancedForm" class="onboardingDialogPanel">
+        <img class="llmSetupCoach" src="/static/assets/onboarding_llm_config.png" alt="Configure the LLM to work on your CV">
+        <div class="dialogHeader">
+          <div>
+            <span class="eyebrow">Advanced configuration</span>
+            <h2>Configure your language model</h2>
+          </div>
+          <button id="closeLlmAdvancedDialog" type="button" aria-label="Back to simple model setup">Back</button>
+        </div>
+        <p>Choose the provider VitaMine should use to read your queued CV.</p>
+        <label>Language model provider
+          <select id="onboardingProvider">
+            <option value="bundled_llama">Bundled local model</option>
+            <option value="none">Heuristic extraction only</option>
+            <option value="ollama">Local Ollama</option>
+            <option value="openai">OpenAI API</option>
+            <option value="openai_compatible">OpenAI-compatible API</option>
+          </select>
+        </label>
+        <div id="onboardingOllamaFields" class="grid two" hidden>
+          <label>Ollama URL<input id="onboardingOllamaUrl" value="http://127.0.0.1:11434"></label>
+          <label>Ollama model<input id="onboardingOllamaModel" value="llama3.1:8b"></label>
+        </div>
+        <div id="onboardingApiFields" class="grid two" hidden>
+          <label id="onboardingApiBaseUrlField">API base URL<input id="onboardingApiBaseUrl" value="https://api.openai.com/v1"></label>
+          <label>Model<input id="onboardingApiModel" value="gpt-4.1-mini"></label>
+          <label>API key<input id="onboardingAdvancedApiKey" type="password" autocomplete="off" autocapitalize="none" spellcheck="false"></label>
+        </div>
+        <p id="llmAdvancedStatus" class="fieldStatus" aria-live="polite"></p>
+        <div class="onboardingDialogActions">
+          <button id="testOnboardingAdvancedConfig" type="button">Test connection</button>
+          <button id="saveOnboardingAdvancedConfig" class="onboardingPrimaryAction" type="submit">Proceed</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="orcidLinkDialog" class="onboardingDialog">
+      <form id="orcidLinkForm" class="onboardingDialogPanel">
+        <div class="dialogHeader">
+          <h2>Link your ORCID</h2>
+          <button id="closeOrcidLinkDialog" type="button" aria-label="Close ORCID dialog">Close</button>
+        </div>
+        <section id="orcidOauthPanel" class="orcidOauthPanel" hidden>
+          <p id="orcidOauthDescription">Sign in at ORCID to verify your iD and return securely to VitaMine.</p>
+          <button id="connectOrcidOAuth" class="orcidOauthButton" type="button">
+            <span class="orcidIdMark" aria-hidden="true">iD</span>
+            <span id="connectOrcidOAuthLabel">Connect your ORCID iD</span>
+          </button>
+          <p id="orcidOauthStatus" class="orcidOauthStatus" aria-live="polite"></p>
+        </section>
+        <details id="orcidManualFallback" class="orcidManualFallback" open>
+          <summary>Use a manual ORCID iD instead</summary>
+          <div class="orcidManualFields">
+            <p>Search the public ORCID directory using information from this CV, or paste an iD directly.</p>
+            <button id="discoverOrcid" type="button">Find from imported CV</button>
+            <div id="orcidDiscoveryResults" class="orcidDiscoveryResults"></div>
+            <label>ORCID iD<input id="orcidLinkValue" autocomplete="off" placeholder="0000-0000-0000-0000"></label>
+            <div class="formActions">
+              <button type="submit">Link ORCID manually</button>
+            </div>
+          </div>
+        </details>
+        <p id="orcidLinkError" class="fieldError" hidden></p>
+      </form>
+    </dialog>
+
+    <aside id="onboardingCoach" class="onboardingCoach" hidden aria-live="polite">
+      <img id="onboardingCoachImage" src="/static/assets/onboarding_arrow.png" alt="">
+      <div class="onboardingCoachCopy">
+        <strong id="onboardingCoachTitle"></strong>
+        <span id="onboardingCoachText"></span>
+      </div>
+      <button id="skipOnboardingStep" class="onboardingCoachClose" type="button" aria-label="Skip this onboarding step" title="Skip this step">×</button>
+    </aside>
 
     <section id="narrativeView" class="view" role="tabpanel" aria-labelledby="narrativeTab">
       <form id="narrativeForm" class="narrativeEditor">
@@ -470,6 +878,16 @@
           <button type="submit">Save Narrative</button>
         </div>
       </form>
+      <section class="r4riEditor" aria-labelledby="r4riEditorTitle">
+        <div>
+          <h2 id="r4riEditorTitle">R4RI contribution sections</h2>
+          <p>These four narratives are used by the Narrative Research CV export. They remain your own editable statements.</p>
+        </div>
+        <div id="r4riContributionFields" class="r4riContributionFields"></div>
+        <div class="formActions">
+          <button id="saveR4riContributions" type="button">Save R4RI contributions</button>
+        </div>
+      </section>
     </section>
 
     <section id="summaryView" class="view" role="tabpanel" aria-labelledby="summaryTab">
@@ -477,6 +895,97 @@
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260708-export-links"></script>
+  <dialog id="workspacePlusDialog" class="workspacePlusDialog">
+    <div class="workspacePlusPanel">
+      <div class="workspacePlusHeading">
+        <div><span>VitaMine+</span><h2>More confidence, less maintenance.</h2></div>
+        <button id="closeWorkspacePlusDialog" type="button" aria-label="Close">×</button>
+      </div>
+      <p id="workspacePlusStatus"></p>
+      <ul><li>Intelligent CV import and enrichment</li><li>Custom Word export templates</li><li>Full collaboration-network map details</li><li>Future intelligent sync features</li></ul>
+      <div class="workspacePlusPrice"><strong>€25</strong><span>per year</span></div>
+      <a href="mailto:hello@vitamine.cloud?subject=Upgrade%20to%20VitaMine%2B">Upgrade to VitaMine+</a>
+    </div>
+  </dialog>
+
+  <dialog id="openAiEnrichmentConsentDialog" class="openAiEnrichmentConsentDialog" aria-labelledby="openAiEnrichmentConsentTitle">
+    <section class="openAiEnrichmentConsentPanel">
+      <div class="dialogHeader">
+        <div>
+          <p class="openAiEnrichmentConsentEyebrow">Your permission is needed</p>
+          <h2 id="openAiEnrichmentConsentTitle">Send CV content to OpenAI?</h2>
+        </div>
+        <button id="cancelOpenAiEnrichmentConsent" type="button" aria-label="Cancel enrichment">×</button>
+      </div>
+      <p>To enrich this CV, VitaMine will send selected CV text to OpenAI through VitaMine’s managed OpenAI account. CV content can include personal data.</p>
+      <p>Only continue if you are authorised to share this content. Your versioned permission is recorded and can be withdrawn in Account Settings at any time; withdrawing it blocks future managed-AI requests.</p>
+      <p class="openAiEnrichmentConsentLinks"><a href="/privacy" target="_blank" rel="noopener">Read the privacy policy</a><a href="/terms" target="_blank" rel="noopener">Terms of service</a></p>
+      <div class="formActions openAiEnrichmentConsentActions">
+        <button id="cancelOpenAiEnrichmentConsentAction" type="button">Cancel</button>
+        <button id="acceptOpenAiEnrichmentConsent" type="button">Agree and enrich CV</button>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="citationExplorerDialog" class="citationExplorerDialog">
+    <section class="citationExplorerPanel">
+      <div class="dialogHeader">
+        <div><h2>Explore citations</h2><p id="citationExplorerSummary"></p></div>
+        <button id="closeCitationExplorer" type="button" aria-label="Close citation explorer">Close</button>
+      </div>
+      <div class="citationExplorerControls">
+        <div class="citationSortControl" role="group" aria-label="Publication order">
+          <span>Order by</span>
+          <button type="button" data-citation-sort="citations" aria-pressed="true">Citations</button>
+          <button type="button" data-citation-sort="year" aria-pressed="false">Year</button>
+        </div>
+        <label class="inlineCheck"><input id="citationFirstLastOnly" type="checkbox"> First/last-author papers only</label>
+      </div>
+      <p id="citationExplorerHint" class="citationExplorerHint"></p>
+      <div id="citationExplorerList" class="citationExplorerList" aria-live="polite"></div>
+      <div id="citationCitedByLoading" class="citationPaperLoader" hidden role="status" aria-live="polite">
+        <span class="citationPaperSpinner" aria-hidden="true"></span>
+        <strong>Finding citing papers…</strong>
+        <span>Loading current results from OpenAlex</span>
+      </div>
+    </section>
+  </dialog>
+
+  <dialog id="citationCitedByDialog" class="citationExplorerDialog citationCitedByDialog">
+    <section class="citationExplorerPanel">
+      <div class="dialogHeader">
+        <div><h2>Cited by</h2><p id="citationCitedByTitle"></p></div>
+        <button id="closeCitationCitedBy" type="button" aria-label="Close citing works">Close</button>
+      </div>
+      <section class="paperCitationHistory">
+        <h3>Citations per year</h3>
+        <div id="paperCitationHistoryChart"></div>
+      </section>
+      <p id="citationCitedBySummary" class="citationExplorerHint"></p>
+      <div id="citationCitedByList" class="citationExplorerList citationCitedByList" aria-live="polite"></div>
+      <div class="formActions"><button id="loadMoreCitingWorks" type="button" hidden>Load more</button></div>
+    </section>
+  </dialog>
+
+  <dialog id="hIndexHistoryDialog" class="citationExplorerDialog hIndexHistoryDialog">
+    <section class="citationExplorerPanel compactCitationPanel">
+      <div class="dialogHeader">
+        <div><h2 id="hIndexHistoryTitle">h-index over time</h2><p>Calculated from the annual OpenAlex citation counts saved for this CV.</p></div>
+        <button id="closeHIndexHistory" type="button" aria-label="Close h-index history">Close</button>
+      </div>
+      <div id="hIndexHistoryChart" class="hIndexHistoryChart"></div>
+    </section>
+  </dialog>
+
+  <dialog id="citationNetworkDialog" class="citationExplorerDialog citationNetworkDialog">
+    <section class="citationExplorerPanel citationNetworkPanel">
+      <div class="dialogHeader"><div><h2>Citation network</h2><p id="citationNetworkSummary">A bounded, cached view of papers that cite your most-cited work.</p></div><div class="citationNetworkControls"><span class="citationNetworkScope" role="group" aria-label="Citation network detail"><button type="button" data-citation-network-scope="focused" aria-pressed="true">Focused</button><button type="button" data-citation-network-scope="all" aria-pressed="false">All papers</button></span><button id="citationNetworkZoomOut" type="button" aria-label="Zoom out">−</button><button id="citationNetworkZoomIn" type="button" aria-label="Zoom in">+</button><button id="citationNetworkFit" type="button">Fit graph</button><button id="citationNetworkReset" type="button">Reset layout</button><button id="closeCitationNetwork" type="button">Close</button></div></div>
+      <div id="citationNetworkGraph" class="citationNetworkGraph"></div>
+      <div class="formActions"><button id="refreshCitationNetwork" type="button">Refresh network from OpenAlex</button></div>
+    </section>
+  </dialog>
+
+  <script src="/static/vendor/force-graph-1.51.4.min.js?v=20260806"></script>
+  <script src="/static/app.js?v=20260907-compact-research-cv"></script>
 </body>
 </html>

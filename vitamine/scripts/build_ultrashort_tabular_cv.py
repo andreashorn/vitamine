@@ -12,9 +12,19 @@ import sqlite3
 from pathlib import Path
 
 from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.shared import Inches, Pt, RGBColor
 
-from vitamine.scripts.export_utils import compile_typst_if_available
 from vitamine.paths import OUTPUT, PACKAGE, ROOT, active_db_path, output_ref
+from vitamine.citation_styles import configured_citation_style, format_publication
+from vitamine.scripts.export_publication_selection import selected_or_fallback_publications
+from vitamine.scripts.export_utils import (
+    configure_researcher_name,
+    researcher_name_pattern,
+    sanitize_docx_compatibility_markup,
+)
 
 DB = active_db_path()
 DEFAULT_TEMPLATE = PACKAGE / "onepage_tabular" / "ultrashort_tabular_template.docx"
@@ -120,6 +130,12 @@ def sentence_part(value: str | None) -> str:
     return value if not value or value.endswith((".", "?", "!")) else f"{value}."
 
 
+def compact_authors(value: str | None, maximum: int = 3) -> str:
+    authors = citation_text(value)
+    parts = [part.strip() for part in authors.split(",") if part.strip()]
+    return ", ".join(parts[:maximum]) + ", et al." if len(parts) > maximum else authors
+
+
 def normalize_citation_spacing(value: str | None) -> str:
     value = clean(value).strip()
     value = re.sub(r"\s+([,.;:])", r"\1", value)
@@ -135,7 +151,7 @@ def typst_rich_text(value: str | None, *, bold_names: bool = False, underline: b
     if bold_names:
         pieces = []
         cursor = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+        for match in researcher_name_pattern().finditer(value):
             if match.start() > cursor:
                 before = value[cursor : match.start()]
                 stripped = before.rstrip()
@@ -267,8 +283,29 @@ def range_years(start: str | None, end: str | None) -> str:
 
 
 def clear_paragraph(paragraph) -> None:
-    for run in list(paragraph.runs):
-        paragraph._p.remove(run._r)
+    paragraph_properties = paragraph._p.pPr
+    for child in list(paragraph._p):
+        if paragraph_properties is None or child is not paragraph_properties:
+            paragraph._p.remove(child)
+
+
+def remove_numbering(paragraph) -> None:
+    paragraph_properties = paragraph._p.get_or_add_pPr()
+    numbering = paragraph_properties.find(qn("w:numPr"))
+    if numbering is not None:
+        paragraph_properties.remove(numbering)
+
+
+def set_run_font(run, *, bold: bool = False, italic: bool = False, underline: bool = False, color: str = "111111") -> None:
+    run.font.name = "Arial"
+    run._element.get_or_add_rPr().rFonts.set(qn("w:ascii"), "Arial")
+    run._element.rPr.rFonts.set(qn("w:hAnsi"), "Arial")
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+    run.font.size = Pt(10.15)
+    run.bold = bold
+    run.italic = italic
+    run.underline = underline
+    run.font.color.rgb = RGBColor.from_string(color)
 
 
 def add_text(paragraph, parts: list[tuple[str, bool]]) -> None:
@@ -296,57 +333,94 @@ def set_cell(cell, text: str, *, bold: bool = False) -> None:
         clear_paragraph(extra)
 
 
+def set_repeat_table_header(row) -> None:
+    row_properties = row._tr.get_or_add_trPr()
+    header = row_properties.find(qn("w:tblHeader"))
+    if header is None:
+        header = OxmlElement("w:tblHeader")
+        row_properties.append(header)
+    header.set(qn("w:val"), "true")
+
+
 def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: bool = False, underline: bool = False) -> None:
     if not value:
         return
     if not bold_names:
-        run = paragraph.add_run(value)
-        run.italic = italic
-        run.underline = underline
+        set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
         return
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
-            run = paragraph.add_run(value[cursor : match.start()])
-            run.italic = italic
-            run.underline = underline
-        run = paragraph.add_run(match.group(0))
-        run.bold = True
-        run.italic = italic
-        run.underline = underline
+            set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
+        set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
         cursor = match.end()
     if cursor < len(value):
-        run = paragraph.add_run(value[cursor:])
-        run.italic = italic
-        run.underline = underline
+        set_run_font(paragraph.add_run(value[cursor:]), italic=italic, underline=underline)
 
 
-def add_publication_docx_text(paragraph, row: sqlite3.Row) -> None:
-    clear_paragraph(paragraph)
-    parts: list[tuple[str, bool, bool, bool]] = []
-    authors = citation_text(row["authors"])
-    if authors:
-        parts.append((sentence_part(authors), True, False, False))
-    title = citation_text(row["title"])
-    if title:
-        parts.append((sentence_part(title), False, False, False))
-    venue = citation_text(row["venue"])
-    if venue:
-        venue = venue.title() if venue.isupper() else venue
-        parts.append((sentence_part(venue), False, True, True))
-    year_value = citation_text(row["year"])
-    if year_value:
-        parts.append((sentence_part(year_value), False, False, False))
-    impact = impact_factor_label(row)
-    if impact:
-        parts.append((sentence_part(impact), False, False, False))
+def add_hyperlink(paragraph, url: str, display: str) -> None:
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for attribute in ("ascii", "hAnsi", "eastAsia"):
+        fonts.set(qn(f"w:{attribute}"), "Arial")
+    properties.append(fonts)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), "20")
+    properties.append(size)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    properties.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(underline)
+    run.append(properties)
+    text_element = OxmlElement("w:t")
+    text_element.text = display
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def publication_link(row: sqlite3.Row) -> str:
     doi = citation_text(row["doi"])
     if doi:
-        parts.append((sentence_part(f"doi:{doi}"), False, False, False))
-    for index, (value, bold_names, italic, underline) in enumerate(parts):
-        if index:
-            paragraph.add_run(" ")
-        add_docx_piece(paragraph, value, bold_names=bold_names, italic=italic, underline=underline)
+        return doi if doi.startswith("http") else f"https://doi.org/{doi}"
+    url = citation_text(row["url"] if "url" in row.keys() else "")
+    return url if not url or url.startswith("http") else f"https://{url}"
+
+
+def add_publication_docx_text(paragraph, index: int, row: sqlite3.Row) -> None:
+    clear_paragraph(paragraph)
+    remove_numbering(paragraph)
+    paragraph.paragraph_format.left_indent = Inches(0.42)
+    paragraph.paragraph_format.first_line_indent = Inches(-0.32)
+    paragraph.paragraph_format.tab_stops.add_tab_stop(Inches(0.42))
+    set_run_font(paragraph.add_run(f"{index}.\t"))
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        add_docx_piece(paragraph, alternate, bold_names=True)
+        return
+    authors = compact_authors(row["authors"])
+    title = citation_text(row["title"])
+    venue = citation_text(row["venue"])
+    year_value = citation_text(row["year"])
+    if authors:
+        add_docx_piece(paragraph, authors, bold_names=True)
+    if year_value:
+        add_docx_piece(paragraph, f" ({year_value})." if authors else sentence_part(year_value))
+    if title:
+        add_docx_piece(paragraph, " " + sentence_part(title))
+    if venue:
+        venue = venue.title() if venue.isupper() else venue
+        add_docx_piece(paragraph, " " + sentence_part(venue), italic=True, underline=True)
+    link = publication_link(row)
+    if link:
+        add_docx_piece(paragraph, " ")
+        add_hyperlink(paragraph, link, link)
 
 
 def citation_parts(citation: str, bold_terms: tuple[str, ...]) -> list[tuple[str, bool]]:
@@ -375,6 +449,7 @@ def row_by_title(con: sqlite3.Connection, section_key: str, title: str) -> sqlit
         SELECT *
         FROM cv_entries
         WHERE section_key = ? AND title = ?
+          AND (section_key != 'funding' OR COALESCE(grant_status, 'funded') IN ('funded', 'past'))
         ORDER BY id DESC
         LIMIT 1
         """,
@@ -458,6 +533,9 @@ def award_rows(con: sqlite3.Connection) -> list[str]:
 
 
 def publication_citation(row: sqlite3.Row) -> str:
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        return alternate
     if clean(row["short_citation"]):
         return clean(row["short_citation"])
     authors = clean(row["authors"])
@@ -465,6 +543,7 @@ def publication_citation(row: sqlite3.Row) -> str:
         parts = [part.strip() for part in authors.split(",")]
         if len(parts) > 3:
             authors = ", ".join(parts[:3]) + ", et al."
+        authors = authors.rstrip(" .")
     citation_parts_out = [part for part in [authors, clean(row["title"])] if part]
     citation = ". ".join(citation_parts_out)
     if clean(row["venue"]):
@@ -477,18 +556,7 @@ def publication_citation(row: sqlite3.Row) -> str:
 
 
 def selected_publications(con: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
-    return con.execute(
-        """
-        SELECT *
-        FROM publications
-        WHERE include_ultrashort = 1
-          AND COALESCE(suppress_display, 0) = 0
-          AND category = 'peer_reviewed'
-        ORDER BY COALESCE(ultrashort_selected_order, selected_order, 999), CAST(year AS INTEGER) DESC, id DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+    return selected_or_fallback_publications(con, profile="ultrashort", limit=limit)
 
 
 def publication_limit(con: sqlite3.Connection, fallback: int = 10) -> int:
@@ -503,6 +571,7 @@ def load_tabular_data(publication_limit_value: int) -> tuple[sqlite3.Row | None,
         positions = position_rows(con)
         awards = award_rows(con)
         publications = selected_publications(con, publication_limit_value)
+    configure_researcher_name(person)
     return person, edu, positions, awards, publications
 
 
@@ -591,23 +660,8 @@ def build_all(template: Path, publication_limit_value: int, lang: str = "en") ->
     LANG = "de" if lang == "de" else "en"
     stem = output_stem()
     docx_path = OUTPUT / f"{stem}.docx"
-    html_path = OUTPUT / f"{stem}.html"
-    typ_path = OUTPUT / f"{stem}.typ"
-    pdf_path = OUTPUT / f"{stem}.pdf"
     build(template, docx_path, publication_limit_value)
-    html_path.write_text(build_html_document(publication_limit_value), encoding="utf-8")
-    typ_path.write_text(build_typst_document(publication_limit_value), encoding="utf-8")
-    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
-    result = {
-        "docx": f"output/{output_ref(docx_path)}",
-        "html": f"output/{output_ref(html_path)}",
-        "typst": f"output/{output_ref(typ_path)}",
-    }
-    if pdf:
-        result["pdf"] = f"output/{output_ref(pdf)}"
-    if warning:
-        result["warning"] = warning
-    return result
+    return {"docx": f"output/{output_ref(docx_path)}"}
 
 
 def build(template: Path, output: Path, publication_limit: int) -> Path:
@@ -617,12 +671,13 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
         positions = position_rows(con)
         awards = award_rows(con)
         publications = selected_publications(con, publication_limit)
+    configure_researcher_name(person)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(template, output)
     doc = Document(output)
     doc.core_properties.author = person["display_name"] or person["full_name"]
-    doc.core_properties.title = "Andreas Horn - Tabular CV"
+    doc.core_properties.title = f"{person['display_name'] or person['full_name']} - Tabular CV"
     doc.core_properties.subject = "One-page tabular CV"
 
     set_simple_paragraph(doc.paragraphs[0], f"Prof. Dr. {person['display_name']}, {person['degrees']}", bold=True)
@@ -634,12 +689,13 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
             ("\nUniversity Hospital Cologne, Germany", False),
         ],
     )
-    set_simple_paragraph(doc.paragraphs[2], "Education and Training", bold=True)
-    set_simple_paragraph(doc.paragraphs[3], "Positions and Scientific Appointments", bold=True)
-    set_simple_paragraph(doc.paragraphs[4], "Awards, Research Funding and Presentations", bold=True)
-    set_simple_paragraph(doc.paragraphs[11], "Selected Publications", bold=True)
+    set_simple_paragraph(doc.paragraphs[2], tr("Education and Training", "Ausbildung"), bold=True)
+    set_simple_paragraph(doc.paragraphs[3], tr("Positions and Scientific Appointments", "Positionen und wissenschaftliche Berufungen"), bold=True)
+    set_simple_paragraph(doc.paragraphs[4], tr("Awards, Research Funding and Presentations", "Auszeichnungen, Forschungsförderung und Vorträge"), bold=True)
+    set_simple_paragraph(doc.paragraphs[11], tr("Selected Publications", "Ausgewählte Publikationen"), bold=True)
 
     education_column_count = len(doc.tables[0].columns)
+    set_repeat_table_header(doc.tables[0].rows[0])
     for row_idx, row in enumerate(edu):
         if education_column_count == 3:
             row_values = (row[0], row[1], row[2])
@@ -647,18 +703,31 @@ def build(template: Path, output: Path, publication_limit: int) -> Path:
             row_values = row
         for col_idx, value in enumerate(row_values):
             set_cell(doc.tables[0].cell(row_idx, col_idx), value, bold=(row_idx == 0))
+    for row_idx in range(len(edu), len(doc.tables[0].rows)):
+        for col_idx in range(education_column_count):
+            set_cell(doc.tables[0].cell(row_idx, col_idx), "")
+    set_repeat_table_header(doc.tables[1].rows[0])
     for row_idx, row in enumerate(positions):
         for col_idx, value in enumerate(row):
             set_cell(doc.tables[1].cell(row_idx, col_idx), value, bold=(row_idx == 0))
-    for paragraph, line in zip(doc.paragraphs[5:11], awards):
+    for row_idx in range(len(positions), len(doc.tables[1].rows)):
+        for col_idx in range(len(doc.tables[1].columns)):
+            set_cell(doc.tables[1].cell(row_idx, col_idx), "")
+    award_paragraphs = doc.paragraphs[5:11]
+    for paragraph, line in zip(award_paragraphs, awards):
         add_text(paragraph, split_year_prefix(line))
+    for paragraph in award_paragraphs[len(awards) :]:
+        clear_paragraph(paragraph)
+        remove_numbering(paragraph)
     publication_paragraphs = doc.paragraphs[12 : 12 + publication_limit]
-    for paragraph, publication in zip(publication_paragraphs, publications):
-        add_publication_docx_text(paragraph, publication)
+    for index, (paragraph, publication) in enumerate(zip(publication_paragraphs, publications), 1):
+        add_publication_docx_text(paragraph, index, publication)
     for paragraph in publication_paragraphs[len(publications) :]:
         clear_paragraph(paragraph)
+        remove_numbering(paragraph)
 
     doc.save(output)
+    sanitize_docx_compatibility_markup(output)
     return output
 
 

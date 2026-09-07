@@ -1,0 +1,33 @@
+[Unit]
+Description=VitaMine invite-only publishing service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vitamine-deploy
+Group=vitamine-deploy
+WorkingDirectory=/srv/vitamine-cloud/current
+EnvironmentFile=/etc/vitamine-cloud.env
+Environment=VITAMINE_DEPLOYMENT_CONFIG=/srv/vitamine-cloud/current/deploy/strato/vitamine-hosted.json
+Environment=VITAMINE_SESSION_ROOT=/run/vitamine-cloud/sessions
+Environment=VITAMINE_JOB_ROOT=/var/lib/vitamine-cloud/jobs
+Environment=VITAMINE_JOB_WORK_ROOT=/run/vitamine-cloud/jobs
+Environment=VITAMINE_DISABLE_JOB_RUNNER=1
+ExecStart=/srv/vitamine-cloud/venv/bin/uvicorn vitamine.cloud_app:app --host 127.0.0.1 --port 8766
+Restart=on-failure
+RestartSec=5
+StateDirectory=vitamine-cloud
+RuntimeDirectory=vitamine-cloud
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vitamine-cloud /run/vitamine-cloud
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

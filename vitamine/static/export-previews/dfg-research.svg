@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a four-page research funding CV</title>
+  <rect width="240" height="320" rx="8" fill="#e8edeb"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="44" y="35" width="84" height="9" rx="2" fill="#1d3e38"/>
+  <rect x="44" y="51" width="136" height="4" fill="#6a7f79"/>
+  <g fill="#397264"><rect x="44" y="76" width="80" height="6"/><rect x="44" y="137" width="102" height="6"/><rect x="44" y="209" width="91" height="6"/></g>
+  <g fill="#98a5a0"><rect x="44" y="92" width="34" height="4"/><rect x="87" y="92" width="109" height="4"/><rect x="44" y="104" width="34" height="4"/><rect x="87" y="104" width="101" height="4"/><rect x="44" y="116" width="34" height="4"/><rect x="87" y="116" width="96" height="4"/><rect x="44" y="154" width="152" height="4"/><rect x="44" y="165" width="143" height="4"/><rect x="44" y="176" width="149" height="4"/><rect x="44" y="187" width="126" height="4"/><rect x="44" y="226" width="152" height="4"/><rect x="52" y="237" width="144" height="4"/><rect x="52" y="248" width="137" height="4"/><rect x="52" y="259" width="147" height="4"/><rect x="52" y="270" width="132" height="4"/></g>
+  <rect x="162" y="279" width="34" height="8" rx="4" fill="#dbe9e4"/>
+</svg>

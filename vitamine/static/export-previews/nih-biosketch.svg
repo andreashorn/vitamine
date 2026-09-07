@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" role="img" aria-labelledby="title">
+  <title id="title">Preview of a structured scientific biosketch</title>
+  <rect width="240" height="320" rx="8" fill="#e8edf1"/>
+  <rect x="28" y="18" width="184" height="284" rx="2" fill="#fff"/>
+  <rect x="73" y="34" width="94" height="8" rx="2" fill="#172033"/>
+  <g fill="#687386"><rect x="44" y="56" width="143" height="4"/><rect x="44" y="68" width="126" height="4"/></g>
+  <rect x="44" y="86" width="152" height="50" fill="none" stroke="#7f8a98"/>
+  <path d="M44 100h152M116 86v50M156 86v50" stroke="#7f8a98"/>
+  <g fill="#9aa5b4"><rect x="50" y="92" width="52" height="3"/><rect x="50" y="108" width="57" height="3"/><rect x="122" y="108" width="26" height="3"/><rect x="162" y="108" width="26" height="3"/><rect x="50" y="121" width="48" height="3"/></g>
+  <g fill="#172033"><rect x="44" y="153" width="95" height="6"/><rect x="44" y="214" width="121" height="6"/><rect x="44" y="262" width="110" height="6"/></g>
+  <g fill="#8d99a6"><rect x="44" y="169" width="152" height="4"/><rect x="44" y="180" width="149" height="4"/><rect x="44" y="191" width="137" height="4"/><rect x="44" y="230" width="152" height="4"/><rect x="44" y="241" width="139" height="4"/><rect x="44" y="278" width="152" height="4"/><rect x="44" y="289" width="131" height="4"/></g>
+</svg>

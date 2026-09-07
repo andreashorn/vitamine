@@ -1,0 +1,14 @@
+[Unit]
+Description=Monitor and clean VitaMine mailbox Trash and Junk
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vitamine-cloud.env
+ExecStart=/usr/bin/python3 /srv/vitamine-cloud/current/deploy/strato/mailbox-maintenance.py
+User=vitamine-deploy
+Group=vitamine-deploy
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+

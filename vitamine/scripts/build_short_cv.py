@@ -15,10 +15,17 @@ from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Inches, Pt, RGBColor
 
-from vitamine.scripts.export_utils import compile_typst_if_available
 from vitamine.paths import OUTPUT, ROOT, active_db_path, output_ref
+from vitamine.citation_styles import configured_citation_style, format_publication
+from vitamine.scripts.export_publication_selection import selected_or_fallback_publications
+from vitamine.scripts.export_utils import (
+    configure_researcher_name,
+    researcher_name_pattern,
+    sanitize_docx_compatibility_markup,
+)
 
 DB = active_db_path()
 LANG = "en"
@@ -135,6 +142,12 @@ def sentence_part(value: str) -> str:
     return value if not value or value.endswith((".", "?", "!")) else f"{value}."
 
 
+def compact_authors(value: str | None, maximum: int = 3) -> str:
+    authors = citation_cell(value)
+    parts = [part.strip() for part in authors.split(",") if part.strip()]
+    return ", ".join(parts[:maximum]) + ", et al." if len(parts) > maximum else authors
+
+
 def impact_factor_label(row: sqlite3.Row) -> str:
     value = row["impact_factor"] if "impact_factor" in row.keys() else None
     if value in (None, ""):
@@ -154,7 +167,7 @@ def typst_rich_text(value: str | None, *, bold_names: bool = False, underline: b
     if bold_names:
         pieces = []
         cursor = 0
-        for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+        for match in researcher_name_pattern().finditer(value):
             if match.start() > cursor:
                 before = value[cursor : match.start()]
                 stripped = before.rstrip()
@@ -272,22 +285,12 @@ def load_data() -> tuple[sqlite3.Row | None, list[sqlite3.Row], list[sqlite3.Row
             SELECT *
             FROM cv_entries
             WHERE include_short=1
+              AND (section_key != 'funding' OR COALESCE(grant_status, 'funded') IN ('funded', 'past'))
             ORDER BY section_key, start_date, id
             """
         ).fetchall()
-        pubs = con.execute(
-            """
-            SELECT *
-            FROM publications
-            WHERE include_short=1
-              AND COALESCE(suppress_display, 0)=0
-              AND category='peer_reviewed'
-            ORDER BY COALESCE(short_selected_order, selected_order, 999), CAST(year AS INTEGER) DESC, id DESC
-            LIMIT ?
-            """
-            ,
-            (publication_limit,),
-        ).fetchall()
+        pubs = selected_or_fallback_publications(con, profile="short", limit=publication_limit)
+    configure_researcher_name(person)
     return person, entries, pubs
 
 
@@ -314,7 +317,7 @@ def grouped_sections(entries: list[sqlite3.Row]) -> list[tuple[str, list[sqlite3
 
 def build_html() -> str:
     person, entries, pubs = load_data()
-    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "VitaMine CV"
     title = clean(person["position_title"] if person else "")
     body = [f"<h1>{html.escape(name)}</h1>"]
     if title:
@@ -354,7 +357,7 @@ def build_html() -> str:
 
 def build_typst() -> str:
     person, entries, pubs = load_data()
-    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "VitaMine CV"
     title = clean(person["position_title"] if person else "")
     lines = [
         '#set page(width: 8.5in, height: 11in, margin: (left: 0.65in, right: 0.65in, top: 0.65in, bottom: 0.58in))',
@@ -450,7 +453,7 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
         set_run_font(paragraph.add_run(value), italic=italic, underline=underline)
         return
     cursor = 0
-    for match in re.finditer(r"\b(?:Andreas\s+Horn|Horn\s+A\.?|Horn)\b", value):
+    for match in researcher_name_pattern().finditer(value):
         if match.start() > cursor:
             set_run_font(paragraph.add_run(value[cursor : match.start()]), italic=italic, underline=underline)
         set_run_font(paragraph.add_run(match.group(0)), bold=True, italic=italic, underline=underline)
@@ -459,15 +462,44 @@ def add_docx_piece(paragraph, value: str, *, bold_names: bool = False, italic: b
         set_run_font(paragraph.add_run(value[cursor:]), italic=italic, underline=underline)
 
 
+def add_hyperlink(paragraph, url: str, display: str) -> None:
+    relationship_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    properties = OxmlElement("w:rPr")
+    fonts = OxmlElement("w:rFonts")
+    for attribute in ("ascii", "hAnsi", "eastAsia"):
+        fonts.set(qn(f"w:{attribute}"), "Arial")
+    properties.append(fonts)
+    size = OxmlElement("w:sz")
+    size.set(qn("w:val"), "16")
+    properties.append(size)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    properties.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    properties.append(underline)
+    run.append(properties)
+    text_element = OxmlElement("w:t")
+    text_element.text = display
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
 def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
     paragraph.clear()
     paragraph.paragraph_format.space_before = Pt(0)
     paragraph.paragraph_format.space_after = Pt(0)
     paragraph.paragraph_format.line_spacing = 1.03
+    alternate = format_publication(row, configured_citation_style())
+    if alternate:
+        add_docx_piece(paragraph, alternate, bold_names=True)
+        return
     parts: list[tuple[str, bool, bool, bool]] = []
-    authors = citation_cell(row["authors"])
-    if authors:
-        parts.append((sentence_part(authors), True, False, False))
+    authors = compact_authors(row["authors"])
     title = citation_cell(row["title"])
     if title:
         parts.append((sentence_part(title), False, False, False))
@@ -476,18 +508,23 @@ def add_publication_docx(paragraph, row: sqlite3.Row) -> None:
         venue = venue.title() if venue.isupper() else venue
         parts.append((sentence_part(venue), False, True, True))
     year = citation_cell(row["year"])
-    if year:
-        parts.append((sentence_part(year), False, False, False))
-    impact = impact_factor_label(row)
-    if impact:
-        parts.append((sentence_part(impact), False, False, False))
+    if authors and year:
+        parts.insert(0, (f"{authors} ({year}).", True, False, False))
+    elif authors:
+        parts.insert(0, (sentence_part(authors), True, False, False))
+    elif year:
+        parts.insert(0, (sentence_part(year), False, False, False))
     doi = citation_cell(row["doi"])
-    if doi:
-        parts.append((sentence_part(f"doi:{doi}"), False, False, False))
     for index, (value, bold_names, italic, underline) in enumerate(parts):
         if index:
             set_run_font(paragraph.add_run(" "))
         add_docx_piece(paragraph, value, bold_names=bold_names, italic=italic, underline=underline)
+    link = doi if doi.startswith("http") else f"https://doi.org/{doi}" if doi else clean(row["url"] if "url" in row.keys() else "")
+    if link:
+        if not link.startswith("http"):
+            link = f"https://{link}"
+        set_run_font(paragraph.add_run(" "))
+        add_hyperlink(paragraph, link, link)
 
 
 def add_compact_heading(doc: Document, label: str) -> None:
@@ -581,7 +618,7 @@ def add_publications_table(doc: Document, pubs: list[sqlite3.Row]) -> None:
 
 def build_docx(path: Path) -> Path:
     person, entries, pubs = load_data()
-    name = clean(person["display_name"] if person else "") or "Andreas Horn"
+    name = clean(person["display_name"] if person else "") or clean(person["full_name"] if person else "") or "VitaMine CV"
     title = clean(person["position_title"] if person else "")
     doc = Document()
     section = doc.sections[0]
@@ -623,6 +660,7 @@ def build_docx(path: Path) -> Path:
     doc.core_properties.author = name
     path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(path)
+    sanitize_docx_compatibility_markup(path)
     return path
 
 
@@ -635,26 +673,9 @@ def build(lang: str = "en") -> dict[str, str]:
     LANG = "de" if lang == "de" else "en"
     OUTPUT.mkdir(parents=True, exist_ok=True)
     stem = output_stem()
-    html_path = OUTPUT / f"{stem}.html"
-    typ_path = OUTPUT / f"{stem}.typ"
-    pdf_path = OUTPUT / f"{stem}.pdf"
     docx_path = OUTPUT / f"{stem}.docx"
-    html_path.write_text(build_html(), encoding="utf-8")
-    typ_path.write_text(build_typst(), encoding="utf-8")
-    pdf, warning = compile_typst_if_available(typ_path, pdf_path, ROOT)
     docx = build_docx(docx_path)
-    result = {
-        "html": f"output/{output_ref(html_path)}",
-        "typst": f"output/{output_ref(typ_path)}",
-    }
-    if pdf:
-        result["pdf"] = f"output/{output_ref(pdf)}"
-    if docx:
-        result["docx"] = f"output/{output_ref(docx)}"
-    warnings = [item for item in (warning,) if item]
-    if warnings:
-        result["warning"] = " ".join(warnings)
-    return result
+    return {"docx": f"output/{output_ref(docx)}"}
 
 
 if __name__ == "__main__":

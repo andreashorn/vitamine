@@ -8,6 +8,10 @@ dist/
 *.spec.bak
 output/*
 !output/.gitkeep
+/promo-video/node_modules/
+/promo-video/out/
+/promo-video/public/voiceover.aiff
+/promo-video/public/voiceover.m4a
 data/active_db.txt
 andreashorn.sqlite
 *.vitamine
@@ -17,6 +21,9 @@ data/*.sqlite-shm
 data/*.sqlite-wal
 data/*.vitamine-shm
 data/*.vitamine-wal
+*.sqlite-journal
+*.vitamine-journal
+**/Icon?
 .env
 *.gguf
 /data/cv-imports

@@ -1,0 +1,4 @@
+# Ubuntu packages required by the hosted VitaMine service.
+pandoc
+postgresql
+postgresql-contrib
